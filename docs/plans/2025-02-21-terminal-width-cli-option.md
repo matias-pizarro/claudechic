@@ -37,19 +37,32 @@ def test_cli_width_argument():
 
 Actually, since we can't easily unit test argparse without refactoring, let's add the feature directly with manual verification.
 
-**Step 2: Add the --width argument to argparse**
+**Step 2: Add the --width argument to argparse with validation**
 
-In `claudechic/__main__.py`, add after the `--dangerously-skip-permissions` argument:
+In `claudechic/__main__.py`, add a positive integer type validator and the argument:
 
 ```python
+def positive_int(value: str) -> int:
+    """Validate that value is a positive integer."""
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a valid integer")
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"width must be positive, got {ivalue}")
+    return ivalue
+
+# Add after the --dangerously-skip-permissions argument:
 parser.add_argument(
     "--width",
     "-w",
-    type=int,
+    type=positive_int,
     default=None,
-    help="Set terminal width for this session (e.g., 150)",
+    help="Set terminal width for this session (e.g., 150). Must be positive.",
 )
 ```
+
+This addresses roborev feedback: validate `--width` as a positive integer (`>=1`) to prevent invalid terminal sizing.
 
 **Step 3: Pass width to ChatApp**
 
@@ -126,13 +139,15 @@ git commit -m "feat: store terminal width in ChatApp"
 Replace `app.run()` with:
 
 ```python
-if args.width:
+if args.width is not None:
     app.run(size=(args.width, None))
 else:
     app.run()
 ```
 
 Note: Textual's `run(size=)` accepts `(width, height)` tuple. Using `None` for height means auto-detect from terminal.
+
+This addresses roborev feedback: use explicit `is not None` check instead of relying on truthiness.
 
 **Step 2: Verify manually**
 
@@ -199,19 +214,41 @@ git commit -m "docs: document --width CLI option"
 
 **Step 1: Write integration test**
 
-Add test that verifies the app respects width setting:
+Add test that verifies the CLI parsing and app construction:
 
 ```python
+from unittest.mock import patch, MagicMock
+import pytest
+
+def test_cli_width_parsing():
+    """Test that --width CLI argument is parsed and passed to ChatApp."""
+    from claudechic.__main__ import positive_int
+
+    # Test validation
+    assert positive_int("150") == 150
+    assert positive_int("1") == 1
+
+    with pytest.raises(Exception):  # argparse.ArgumentTypeError
+        positive_int("0")
+    with pytest.raises(Exception):
+        positive_int("-10")
+    with pytest.raises(Exception):
+        positive_int("abc")
+
+
 @pytest.mark.asyncio
-async def test_app_width_override():
-    """Test that --width flag affects app size."""
+async def test_app_width_stored():
+    """Test that ChatApp stores width parameter."""
     from claudechic.app import ChatApp
 
     app = ChatApp(width=150)
-    async with app.run_test(size=(150, 40)) as pilot:
-        # Verify app respects width
-        assert app.size.width == 150
+    assert app._width == 150
+
+    app_default = ChatApp()
+    assert app_default._width is None
 ```
+
+This addresses roborev feedback: test CLI parsing and that ChatApp receives the width parameter correctly, rather than relying solely on run_test's forced size.
 
 **Step 2: Run tests**
 
