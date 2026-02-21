@@ -1,4 +1,4 @@
-"""Configuration management for claudechic via ~/.claude/.claudechic.yaml."""
+"""Configuration management for claudechic-dev via ~/.claude/.claudechic-dev.yaml."""
 
 import os
 import tempfile
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import yaml
 
-CONFIG_PATH = Path.home() / ".claude" / ".claudechic.yaml"
-_OLD_CONFIG_PATH = Path.home() / ".claude" / "claudechic.yaml"
+CONFIG_PATH = Path.home() / ".claude" / ".claudechic-dev.yaml"
+_OLD_CONFIG_PATH = Path.home() / ".claude" / "claudechic-dev.yaml"
 
 
 def _load() -> tuple[dict, bool]:

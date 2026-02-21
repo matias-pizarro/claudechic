@@ -132,7 +132,7 @@ class ChatApp(App):
     UI integration with AgentManager.
     """
 
-    TITLE = "Claude Chic"
+    TITLE = "Claude Chic (Dev)"
     CSS_PATH = Path(__file__).parent / "styles.tcss"
 
     BINDINGS = [

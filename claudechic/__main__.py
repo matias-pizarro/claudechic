@@ -95,7 +95,7 @@ def main():
     from rich.console import Console
     from rich.control import Control
 
-    Console().control(Control.title(f"Claude Chic · {Path.cwd().name}"))
+    Console().control(Control.title(f"Claude Chic (Dev) · {Path.cwd().name}"))
 
     try:
         app = ChatApp(

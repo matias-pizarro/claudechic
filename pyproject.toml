@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claudechic"
+name = "claudechic-dev"
 dynamic = ["version"]
-description = "Claude Chic - A stylish terminal UI for Claude Code"
+description = "Claude Chic (Dev) - A stylish terminal UI for Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -37,7 +37,7 @@ Homepage = "https://github.com/mrocklin/claudechic"
 Repository = "https://github.com/mrocklin/claudechic"
 
 [project.scripts]
-claudechic = "claudechic.__main__:main"
+claudechic-dev = "claudechic.__main__:main"
 
 [dependency-groups]
 dev = [

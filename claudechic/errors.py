@@ -86,7 +86,7 @@ def setup_logging(level: int = logging.DEBUG) -> None:
 
     # File handler (if configured)
     log_file = CONFIG.get("logging", {}).get(
-        "file", str(Path.home() / "claudechic.log")
+        "file", str(Path.home() / "claudechic-dev.log")
     )
     if log_file:
         # Expand ~ in path (config may use ~/claudechic.log)
