@@ -775,3 +775,40 @@ async def test_stop_review_polling_unconditional(mock_sdk):
         fake_timer.stop.assert_called_once()
         assert app._review_poll_timer is None
         assert app._review_poll_agent_id is None
+
+
+# =============================================================================
+# CLI --width option tests
+# =============================================================================
+
+
+def test_cli_width_parsing():
+    """Test that positive_int validator works correctly."""
+    import argparse
+
+    from claudechic.__main__ import positive_int
+
+    # Test valid positive integers
+    assert positive_int("150") == 150
+    assert positive_int("1") == 1
+    assert positive_int("999") == 999
+
+    # Test invalid values
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int("-10")
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int("abc")
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int("12.5")
+
+
+@pytest.mark.asyncio
+async def test_app_width_stored(mock_sdk):
+    """Test that ChatApp stores width parameter."""
+    app = ChatApp(width=150)
+    assert app._width == 150
+
+    app_default = ChatApp()
+    assert app_default._width is None
