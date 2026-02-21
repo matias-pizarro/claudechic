@@ -107,7 +107,11 @@ def main():
             width=args.width,
         )
         if args.width is not None:
-            app.run(size=(args.width, None))
+            # Get terminal height for the size tuple (Textual requires both dimensions)
+            import shutil
+
+            _, term_height = shutil.get_terminal_size(fallback=(80, 24))
+            app.run(size=(args.width, term_height))
         else:
             app.run()
     except (KeyboardInterrupt, SystemExit):
