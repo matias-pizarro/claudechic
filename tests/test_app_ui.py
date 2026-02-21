@@ -812,3 +812,60 @@ async def test_app_width_stored(mock_sdk):
 
     app_default = ChatApp()
     assert app_default._width is None
+
+
+def test_main_calls_run_with_size_when_width_provided():
+    """Test that main() calls app.run(size=) when --width is provided."""
+    import sys
+    from unittest.mock import patch, MagicMock
+
+    # Mock sys.argv with --width option
+    test_argv = ["claudechic", "--width", "200"]
+
+    with (
+        patch.object(sys, "argv", test_argv),
+        patch("claudechic.__main__.ChatApp") as mock_app_class,
+        patch("shutil.get_terminal_size", return_value=(80, 30)),
+    ):
+        mock_app = MagicMock()
+        mock_app_class.return_value = mock_app
+
+        from claudechic.__main__ import main
+
+        main()
+
+        # Verify ChatApp was created with width=200
+        mock_app_class.assert_called_once()
+        _, kwargs = mock_app_class.call_args
+        assert kwargs.get("width") == 200
+
+        # Verify app.run was called with size=(200, 30)
+        mock_app.run.assert_called_once_with(size=(200, 30))
+
+
+def test_main_calls_run_without_size_when_no_width():
+    """Test that main() calls app.run() without size when --width is not provided."""
+    import sys
+    from unittest.mock import patch, MagicMock
+
+    # Mock sys.argv without --width option
+    test_argv = ["claudechic"]
+
+    with (
+        patch.object(sys, "argv", test_argv),
+        patch("claudechic.__main__.ChatApp") as mock_app_class,
+    ):
+        mock_app = MagicMock()
+        mock_app_class.return_value = mock_app
+
+        from claudechic.__main__ import main
+
+        main()
+
+        # Verify ChatApp was created with width=None
+        mock_app_class.assert_called_once()
+        _, kwargs = mock_app_class.call_args
+        assert kwargs.get("width") is None
+
+        # Verify app.run was called without size parameter
+        mock_app.run.assert_called_once_with()
