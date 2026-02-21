@@ -166,6 +166,7 @@ class ChatApp(App):
         remote_port: int = 0,
         skip_permissions: bool = False,
         theme_override: str | None = None,
+        width: int | None = None,
     ) -> None:
         super().__init__()
         self.scroll_sensitivity_y = 1.0  # Smoother scrolling (default is 2.0)
@@ -177,6 +178,7 @@ class ChatApp(App):
         self._remote_port = remote_port
         self._skip_permissions = skip_permissions
         self._theme_override = theme_override
+        self._width = width  # Terminal width override
         # Event queues for testing
         self.interactions: asyncio.Queue[PermissionRequest] = asyncio.Queue()
         self.completions: asyncio.Queue[ResponseComplete] = asyncio.Queue()
