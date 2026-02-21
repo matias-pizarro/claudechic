@@ -8,6 +8,7 @@ A stylish terminal UI for Claude Code, built with Textual and wrapping the `clau
 uv run claudechic
 uv run claudechic --resume     # Resume most recent session
 uv run claudechic -s <uuid>    # Resume specific session
+uv run claudechic --width 150  # Set terminal width to 150 columns
 ```
 
 Requires Claude Code to be logged in with a Max/Pro subscription (`claude /login`).

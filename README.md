@@ -25,6 +25,14 @@ pip install claudechic
 
 Requires Claude Code to be logged in (`claude /login`).
 
+## CLI Options
+
+- `--resume, -r`: Resume the most recent session
+- `--session, -s <uuid>`: Resume a specific session by ID
+- `--theme, -t <name>`: Use a specific theme (or list themes with `-t`)
+- `--width, -w <columns>`: Set terminal width for this session
+- `--dangerously-skip-permissions`: Auto-approve all tool uses (sandboxed environments only)
+
 ## Introduction Video
 
 [![Claude Chic Introduction](https://img.youtube.com/vi/2HcORToX5sU/maxresdefault.jpg)](https://www.youtube.com/watch?v=2HcORToX5sU)
