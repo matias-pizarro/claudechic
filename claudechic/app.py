@@ -132,7 +132,7 @@ class ChatApp(App):
     UI integration with AgentManager.
     """
 
-    TITLE = "Claude Chic (Dev)"
+    TITLE = "Claude Chic"
     CSS_PATH = Path(__file__).parent / "styles.tcss"
 
     BINDINGS = [
@@ -716,6 +716,11 @@ class ChatApp(App):
         """Handle chat screen ready - now safe to create agent and access widgets."""
         if self.agent_mgr is None:
             return
+
+        # Apply custom width if specified via --width CLI option
+        if self._width is not None:
+            chat_column = self.query_one("#chat-column")
+            chat_column.styles.max_width = self._width
 
         # Create initial agent (now that widgets are mounted)
         self.agent_mgr.create_unconnected(name=self._cwd.name, cwd=self._cwd)

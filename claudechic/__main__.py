@@ -95,7 +95,7 @@ def main():
     from rich.console import Console
     from rich.control import Control
 
-    Console().control(Control.title(f"Claude Chic (Dev) · {Path.cwd().name}"))
+    Console().control(Control.title(f"Claude Chic · {Path.cwd().name}"))
 
     try:
         app = ChatApp(
@@ -106,14 +106,7 @@ def main():
             theme_override=args.theme,
             width=args.width,
         )
-        if args.width is not None:
-            # Get terminal height for the size tuple (Textual requires both dimensions)
-            import shutil
-
-            _, term_height = shutil.get_terminal_size(fallback=(80, 24))
-            app.run(size=(args.width, term_height))
-        else:
-            app.run()
+        app.run()
     except (KeyboardInterrupt, SystemExit):
         pass
     except Exception:
