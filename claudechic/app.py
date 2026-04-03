@@ -2823,21 +2823,12 @@ class ChatApp(App):
             desc.split("·")[0].strip() if "·" in desc else active.get("displayName", "")
         )
         self.status_footer.model = model_name
-        # Set max_tokens on agent from model's display name or ID
+        # Set max_tokens on agent from model info
         agent = self._agent
         if agent:
-            from claudechic.formatting import parse_context_size
-
-            display_name = active.get("displayName", "")
-            context_size = parse_context_size(display_name)
-            if context_size is None:
-                # Try model ID (e.g., "claude-opus-4-6[1m]")
-                model_id = active.get("value", "")
-                context_size = parse_context_size(model_id)
-            if context_size:
-                agent.max_tokens = context_size
-                self.context_bar.max_tokens = context_size
-                self._update_sidebar_agent_context(agent)
+            self._set_agent_max_tokens(agent)
+            self.context_bar.max_tokens = agent.max_tokens
+            self._update_sidebar_agent_context(agent)
 
     def _update_sidebar_agent_context(self, agent: Agent) -> None:
         """Push agent's tokens/max_tokens and cwd to its sidebar item."""

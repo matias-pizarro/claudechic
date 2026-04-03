@@ -1,5 +1,6 @@
 """Agent sidebar widget for multi-agent management."""
 
+import os
 import re
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from textual.widgets import Static, Label, ListItem
 from rich.text import Text
 
 from claudechic.enums import AgentStatus
+from claudechic.formatting import MAX_CONTEXT_TOKENS, format_tokens
 from claudechic.widgets.primitives.button import Button
 
 
@@ -479,7 +481,7 @@ class AgentItem(SidebarItem):
         self.status = status
         self._cwd: str = ""
         self._tokens: int = 0
-        self._max_tokens: int = 200_000
+        self._max_tokens: int = MAX_CONTEXT_TOKENS
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="agent-top-row"):
@@ -503,8 +505,6 @@ class AgentItem(SidebarItem):
 
     def _render_cwd_label(self) -> Text:
         """Render the cwd row (dim, front-truncated)."""
-        import os
-
         cwd = self._cwd
         if not cwd:
             return Text("")
@@ -517,8 +517,6 @@ class AgentItem(SidebarItem):
 
     def _render_context_label(self) -> Text:
         """Render the context row: percentage and token counts."""
-        from claudechic.formatting import format_tokens
-
         pct = min(self._tokens / self._max_tokens, 1.0) if self._max_tokens else 0
         pct_str = f"{pct * 100:.0f}%"
 
