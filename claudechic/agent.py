@@ -184,6 +184,8 @@ class Agent:
         self.session_allowed_tools: set[str] = set()  # Tools allowed for this session
         self._pending_followup: str | None = None  # Auto-send after current response
         self.model: str | None = None  # Model override (None = SDK default)
+        self.tokens: int = 0  # Current context token usage
+        self.max_tokens: int = 200_000  # Context window size (updated from model info)
 
         # Worktree finish state (for /worktree finish flow)
         self.finish_state: FinishState | None = None
