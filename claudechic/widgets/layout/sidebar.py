@@ -510,18 +510,16 @@ class AgentItem(SidebarItem):
             return Text("")
         home = os.path.expanduser("~")
         if cwd.startswith(home):
-            cwd = "~" + cwd[len(home):]
+            cwd = "~" + cwd[len(home) :]
         if len(cwd) > self.max_cwd_length:
-            cwd = "\u2026" + cwd[-(self.max_cwd_length - 1):]
+            cwd = "\u2026" + cwd[-(self.max_cwd_length - 1) :]
         return Text(cwd, style="dim")
 
     def _render_context_label(self) -> Text:
         """Render the context row: percentage and token counts."""
         from claudechic.formatting import format_tokens
 
-        pct = (
-            min(self._tokens / self._max_tokens, 1.0) if self._max_tokens else 0
-        )
+        pct = min(self._tokens / self._max_tokens, 1.0) if self._max_tokens else 0
         pct_str = f"{pct * 100:.0f}%"
 
         if pct < 0.5:

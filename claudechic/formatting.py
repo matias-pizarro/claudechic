@@ -54,6 +54,7 @@ def parse_context_size(display_name: str) -> int | None:
 
     return None
 
+
 # Inter-agent message patterns
 # Matches ask_agent: [Question from agent 'X' - please respond...]
 _AGENT_QUESTION_RE = re.compile(
