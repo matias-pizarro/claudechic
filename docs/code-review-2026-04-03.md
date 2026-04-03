@@ -95,11 +95,10 @@ Three parallel review agents analyzed all 80+ Python source files (~11,159 lines
 - **Issue:** Every command showing output repeats: `ChatMessage(text)` → `msg.add_class("system-message")` → `chat_view.mount(msg)` → `chat_view.scroll_if_tailing()`.
 - **Fix:** Extract `chat_view.show_system_message(text)` helper. The same pattern also appears in `app.py:1369-1372`.
 
-### H10. `valid_models` set defined twice in commands.py
+### ~~H10. `valid_models` set defined twice in commands.py~~ ✅ FIXED (c1f1c2a)
 - **File:** `commands.py:225-226` and `commands.py:466-467`
 - **Category:** Reuse
-- **Issue:** `{"opus", "sonnet", "haiku"}` and identical error message copy-pasted in `handle_command` and `_handle_agent`.
-- **Fix:** Module-level `VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})`.
+- **Resolution:** Extracted `VALID_MODELS` frozenset constant, error messages auto-sync via `', '.join(sorted(VALID_MODELS))`.
 
 ### H11. `os.environ.get("EDITOR", "vi")` repeated 3 times
 - **File:** `app.py:1850`, `app.py:1897`, `app.py:1902`
@@ -131,11 +130,10 @@ Three parallel review agents analyzed all 80+ Python source files (~11,159 lines
 - **Issue:** Runs `git worktree list` synchronously. Within `get_finish_info()` alone, called 3 times (directly, via `get_main_worktree()`, via `get_parent_branch()`). In `remove_safe_worktrees()` called twice. None cached.
 - **Fix:** Accept a `worktrees` parameter so callers pass already-fetched list, or cache with short TTL.
 
-### H16. Two uncached DOM queries on every keypress
+### ~~H16. Two uncached DOM queries on every keypress~~ ✅ FIXED (c1f1c2a)
 - **File:** `app.py:2238`
 - **Category:** Efficiency
-- **Issue:** Every keypress triggers `self.query(SelectionPrompt)` and `self.query(QuestionPrompt)` — full DOM traversals. `_active_prompts` flag already exists.
-- **Fix:** Check `bool(self._active_prompts)` instead of querying DOM.
+- **Resolution:** Replaced with `isinstance(self.focused, BasePrompt)` — O(1) using Textual's cached focus reference. **Note:** Roborev flagged missing regression tests for this behavior change (typing blocked during active prompt, resumed after dismiss).
 
 ### H17. `_position_right_sidebar()` runs unconditionally every 2 seconds
 - **File:** `app.py:885-893`
@@ -272,25 +270,30 @@ Three parallel review agents analyzed all 80+ Python source files (~11,159 lines
 
 ## Suggested Priority Order
 
-**Quick wins (1-2 hours, high impact):**
-1. C2 — Replace `sys.stderr = open(...)` with `io.StringIO()`
-2. H16 — Replace DOM queries with `_active_prompts` flag check (every keypress)
-3. H10 — Extract `VALID_MODELS` constant
-4. H11 — Extract `_get_editor()` helper
-5. M10 — Replace `list.pop(0)` with `deque`
+**✅ Done:**
+- ~~H16~~ — Replaced DOM queries with `isinstance(self.focused, BasePrompt)` (c1f1c2a)
+- ~~H10~~ — Extracted `VALID_MODELS` frozenset constant (c1f1c2a)
+
+**Triaged as not-worth-doing:**
+- C2 (stderr leak) — Process-exit path, OS reclaims fd, `StringIO` is worse (bytes incompatibility)
+- H11 (get_editor) — 3 occurrences in 52-line span, inline is clearer
+- M10 (deque) — 2-element list, `pop(0)` cost is nanoseconds vs widget `.collapse()` DOM mutation
+
+**Remaining quick wins:**
+1. Add regression tests for H16 BasePrompt focus check (roborev finding)
 
 **Medium effort (half day each):**
-6. C1 — Async session file loading (`asyncio.to_thread`)
-7. H15/H18 — Cache `list_worktrees()`, use `to_thread`
-8. H9 — Extract `show_system_message()` helper
-9. H5 — Add `PermissionMode` enum
-10. H12/H13/H14 — Dedup `set_visible`, diff toggle, agent registration
+2. C1 — Async session file loading (`asyncio.to_thread`)
+3. H15/H18 — Cache `list_worktrees()`, use `to_thread`
+4. H9 — Extract `show_system_message()` helper
+5. H5 — Add `PermissionMode` enum
+6. H12/H13/H14 — Dedup `set_visible`, diff toggle, agent registration
 
 **Large refactors (multi-session):**
-11. H2 — Break up `app.py` god class into coordinators
-12. H4 — Dispatch table for `handle_command()`
-13. M5 — Audit 50+ bare `except Exception: pass` sites
+7. H2 — Break up `app.py` god class into coordinators
+8. H4 — Dispatch table for `handle_command()`
+9. M5 — Audit 50+ bare `except Exception: pass` sites
 
 **Upstream issues to file (no code changes needed):**
-14. H1 — anyio `_deliver_cancellation` spin on done tasks (root cause of gc workaround)
-15. H1 — claude-agent-sdk: `disconnect()` should fully tear down task groups before returning
+10. H1 — anyio `_deliver_cancellation` spin on done tasks (root cause of gc workaround)
+11. H1 — claude-agent-sdk: `disconnect()` should fully tear down task groups before returning
