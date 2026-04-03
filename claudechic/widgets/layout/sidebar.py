@@ -640,6 +640,20 @@ class AgentSection(SidebarSection):
         if agent_id in self._agents:
             self._agents[agent_id].status = status
 
+    def update_agent_context(
+        self,
+        agent_id: str,
+        *,
+        cwd: str | None = None,
+        tokens: int | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Update context info for a specific agent's sidebar item."""
+        if agent_id in self._agents:
+            self._agents[agent_id].update_context(
+                cwd=cwd, tokens=tokens, max_tokens=max_tokens
+            )
+
     def add_worktree(self, branch: str, path: Path) -> None:
         """Add a ghost worktree to the sidebar."""
         # Skip if already have an agent with this name

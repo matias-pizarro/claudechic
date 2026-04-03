@@ -825,6 +825,11 @@ class ChatApp(App):
                     # Update footer with current agent's model
                     agent = self._agent
                     self._update_footer_model(agent.model if agent else None)
+                    # Set max_tokens for all agents based on their model
+                    if self.agent_mgr:
+                        for ag in self.agent_mgr:
+                            self._set_agent_max_tokens(ag)
+                            self._update_sidebar_agent_context(ag)
         except Exception as e:
             log.warning(f"Failed to fetch SDK commands: {e}")
         self._refresh_dynamic_completions()
@@ -960,14 +965,17 @@ class ChatApp(App):
 
     @work(group="refresh_context", exclusive=True)
     async def refresh_context(self) -> None:
-        """Update context bar from session file (no API call)."""
+        """Update context bar and agent tokens from session file (no API call)."""
         agent = self._agent
         if not agent or not agent.session_id:
             self.context_bar.tokens = 0
             return
         tokens = await get_context_from_session(agent.session_id, cwd=agent.cwd)
         if tokens is not None:
+            agent.tokens = tokens
             self.context_bar.tokens = tokens
+            # Update sidebar
+            self._update_sidebar_agent_context(agent)
 
     def _send_initial_prompt(self) -> None:
         """Send the initial prompt from CLI args."""
@@ -2305,6 +2313,7 @@ class ChatApp(App):
             # Add to sidebar
             try:
                 self.agent_section.add_agent(agent.id, agent.name)
+                self._update_sidebar_agent_context(agent)
             except Exception:
                 log.debug(f"Sidebar not mounted for agent {agent.id}")
 
@@ -2363,6 +2372,9 @@ class ChatApp(App):
         # Update todo panel and context
         self.todo_panel.update_todos(new_agent.todos)
         self.refresh_context()
+        self._update_sidebar_agent_context(new_agent)
+        # Also update context bar max_tokens for switched agent
+        self.context_bar.max_tokens = new_agent.max_tokens
 
         # Update plan button
         self.plan_section.set_plan(new_agent.plan_path)
@@ -2811,6 +2823,57 @@ class ChatApp(App):
             desc.split("·")[0].strip() if "·" in desc else active.get("displayName", "")
         )
         self.status_footer.model = model_name
+        # Set max_tokens on agent from model's display name or ID
+        agent = self._agent
+        if agent:
+            from claudechic.formatting import parse_context_size
+
+            display_name = active.get("displayName", "")
+            context_size = parse_context_size(display_name)
+            if context_size is None:
+                # Try model ID (e.g., "claude-opus-4-6[1m]")
+                model_id = active.get("value", "")
+                context_size = parse_context_size(model_id)
+            if context_size:
+                agent.max_tokens = context_size
+                self.context_bar.max_tokens = context_size
+                self._update_sidebar_agent_context(agent)
+
+    def _update_sidebar_agent_context(self, agent: Agent) -> None:
+        """Push agent's tokens/max_tokens and cwd to its sidebar item."""
+        from claudechic.widgets.layout.sidebar import AgentSection
+
+        section = self.query_one_optional(AgentSection)
+        if section:
+            section.update_agent_context(
+                agent.id,
+                cwd=str(agent.cwd),
+                tokens=agent.tokens,
+                max_tokens=agent.max_tokens,
+            )
+
+    def _set_agent_max_tokens(self, agent: Agent) -> None:
+        """Set agent's max_tokens from available model info."""
+        from claudechic.formatting import parse_context_size
+
+        if not self._available_models:
+            return
+        # Find matching model
+        target = self._available_models[0]  # default
+        for m in self._available_models:
+            if agent.model and m.get("value") == agent.model:
+                target = m
+                break
+            if not agent.model and m.get("value") == "default":
+                target = m
+                break
+        display_name = target.get("displayName", "")
+        context_size = parse_context_size(display_name)
+        if context_size is None:
+            model_id = target.get("value", "")
+            context_size = parse_context_size(model_id)
+        if context_size:
+            agent.max_tokens = context_size
 
     # ── Diff Mode ──────────────────────────────────────────────────────────────
 
