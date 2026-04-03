@@ -825,11 +825,6 @@ class ChatApp(App):
                     # Update footer with current agent's model
                     agent = self._agent
                     self._update_footer_model(agent.model if agent else None)
-                    # Set max_tokens for all agents based on their model
-                    if self.agent_mgr:
-                        for ag in self.agent_mgr:
-                            self._set_agent_max_tokens(ag)
-                            self._update_sidebar_agent_context(ag)
         except Exception as e:
             log.warning(f"Failed to fetch SDK commands: {e}")
         self._refresh_dynamic_completions()
@@ -965,16 +960,31 @@ class ChatApp(App):
 
     @work(group="refresh_context", exclusive=True)
     async def refresh_context(self) -> None:
-        """Update context bar and agent tokens from session file (no API call)."""
+        """Update context bar and agent tokens from SDK or session file."""
         agent = self._agent
         if not agent or not agent.session_id:
             self.context_bar.tokens = 0
             return
+        # Try SDK API first (gives both tokens and max_tokens)
+        if agent.client:
+            try:
+                usage = await agent.client.get_context_usage()
+                if usage:
+                    agent.tokens = usage.get("totalTokens", 0)
+                    raw_max = usage.get("rawMaxTokens", 0)
+                    if raw_max > 0:
+                        agent.max_tokens = raw_max
+                    self.context_bar.tokens = agent.tokens
+                    self.context_bar.max_tokens = agent.max_tokens
+                    self._update_sidebar_agent_context(agent)
+                    return
+            except Exception:
+                pass  # Fall back to session file
+        # Fallback: read from session file (works before SDK is fully connected)
         tokens = await get_context_from_session(agent.session_id, cwd=agent.cwd)
         if tokens is not None:
             agent.tokens = tokens
             self.context_bar.tokens = tokens
-            # Update sidebar
             self._update_sidebar_agent_context(agent)
 
     def _send_initial_prompt(self) -> None:
@@ -2823,12 +2833,6 @@ class ChatApp(App):
             desc.split("·")[0].strip() if "·" in desc else active.get("displayName", "")
         )
         self.status_footer.model = model_name
-        # Set max_tokens on agent from model info
-        agent = self._agent
-        if agent:
-            self._set_agent_max_tokens(agent)
-            self.context_bar.max_tokens = agent.max_tokens
-            self._update_sidebar_agent_context(agent)
 
     def _update_sidebar_agent_context(self, agent: Agent) -> None:
         """Push agent's tokens/max_tokens and cwd to its sidebar item."""
@@ -2842,29 +2846,6 @@ class ChatApp(App):
                 tokens=agent.tokens,
                 max_tokens=agent.max_tokens,
             )
-
-    def _set_agent_max_tokens(self, agent: Agent) -> None:
-        """Set agent's max_tokens from available model info."""
-        from claudechic.formatting import parse_context_size
-
-        if not self._available_models:
-            return
-        # Find matching model
-        target = self._available_models[0]  # default
-        for m in self._available_models:
-            if agent.model and m.get("value") == agent.model:
-                target = m
-                break
-            if not agent.model and m.get("value") == "default":
-                target = m
-                break
-        display_name = target.get("displayName", "")
-        context_size = parse_context_size(display_name)
-        if context_size is None:
-            model_id = target.get("value", "")
-            context_size = parse_context_size(model_id)
-        if context_size:
-            agent.max_tokens = context_size
 
     # ── Diff Mode ──────────────────────────────────────────────────────────────
 

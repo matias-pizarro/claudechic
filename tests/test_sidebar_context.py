@@ -43,6 +43,34 @@ class TestAgentItemContextLabel:
         plain = _plain(label)
         assert "80%" in plain
 
+    def test_context_label_1m_window(self):
+        """1M context window shows correct percentage and total."""
+        item = AgentItem("id1", "main", AgentStatus.IDLE)
+        item._tokens = 50_000
+        item._max_tokens = 1_000_000
+        label = item._render_context_label()
+        plain = _plain(label)
+        assert "5%" in plain
+        assert "50.0K" in plain
+        assert "1M" in plain
+
+    def test_update_context_sets_values(self):
+        """update_context() sets internal state correctly."""
+        item = AgentItem("id1", "main", AgentStatus.IDLE)
+        item.update_context(cwd="/home/user/project", tokens=75_000, max_tokens=1_000_000)
+        assert item._cwd == "/home/user/project"
+        assert item._tokens == 75_000
+        assert item._max_tokens == 1_000_000
+
+    def test_update_context_partial(self):
+        """update_context() only updates provided fields."""
+        item = AgentItem("id1", "main", AgentStatus.IDLE)
+        item._tokens = 50_000
+        item._max_tokens = 200_000
+        item.update_context(max_tokens=1_000_000)
+        assert item._tokens == 50_000  # Unchanged
+        assert item._max_tokens == 1_000_000  # Updated
+
 
 class TestAgentItemCwdLabel:
     def test_cwd_truncation(self):
