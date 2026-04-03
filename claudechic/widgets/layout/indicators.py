@@ -7,7 +7,6 @@ from textual.reactive import reactive
 from textual.widgets import Static
 from rich.text import Text
 
-from claudechic.formatting import MAX_CONTEXT_TOKENS
 from claudechic.profiling import profile, timed
 from claudechic.processes import BackgroundProcess
 
@@ -71,7 +70,7 @@ class ContextBar(IndicatorWidget):
     """Display context usage as a progress bar. Click to run /context."""
 
     tokens = reactive(0)
-    max_tokens = reactive(MAX_CONTEXT_TOKENS)
+    max_tokens = reactive(200_000)
 
     def render(self) -> RenderResult:
         pct = min(self.tokens / self.max_tokens, 1.0) if self.max_tokens else 0
