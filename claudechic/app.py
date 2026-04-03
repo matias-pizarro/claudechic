@@ -985,6 +985,9 @@ class ChatApp(App):
         if tokens is not None:
             agent.tokens = tokens
             self.context_bar.tokens = tokens
+            # Always sync max_tokens to context_bar and sidebar (may have been
+            # set by a prior successful get_context_usage call)
+            self.context_bar.max_tokens = agent.max_tokens
             self._update_sidebar_agent_context(agent)
 
     def _send_initial_prompt(self) -> None:
