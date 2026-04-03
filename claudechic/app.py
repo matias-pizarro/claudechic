@@ -978,8 +978,9 @@ class ChatApp(App):
                     self.context_bar.max_tokens = agent.max_tokens
                     self._update_sidebar_agent_context(agent)
                     return
+                log.warning("refresh_context: get_context_usage returned empty/None")
             except Exception:
-                pass  # Fall back to session file
+                log.exception("refresh_context: get_context_usage failed")
         # Fallback: read from session file (works before SDK is fully connected)
         tokens = await get_context_from_session(agent.session_id, cwd=agent.cwd)
         if tokens is not None:
