@@ -71,6 +71,9 @@ INTERACTIVE_SUBCOMMANDS = frozenset(
     }
 )
 
+# Valid model shortnames for /model and /agent --model
+VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
+
 # Bare words mapped to their equivalent slash commands
 BARE_WORDS: dict[str, str] = {
     "quit": "/exit",
@@ -222,10 +225,9 @@ def handle_command(app: "ChatApp", prompt: str) -> bool:
         else:
             # Direct model selection: /model sonnet
             model = parts[1].lower()
-            valid_models = {"opus", "sonnet", "haiku"}
-            if model not in valid_models:
+            if model not in VALID_MODELS:
                 app.notify(
-                    f"Invalid model '{model}'. Use: opus, sonnet, haiku",
+                    f"Invalid model '{model}'. Use: {', '.join(sorted(VALID_MODELS))}",
                     severity="error",
                 )
             else:
@@ -463,7 +465,6 @@ def _handle_agent(app: "ChatApp", command: str) -> bool:
     # Create new agent - parse optional --model flag (supports --model=x or --model x)
     cwd: Path | None = None
     model = None
-    valid_models = {"opus", "sonnet", "haiku"}
     args = parts[2:]
     i = 0
     while i < len(args):
@@ -476,9 +477,10 @@ def _handle_agent(app: "ChatApp", command: str) -> bool:
         elif not part.startswith("-") and cwd is None:
             cwd = Path(part)
         i += 1
-    if model and model not in valid_models:
+    if model and model not in VALID_MODELS:
         app.notify(
-            f"Invalid model '{model}'. Use: opus, sonnet, haiku", severity="error"
+            f"Invalid model '{model}'. Use: {', '.join(sorted(VALID_MODELS))}",
+            severity="error",
         )
         return True
     # Default to current agent's cwd, fallback to app's cwd
