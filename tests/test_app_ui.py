@@ -577,17 +577,26 @@ async def test_sdk_stderr_ignores_empty(mock_sdk):
 @pytest.mark.asyncio
 async def test_bang_command_inline_shell(mock_sdk):
     """'!cmd' runs shell command and displays output inline."""
+    from unittest.mock import patch
     from claudechic.widgets import ShellOutputWidget
+
+    async def fake_pty(cmd, shell, cwd, env, cancel_event):
+        return ("hello\r\n", 0, False)
 
     app = ChatApp()
     async with app.run_test() as pilot:
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!echo hello"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable", side_effect=fake_pty
+        ):
+            input_widget = app.query_one("#input", ChatInput)
+            input_widget.text = "!echo hello"
+            await pilot.press("enter")
+            await pilot.pause()
+            await wait_for_workers(app)
+            await pilot.pause()
 
         # Should create a ShellOutputWidget
         widgets = list(chat_view.query(ShellOutputWidget))
@@ -599,17 +608,26 @@ async def test_bang_command_inline_shell(mock_sdk):
 @pytest.mark.asyncio
 async def test_bang_command_captures_stderr(mock_sdk):
     """'!cmd' captures stderr output (merged with stdout via PTY)."""
+    from unittest.mock import patch
     from claudechic.widgets import ShellOutputWidget
+
+    async def fake_pty(cmd, shell, cwd, env, cancel_event):
+        return ("error\r\n", 0, False)
 
     app = ChatApp()
     async with app.run_test() as pilot:
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!echo error >&2"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable", side_effect=fake_pty
+        ):
+            input_widget = app.query_one("#input", ChatInput)
+            input_widget.text = "!echo error >&2"
+            await pilot.press("enter")
+            await pilot.pause()
+            await wait_for_workers(app)
+            await pilot.pause()
 
         widgets = list(chat_view.query(ShellOutputWidget))
         assert len(widgets) == 1
@@ -620,17 +638,26 @@ async def test_bang_command_captures_stderr(mock_sdk):
 @pytest.mark.asyncio
 async def test_bang_command_shows_exit_code(mock_sdk):
     """'!cmd' shows non-zero exit code in title."""
+    from unittest.mock import patch
     from claudechic.widgets import ShellOutputWidget
+
+    async def fake_pty(cmd, shell, cwd, env, cancel_event):
+        return ("", 42, False)
 
     app = ChatApp()
     async with app.run_test() as pilot:
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!exit 42"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable", side_effect=fake_pty
+        ):
+            input_widget = app.query_one("#input", ChatInput)
+            input_widget.text = "!exit 42"
+            await pilot.press("enter")
+            await pilot.pause()
+            await wait_for_workers(app)
+            await pilot.pause()
 
         widgets = list(chat_view.query(ShellOutputWidget))
         assert len(widgets) == 1
@@ -815,7 +842,12 @@ async def test_app_width_stored(mock_sdk):
 
 
 def test_main_calls_run_with_size_when_width_provided():
-    """Test that main() calls app.run(size=) when --width is provided."""
+    """Test that main() passes width to ChatApp and calls app.run() without size.
+
+    Width is applied via CSS max-width in on_chat_screen_ready, not via
+    Textual's app.run(size=) which only works in headless/testing mode.
+    See commit 51f132b.
+    """
     import sys
     from unittest.mock import patch, MagicMock
 
@@ -825,7 +857,6 @@ def test_main_calls_run_with_size_when_width_provided():
     with (
         patch.object(sys, "argv", test_argv),
         patch("claudechic.__main__.ChatApp") as mock_app_class,
-        patch("shutil.get_terminal_size", return_value=(80, 30)),
     ):
         mock_app = MagicMock()
         mock_app_class.return_value = mock_app
@@ -839,8 +870,8 @@ def test_main_calls_run_with_size_when_width_provided():
         _, kwargs = mock_app_class.call_args
         assert kwargs.get("width") == 200
 
-        # Verify app.run was called with size=(200, 30)
-        mock_app.run.assert_called_once_with(size=(200, 30))
+        # Verify app.run was called without size= (width applied via CSS, not size param)
+        mock_app.run.assert_called_once_with()
 
 
 def test_main_calls_run_without_size_when_no_width():
