@@ -58,6 +58,7 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
+from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.history import append_to_history
@@ -960,14 +961,41 @@ class ChatApp(App):
 
     @work(group="refresh_context", exclusive=True)
     async def refresh_context(self) -> None:
-        """Update context bar from session file (no API call)."""
+        """Update context bar and agent tokens from SDK or session file."""
         agent = self._agent
         if not agent or not agent.session_id:
             self.context_bar.tokens = 0
             return
+        # Try SDK API first (gives both tokens and max_tokens)
+        if agent.client:
+            try:
+                usage = await agent.client.get_context_usage()
+                if usage:
+                    agent.tokens = usage.get("totalTokens", 0)
+                    # Try rawMaxTokens first (raw model window), fall back to
+                    # maxTokens (effective limit after autocompact buffer)
+                    raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens", 0)
+                    if raw_max and raw_max > 0:
+                        agent.max_tokens = raw_max
+                    else:
+                        log.debug(
+                            "refresh_context: no max_tokens in response, keys=%s",
+                            list(usage.keys()),
+                        )
+                    self.context_bar.tokens = agent.tokens
+                    self.context_bar.max_tokens = agent.max_tokens
+                    self._update_sidebar_agent_context(agent)
+                    return
+                log.warning("refresh_context: get_context_usage returned empty/None")
+            except Exception:
+                log.exception("refresh_context: get_context_usage failed")
+        # Fallback: read from session file (works before SDK is fully connected)
         tokens = await get_context_from_session(agent.session_id, cwd=agent.cwd)
         if tokens is not None:
+            agent.tokens = tokens
             self.context_bar.tokens = tokens
+            self.context_bar.max_tokens = agent.max_tokens
+            self._update_sidebar_agent_context(agent)
 
     def _send_initial_prompt(self) -> None:
         """Send the initial prompt from CLI args."""
@@ -2305,6 +2333,7 @@ class ChatApp(App):
             # Add to sidebar
             try:
                 self.agent_section.add_agent(agent.id, agent.name)
+                self._update_sidebar_agent_context(agent)
             except Exception:
                 log.debug(f"Sidebar not mounted for agent {agent.id}")
 
@@ -2363,6 +2392,9 @@ class ChatApp(App):
         # Update todo panel and context
         self.todo_panel.update_todos(new_agent.todos)
         self.refresh_context()
+        self._update_sidebar_agent_context(new_agent)
+        # Also update context bar max_tokens for switched agent
+        self.context_bar.max_tokens = new_agent.max_tokens
 
         # Update plan button
         self.plan_section.set_plan(new_agent.plan_path)
@@ -2811,6 +2843,37 @@ class ChatApp(App):
             desc.split("·")[0].strip() if "·" in desc else active.get("displayName", "")
         )
         self.status_footer.model = model_name
+
+        # Set max_tokens from model display name as early fallback
+        # (get_context_usage will override later with exact value)
+        agent = self._agent
+        if agent and agent.max_tokens == MAX_CONTEXT_TOKENS:
+            display_name = active.get("displayName", "")
+            context_size = parse_context_size(display_name)
+            if context_size is None:
+                # Try model ID (e.g., "claude-opus-4-6[1m]")
+                model_id = active.get("value", "")
+                context_size = parse_context_size(model_id)
+            if context_size is None:
+                # Try description (e.g., "Opus 4.6 · 1M context")
+                context_size = parse_context_size(desc)
+            if context_size and context_size > 0:
+                agent.max_tokens = context_size
+                self.context_bar.max_tokens = context_size
+                self._update_sidebar_agent_context(agent)
+
+    def _update_sidebar_agent_context(self, agent: Agent) -> None:
+        """Push agent's tokens/max_tokens and cwd to its sidebar item."""
+        from claudechic.widgets.layout.sidebar import AgentSection
+
+        section = self.query_one_optional(AgentSection)
+        if section:
+            section.update_agent_context(
+                agent.id,
+                cwd=str(agent.cwd),
+                tokens=agent.tokens,
+                max_tokens=agent.max_tokens,
+            )
 
     # ── Diff Mode ──────────────────────────────────────────────────────────────
 

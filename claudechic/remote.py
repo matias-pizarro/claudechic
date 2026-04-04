@@ -207,13 +207,39 @@ async def handle_status(request: web.Request) -> web.Response:  # noqa: ARG001
                     "status": str(a.status),
                     "cwd": str(a.cwd),
                     "active": a.id == _app.agent_mgr.active_id,
+                    "tokens": a.tokens,
+                    "max_tokens": a.max_tokens,
                 }
             )
+
+    # Include context bar state
+    context_bar = {
+        "tokens": _app.context_bar.tokens,
+        "max_tokens": _app.context_bar.max_tokens,
+    }
+
+    # Include sidebar agent items state
+    sidebar_items = {}
+    try:
+        from claudechic.widgets.layout.sidebar import AgentSection
+
+        section = _app.query_one_optional(AgentSection)
+        if section:
+            for aid, item in section._agents.items():
+                sidebar_items[aid] = {
+                    "cwd": item._cwd,
+                    "tokens": item._tokens,
+                    "max_tokens": item._max_tokens,
+                }
+    except Exception:
+        pass
 
     return web.json_response(
         {
             "agents": agents,
             "active_agent": agent.name if agent else None,
+            "context_bar": context_bar,
+            "sidebar_items": sidebar_items,
         }
     )
 

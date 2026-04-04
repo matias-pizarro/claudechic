@@ -14,6 +14,58 @@ from claudechic.enums import ToolName
 MAX_CONTEXT_TOKENS = 200_000  # Claude's context window
 MAX_HEADER_WIDTH = 70  # Max width for tool headers
 
+
+def format_tokens(n: int) -> str:
+    """Format token count with K/M suffixes for compact display.
+
+    Examples: 500 -> "500", 18500 -> "18.5K", 1000000 -> "1M"
+    """
+    if n >= 1_000_000:
+        value = n / 1_000_000
+        return f"{value:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        value = n / 1_000
+        return f"{value:.1f}K"
+    return str(n)
+
+
+def parse_context_size(display_name: str) -> int | None:
+    """Extract context window size from model display name or model ID.
+
+    Handles:
+    - "Claude 4 Sonnet (1M context)" -> 1_000_000
+    - "Opus 4.6 with 1M context" -> 1_000_000
+    - "Opus 4.6 · 1M context" -> 1_000_000
+    - "claude-opus-4-6[1m]" -> 1_000_000
+    - "Claude 3.5 Haiku (200K context)" -> 200_000
+    - "claude-sonnet-4-6[200k]" -> 200_000
+
+    Returns None if no context size found.
+    """
+    # Parenthesized format: "... (1M context)" or "... (200K context)"
+    m = re.search(r"\((\d+(?:\.\d+)?)(K|M)\s*context\)", display_name, re.IGNORECASE)
+    if m:
+        value = float(m.group(1))
+        unit = m.group(2).upper()
+        return int(value * 1_000_000) if unit == "M" else int(value * 1_000)
+
+    # Plain format: "... 1M context" or "... with 1M context"
+    m = re.search(r"(\d+(?:\.\d+)?)(K|M)\s+context", display_name, re.IGNORECASE)
+    if m:
+        value = float(m.group(1))
+        unit = m.group(2).upper()
+        return int(value * 1_000_000) if unit == "M" else int(value * 1_000)
+
+    # Bracket format from model ID: "...[1m]" or "...[200k]"
+    m = re.search(r"\[(\d+(?:\.\d+)?)(k|m)\]", display_name, re.IGNORECASE)
+    if m:
+        value = float(m.group(1))
+        unit = m.group(2).upper()
+        return int(value * 1_000_000) if unit == "M" else int(value * 1_000)
+
+    return None
+
+
 # Inter-agent message patterns
 # Matches ask_agent: [Question from agent 'X' - please respond...]
 _AGENT_QUESTION_RE = re.compile(

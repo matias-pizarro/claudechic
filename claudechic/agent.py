@@ -36,6 +36,7 @@ from claude_agent_sdk.types import (
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
 from claudechic.features.worktree.git import FinishState
 from claudechic.file_index import FileIndex
+from claudechic.formatting import MAX_CONTEXT_TOKENS
 from claudechic.permissions import PermissionRequest
 from claudechic.sessions import get_plan_path_for_session
 from claudechic.tasks import create_safe_task
@@ -184,6 +185,10 @@ class Agent:
         self.session_allowed_tools: set[str] = set()  # Tools allowed for this session
         self._pending_followup: str | None = None  # Auto-send after current response
         self.model: str | None = None  # Model override (None = SDK default)
+        self.tokens: int = 0  # Current context token usage
+        self.max_tokens: int = (
+            MAX_CONTEXT_TOKENS  # Context window size (updated from model info)
+        )
 
         # Worktree finish state (for /worktree finish flow)
         self.finish_state: FinishState | None = None
