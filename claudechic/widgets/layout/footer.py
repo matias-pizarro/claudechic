@@ -204,13 +204,13 @@ class StatusFooter(Static):
             app_width - used - CWD_PADDING - (SESSION_PADDING if has_session else 0), 0
         )
 
-        # Compute per-label budgets (cwd wins priority when budget is tight)
+        # Compute per-label budgets (cwd wins priority, session gets remainder)
         if has_cwd and has_session:
-            # Session gets up to 12 chars, but only if cwd can still meet its minimum
-            session_budget = min(12, max(total_budget - MIN_CWD_LENGTH, 0))
-            cwd_budget = min(total_budget - session_budget, MAX_CWD_LENGTH)
+            # Cwd gets first claim (capped at MAX_CWD_LENGTH), session gets the rest
+            cwd_budget = min(total_budget, MAX_CWD_LENGTH)
+            session_budget = max(total_budget - cwd_budget, 0)
         elif has_session:
-            session_budget = min(12, total_budget)
+            session_budget = total_budget
             cwd_budget = 0
         else:  # has_cwd only
             cwd_budget = min(total_budget, MAX_CWD_LENGTH)
