@@ -94,6 +94,12 @@ ModelLabel:hover {
     width: 1fr;
 }
 
+#cwd-label {
+    color: $text-muted;
+    padding: 0 1;
+    width: auto;
+}
+
 .footer-label.active {
     color: $primary;
 }

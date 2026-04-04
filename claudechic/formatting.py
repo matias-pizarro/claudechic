@@ -2,6 +2,7 @@
 
 import difflib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -13,6 +14,56 @@ from claudechic.enums import ToolName
 # Constants
 MAX_CONTEXT_TOKENS = 200_000  # Claude's context window
 MAX_HEADER_WIDTH = 70  # Max width for tool headers
+MIN_CWD_LENGTH = 10  # Below this budget, hide cwd entirely
+MAX_CWD_LENGTH = 80  # Cap to prevent cwd from dominating the bar
+
+
+def format_cwd(path: str, max_length: int) -> str:
+    """Format a cwd path for display, with home substitution and segment truncation.
+
+    - Replaces home directory prefix with ~
+    - If result fits in max_length, returns as-is
+    - Otherwise, segment-truncates from the right: …/last_seg/...
+    - If even the last segment exceeds budget, falls back to char truncation
+    - Returns "" if max_length < 4 or path is empty
+    """
+    if not path or max_length < 4:
+        return ""
+
+    # Home substitution
+    home = os.path.expanduser("~")
+    if path.startswith(home + "/") or path == home:
+        path = "~" + path[len(home):]
+
+    if len(path) <= max_length:
+        return path
+
+    # Split into segments
+    segments = [s for s in path.split("/") if s]
+
+    if not segments:
+        return path[:max_length]  # edge case: root "/"
+
+    # Try to fit as many right-side segments as possible with "…/" prefix
+    prefix = "\u2026/"
+    prefix_len = len(prefix)
+
+    # Walk from rightmost segment
+    result = ""
+    for i in range(len(segments) - 1, -1, -1):
+        candidate = prefix + "/".join(segments[i:])
+        if len(candidate) <= max_length:
+            result = candidate
+        else:
+            break
+
+    if result:
+        return result
+
+    # Last-segment fallback: even the last segment alone exceeds budget
+    last = segments[-1]
+    # Character-level front-truncation of last segment
+    return "\u2026" + last[-(max_length - 1):]
 
 
 def format_tokens(n: int) -> str:

@@ -1,6 +1,9 @@
-"""Tests for token formatting functions."""
+"""Tests for formatting functions."""
 
-from claudechic.formatting import format_tokens, parse_context_size
+import os
+from unittest.mock import patch
+
+from claudechic.formatting import format_cwd, format_tokens, parse_context_size
 
 
 class TestFormatTokens:
@@ -70,3 +73,86 @@ class TestParseContextSize:
     def test_short_name_no_context(self):
         """SDK may return just 'Sonnet' with no context info."""
         assert parse_context_size("Sonnet") is None
+
+
+class TestFormatCwd:
+    """Tests for format_cwd() — segment-based path truncation."""
+
+    def test_empty_path(self):
+        assert format_cwd("", 40) == ""
+
+    def test_budget_below_minimum(self):
+        """Budget < 4 returns empty (can't display anything useful)."""
+        assert format_cwd("/home/user/project", 3) == ""
+
+    def test_budget_exactly_4(self):
+        """Budget = 4 is the minimum useful display."""
+        result = format_cwd("/some/long/path", 4)
+        assert len(result) <= 4
+        assert result != ""
+
+    def test_short_path_fits(self):
+        """Paths that fit within budget are returned as-is (after ~ sub)."""
+        assert format_cwd("~/project", 20) == "~/project"
+
+    def test_exact_fit(self):
+        """Path that exactly equals max_length is not truncated."""
+        path = "~/myproject"
+        assert format_cwd(path, len(path)) == path
+
+    @patch.dict(os.environ, {"HOME": "/home/testuser"})
+    def test_home_substitution(self):
+        """Home directory prefix is replaced with ~."""
+        result = format_cwd("/home/testuser/code/myproject", 40)
+        assert result.startswith("~")
+        assert "/home/testuser" not in result
+
+    def test_no_home_prefix(self):
+        """Paths not under home are shown as-is."""
+        result = format_cwd("/var/log/app", 40)
+        assert result == "/var/log/app"
+
+    def test_segment_truncation(self):
+        """Long paths truncate at segment boundaries with … prefix."""
+        result = format_cwd("~/code/projects/claudechic/statusline", 20)
+        assert result.startswith("\u2026/")
+        # Should show last segment(s) that fit
+        assert "statusline" in result
+
+    def test_segment_truncation_shows_most_segments(self):
+        """Truncation includes as many right-side segments as fit."""
+        path = "~/a/b/c/d/e/project"
+        result = format_cwd(path, 15)
+        assert result.startswith("\u2026/")
+        assert "project" in result
+
+    def test_last_segment_fallback_char_truncate(self):
+        """When last segment alone exceeds budget, fall back to char truncation."""
+        result = format_cwd("~/very-long-directory-name-that-exceeds-budget", 15)
+        assert result.startswith("\u2026")
+        assert len(result) <= 15
+
+    def test_single_segment_path(self):
+        """Single segment (just filename, no dirs) fits or truncates."""
+        assert format_cwd("project", 20) == "project"
+
+    def test_root_path(self):
+        """Root path '/' is handled."""
+        result = format_cwd("/", 10)
+        assert result == "/"
+
+    def test_segment_truncation_various_budgets(self):
+        """Test segment truncation at different budgets."""
+        path = "~/code/projects/claudechic/claudechic-statusline"
+        # Large budget — fits or shows many segments
+        result_35 = format_cwd(path, 35)
+        # Medium budget — fewer segments
+        result_25 = format_cwd(path, 25)
+        # Small budget — just last segment or truncated
+        result_15 = format_cwd(path, 15)
+
+        assert len(result_35) <= 35
+        assert len(result_25) <= 25
+        assert len(result_15) <= 15
+        # Larger budgets show more
+        assert len(result_35) >= len(result_25) >= len(result_15)

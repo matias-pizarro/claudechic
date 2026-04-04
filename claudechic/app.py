@@ -94,6 +94,7 @@ from claudechic.widgets.layout.footer import (
     PermissionModeLabel,
     ModelLabel,
     StatusFooter,
+    get_git_branch,
 )
 from claudechic.widgets.prompts import ModelPrompt
 from claudechic.errors import setup_logging  # noqa: F401 - used at startup
@@ -939,13 +940,18 @@ class ChatApp(App):
         self._review_poll_agent_id = None
 
     async def _load_and_display_history(
-        self, session_id: str, cwd: Path | None = None
+        self,
+        session_id: str,
+        cwd: Path | None = None,
+        agent: "Agent | None" = None,
     ) -> None:
         """Load session history into agent and render in chat view.
 
         This uses Agent.messages as the single source of truth.
+        If agent is not provided, defaults to the current active agent.
         """
-        agent = self._agent
+        if agent is None:
+            agent = self._agent
         if not agent:
             return
 
@@ -1207,6 +1213,12 @@ class ChatApp(App):
         """Reposition right sidebar on resize and handle compact height."""
         self.call_after_refresh(self._position_right_sidebar)
         self.call_after_refresh(self._apply_compact_height)
+        self.call_after_refresh(self._refresh_footer_cwd)
+
+    def _refresh_footer_cwd(self) -> None:
+        """Recompute footer cwd budget after layout changes. Safe before mount."""
+        if self._status_footer is not None:
+            self._status_footer.refresh_cwd_label()
 
     def _position_right_sidebar(self) -> None:
         """Show/hide right sidebar and adjust centering based on terminal width."""
@@ -1790,10 +1802,29 @@ class ChatApp(App):
             if chat_view:
                 chat_view.clear()
             agent.cwd = new_cwd
+            # Update sidebar for reconnected agent (always, sidebar shows all agents)
+            self._update_sidebar_agent_context(agent)
+            # Only update footer if this agent is still active (user may have
+            # switched agents while the reconnect was in flight)
+            if agent is self._agent:
+                self.status_footer.set_cwd(str(new_cwd))
+                # Wrap branch refresh to re-check active agent after the async
+                # git call completes — prevents stale branch from overwriting
+                # a newly-switched agent's branch
+                async def _guarded_refresh_branch():
+                    branch = await get_git_branch(str(new_cwd))
+                    if agent is self._agent:
+                        self.status_footer.branch = branch
+
+                create_safe_task(
+                    _guarded_refresh_branch(),
+                    name="refresh-branch",
+                )
 
             if resume_id:
-                await self._load_and_display_history(resume_id, cwd=new_cwd)
-                agent.session_id = resume_id
+                await self._load_and_display_history(
+                    resume_id, cwd=new_cwd, agent=agent
+                )
                 self.notify(f"Resumed session in {new_cwd.name}")
             else:
                 agent.session_id = None
@@ -2408,6 +2439,7 @@ class ChatApp(App):
         self._refresh_reviews(new_agent)
 
         # These happen outside (async/focus)
+        self.status_footer.set_cwd(str(new_agent.cwd))
         create_safe_task(self._async_refresh_files(new_agent), name="refresh-files")
         create_safe_task(
             self.status_footer.refresh_branch(str(new_agent.cwd)), name="refresh-branch"
