@@ -1,7 +1,7 @@
 # X11 in FreeBSD Jails — Design Spec
 
 **Date:** 2026-04-05
-**Status:** Draft (rev 3 — post round-2 review: roborev + code-reviewer + architect + contrarian)
+**Status:** Draft (rev 4 — post round-3 review: roborev + code-reviewer + architect + contrarian)
 **Scope:** Running X11 applications inside any FreeBSD jail — headless testing, remote viewing, GUI development, and window automation.
 
 ## Problem
@@ -20,8 +20,8 @@ FreeBSD jails used for agent development (and CI) often set `DISPLAY=:0` with no
 1. Headless wrapper one-liner runs a Playwright/Selenium test to completion (see Simplest Path section)
 2. `x11ctl start --headless` creates a working display; `xdpyinfo -display :99` succeeds
 3. `x11ctl screenshot /tmp/test.png` produces a valid PNG file
-4. `x11ctl start --xpra` enables remote viewing via `http://jail-ip:10000` (HTML5 client)
-5. `x11ctl start --vnc` enables remote viewing via VNC client on port 5900 and noVNC on port 6080
+4. `x11ctl start --xpra` enables remote viewing; HTML5 client accessible at `http://127.0.0.1:10000` from inside the jail (or via `--bind-all` / SSH tunnel from outside)
+5. `x11ctl start --vnc` enables remote viewing; VNC on port 5900 and noVNC on port 6080, accessible from localhost (or via `--bind-all` / SSH tunnel from outside)
 6. `x11ctl start` / `stop` / `start` cycle is idempotent — no stale PIDs, no orphaned processes
 7. `x11ctl status` correctly reports running/stopped for each component, exits 0 when healthy, exits 1 when some down (never exits 2 — that code is reserved for `start`)
 8. Port-in-use conflicts at start time produce a clear error naming the conflicting process
@@ -49,12 +49,36 @@ For headless CI testing where no remote viewing is needed, a simple wrapper crea
 xvfb_run() {
     _display=":$$"  # use PID as unique display number
     _xauth=$(mktemp /tmp/.xauth.XXXXXX)
+    chmod 600 "$_xauth"
     trap 'kill $! 2>/dev/null; rm -f "$_xauth"' EXIT
-    xauth -f "$_xauth" generate "$_display" . trusted 2>/dev/null
+
+    # Start Xvfb first (xauth cookie is created by Xvfb via -auth)
     Xvfb "$_display" -screen 0 1920x1080x24 -auth "$_xauth" >/dev/null 2>&1 &
+    _xvfb_pid=$!
+
+    # Add auth cookie for this display
+    xauth -f "$_xauth" generate "$_display" . trusted 2>/dev/null
+
+    # Wait for Xvfb to be ready (up to 5s)
+    _tries=0
+    while [ $_tries -lt 10 ]; do
+        if DISPLAY="$_display" XAUTHORITY="$_xauth" xdpyinfo >/dev/null 2>&1; then
+            break
+        fi
+        _tries=$((_tries + 1))
+        sleep 0.5
+    done
+    if [ $_tries -eq 10 ]; then
+        echo "xvfb_run: Xvfb failed to start on $_display" >&2
+        kill $_xvfb_pid 2>/dev/null; rm -f "$_xauth"
+        trap - EXIT
+        return 1
+    fi
+
+    # Run the command
     DISPLAY="$_display" XAUTHORITY="$_xauth" "$@"
     _rc=$?
-    kill $! 2>/dev/null; rm -f "$_xauth"
+    kill $_xvfb_pid 2>/dev/null; rm -f "$_xauth"
     trap - EXIT
     return $_rc
 }
@@ -64,7 +88,7 @@ xvfb_run playwright test
 xvfb_run import -window root screenshot.png
 ```
 
-The runbook includes this function and documents it as the simplest headless path. The `x11ctl` script also ships an `x11ctl run <command>` subcommand that does the same thing.
+The runbook includes this function and documents it as the simplest headless path. The `x11ctl` script also ships an `x11ctl run <command>` subcommand that does the same thing with better error handling: it installs signal handlers for SIGINT/SIGTERM that forward the signal to the child process and tear down Xvfb before exiting, preventing orphaned Xvfb processes on Ctrl-C.
 
 **When the one-liner is sufficient:**
 - Automated test suites that just need a `DISPLAY` (Playwright, Selenium, pytest-qt)
@@ -182,7 +206,7 @@ Error: missing required commands for --xpra: xpra, xdpyinfo
 
 **Why `:99` not `:0`:** Many jails inherit `DISPLAY=:0` as a phantom env var with no backing socket. Using `:99` avoids ambiguity and collision.
 
-**Xauth:** A random MIT-MAGIC-COOKIE is generated per session and written to the Xauth file. The file is created with mode `0600` (via `os.open()` with `O_CREAT | O_WRONLY`, mode `0o600`, followed by `os.fdopen()` — symlink-safe). All components and client apps reference this file via the `XAUTHORITY` env var or explicit `-auth` flags.
+**Xauth:** A random MIT-MAGIC-COOKIE is generated per session and written to the Xauth file. The file is created with mode `0600` via `os.open()` with `O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW`, mode `0o600` — this rejects existing files (including symlinks), preventing symlink attacks in `/tmp`. If the file already exists, the script removes it first (after verifying it's a regular file, not a symlink). All components and client apps reference this file via the `XAUTHORITY` env var or explicit `-auth` flags.
 
 ## Process Tree
 
@@ -215,19 +239,23 @@ Each component waits for its dependency to be ready before launching:
 5. **Readiness probe:** poll x11vnc port with `socket.connect_ex(("127.0.0.1", 5900))` until it returns 0
 6. Start websockify (only after x11vnc port is listening)
 
-If any readiness probe times out (5s default), the script prints the component's log file path and exits with an error.
+**Partial-start rollback:** If any readiness probe times out (5s default) or a component fails to start, the script performs a reverse-order teardown of all components that were successfully started in this invocation, prints the failed component's log file path, and exits with an error. This prevents orphaned processes after a mid-start failure. For example, if Xvfb starts successfully but Xpra fails, the script stops Xvfb before exiting. The rollback uses the same SIGTERM → 3s grace → SIGKILL sequence as `stop`.
+
+The script also cleans up stale X server artifacts left by a previous unclean shutdown: `/tmp/.X<N>-lock` and `/tmp/.X11-unix/X<N>` (where `<N>` is the display number) are removed if present and no matching Xvfb process is running.
 
 **PID management:**
 
 All four components are launched via `subprocess.Popen()` with `--daemon=no` for Xpra (see above). This means all processes are direct children of the `x11ctl` Python process, and the script captures PIDs from `Popen.pid`.
 
-Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile also stores a creation-time nonce (random 8-char hex string) as a secondary validation against PID reuse.
+Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile stores the PID and the process start time for robust identity validation.
 
-Format: `<pid> <nonce>\n` (e.g., `1234 a3f8b2c1\n`)
+Format: `<pid> <start_time>\n` (e.g., `1234 1712345678\n`)
 
-- **On start:** check if pidfile exists. If it does, read PID and nonce. Verify the PID is alive AND belongs to the expected process using `subprocess.run(["ps", "-p", str(pid), "-o", "comm="])` (not `/proc`, which is unavailable in FreeBSD jails by default). If the PID is stale (dead or wrong process), remove the pidfile and proceed. If the PID is live and correct, skip (idempotent).
+The start time is captured from `ps -p <pid> -o lstart=` at creation and stored alongside the PID. On subsequent reads, the script validates **both** PID liveness and start-time match. This eliminates PID-reuse false positives: even if the OS reuses a PID for an unrelated process, the start time will differ. (`ps -o lstart=` is available on FreeBSD without `/proc`.)
+
+- **On start:** check if pidfile exists. If it does, read PID and start time. Verify the PID is alive via `os.kill(pid, 0)`, belongs to the expected process via `ps -p <pid> -o comm=`, AND has the same start time via `ps -p <pid> -o lstart=`. If any check fails (dead, wrong process, or wrong start time), the PID is stale — remove the pidfile and proceed. If all checks pass, skip (idempotent).
 - **On stop (same invocation):** for child processes, use `Popen.terminate()` (SIGTERM), then `Popen.wait(timeout=3)`, then `Popen.kill()` (SIGKILL) if still alive. Remove pidfile.
-- **On stop (different invocation):** read PID from pidfile, validate via `ps -p <pid> -o comm=`, then send `os.kill(pid, signal.SIGTERM)`, poll with `os.kill(pid, 0)` in a loop (up to 3s, 0.1s interval), then `os.kill(pid, signal.SIGKILL)` if still alive. `os.waitpid()` is NOT used here because the processes are not children of this invocation. Remove pidfile.
+- **On stop (different invocation):** read PID and start time from pidfile. Validate identity (PID alive + process name + start time match). If valid, send `os.kill(pid, signal.SIGTERM)`, poll with `os.kill(pid, 0)` in a loop (up to 3s, 0.1s interval), then `os.kill(pid, signal.SIGKILL)` if still alive. `os.waitpid()` is NOT used here because the processes are not children of this invocation. Remove pidfile. If identity validation fails, just clean up the stale pidfile.
 
 **Log file management:**
 
@@ -325,6 +353,13 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 
 **Why Python, not POSIX shell:** The script needs process management with PID validation, readiness probes with retries and timeouts, port-conflict detection via socket bind attempts, cascading stop with dependency ordering, and structured log output. These requirements exceed what POSIX shell handles reliably — PID races, missing arrays, no proper error handling. Python's stdlib modules make all of this correct, testable, and readable. Python is already a hard dependency of the project environment.
 
+**Single-instance assumption:** The script assumes one instance per jail. The fixed paths (`/tmp/.x11ctl-*`), default display (`:99`), and default ports (10000, 5900, 6080) all imply a single running stack. Running two instances in the same jail requires overriding `X11CTL_DISPLAY` and all port env vars. The script does not enforce single-instance with a lock — the port-in-use detection and display-socket check naturally prevent double-starts.
+
+**Privilege model:**
+- `x11ctl setup` requires root (runs `pkg install`). The command checks `os.geteuid() == 0` and exits with a clear error if not root.
+- `x11ctl start/stop/status/run/env/screenshot` do NOT require root — they run as the current user. Xvfb, Xpra, x11vnc, and websockify all run as the invoking user.
+- Host-side `jail.conf` changes require host root access, documented separately in the runbook.
+
 ### Subcommands
 
 | Command | Description |
@@ -364,7 +399,7 @@ This asymmetry is intentional — starting a viewer without a display is an erro
 
 ### Automated (in x11ctl itself)
 
-The `x11ctl` script includes a `self-test` subcommand (not listed in the user-facing subcommands table) that exercises the acceptance criteria programmatically:
+The `x11ctl` script includes a `self-test` subcommand that exercises the acceptance criteria programmatically. It is listed in `--help` output but grouped under "diagnostic commands" (separate from the primary start/stop/status commands):
 
 ```sh
 x11ctl self-test --tier1    # Start headless, verify xdpyinfo, take screenshot, stop, verify cleanup
