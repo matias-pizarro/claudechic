@@ -16,6 +16,28 @@ MAX_CONTEXT_TOKENS = 200_000  # Claude's context window
 MAX_HEADER_WIDTH = 70  # Max width for tool headers
 MIN_CWD_LENGTH = 10  # Below this budget, hide cwd entirely
 MAX_CWD_LENGTH = 80  # Cap to prevent cwd from dominating the bar
+MIN_SESSION_LENGTH = 8  # Below this budget, hide session_id entirely
+
+
+def format_session_id(session_id: str, budget: int) -> str:
+    """Format session ID with adaptive truncation.
+
+    Truncates from the end (suffix removed, prefix preserved).
+    Opposite direction from format_cwd() which preserves suffixes.
+    Uses U+2026 (…) for ellipsis, consistent with format_cwd().
+
+    Precondition: session_id is non-empty.
+
+    Rules:
+        budget >= len(session_id) -> full ID
+        budget >= 2               -> first (budget-1) chars + "…"
+        budget < 2                -> "…"
+    """
+    if budget >= len(session_id):
+        return session_id
+    if budget >= 2:
+        return session_id[: budget - 1] + "\u2026"
+    return "\u2026"
 
 
 def format_cwd(path: str, max_length: int) -> str:

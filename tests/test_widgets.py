@@ -489,6 +489,77 @@ async def test_status_footer_render_cwd_label_shows_with_budget():
         assert label is not None
 
 
+class TestFormatSessionId:
+    """Tests for format_session_id() adaptive truncation."""
+
+    def test_full_id_when_budget_sufficient(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert format_session_id(sid, 36) == sid
+
+    def test_full_id_when_budget_exceeds_length(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert format_session_id(sid, 100) == sid
+
+    def test_truncation_with_ellipsis(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        result = format_session_id(sid, 12)
+        assert result == "a1b2c3d4-e5\u2026"
+        assert len(result) == 12
+
+    def test_truncation_at_min_session_length(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        result = format_session_id(sid, 8)
+        assert result == "a1b2c3d\u2026"
+        assert len(result) == 8
+
+    def test_budget_2_returns_one_char_plus_ellipsis(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4"
+        result = format_session_id(sid, 2)
+        assert result == "a\u2026"
+
+    def test_budget_1_returns_ellipsis(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4"
+        result = format_session_id(sid, 1)
+        assert result == "\u2026"
+
+    def test_budget_0_returns_ellipsis(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "a1b2c3d4"
+        result = format_session_id(sid, 0)
+        assert result == "\u2026"
+
+    def test_short_id_fits_in_budget(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "short"
+        assert format_session_id(sid, 10) == "short"
+
+    def test_short_id_truncated_when_budget_tight(self):
+        from claudechic.formatting import format_session_id
+
+        sid = "abcdef"
+        result = format_session_id(sid, 4)
+        assert result == "abc\u2026"
+
+    def test_min_session_length_constant(self):
+        from claudechic.formatting import MIN_SESSION_LENGTH
+
+        assert MIN_SESSION_LENGTH == 8
+
+
 @pytest.mark.asyncio
 async def test_chat_message_append():
     """ChatMessage accumulates content."""
