@@ -210,15 +210,15 @@ class StatusFooter(Static):
         # the path is short (e.g. "~" only uses 1 char, not the full budget).
         if has_cwd and has_session:
             cwd_max = min(total_budget, MAX_CWD_LENGTH)
-            cwd_text = format_cwd(self._cwd, cwd_max)
-            cwd_actual = len(cwd_text)
-            if cwd_actual < MIN_CWD_LENGTH:
-                # Cwd too short to display — give everything to session
+            if cwd_max < MIN_CWD_LENGTH:
+                # Not enough total budget for cwd — give everything to session
                 cwd_budget = 0
+                cwd_text = ""
                 session_budget = total_budget
             else:
-                cwd_budget = cwd_actual
-                session_budget = max(total_budget - cwd_actual, 0)
+                cwd_text = format_cwd(self._cwd, cwd_max)
+                cwd_budget = len(cwd_text)
+                session_budget = max(total_budget - cwd_budget, 0)
         elif has_session:
             session_budget = total_budget
             cwd_budget = 0
