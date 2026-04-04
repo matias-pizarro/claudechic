@@ -1441,8 +1441,11 @@ class ChatApp(App):
     def action_copy_selection(self) -> None:
         selected = self.screen.get_selected_text()
         if selected:
-            self.copy_to_clipboard(selected)
-            self.notify("Copied to clipboard")
+            success = self.copy_to_clipboard(selected)
+            if success:
+                self.notify("Copied to clipboard")
+            else:
+                self.notify("Copy failed", severity="warning", timeout=2)
 
     def action_new_agent(self) -> None:
         """Create a new agent (prompts for name/path)."""
@@ -1499,11 +1502,15 @@ class ChatApp(App):
                 pass
         self.set_timer(0.05, self._check_and_copy_selection)
 
-    def copy_to_clipboard(self, text: str) -> None:
-        """Copy to both CLIPBOARD (OSC 52) and PRIMARY (xclip/xsel) on Linux."""
+    def copy_to_clipboard(self, text: str) -> bool:
+        """Copy to both CLIPBOARD (OSC 52) and PRIMARY (xclip/xsel) on Linux.
+
+        Returns True if the copy succeeded or was undetectable (OSC 52),
+        False if a clipboard tool was found but the write failed.
+        """
         super().copy_to_clipboard(text)
         if not sys.platform.startswith("linux"):
-            return
+            return True
         import shutil
         import subprocess
 
@@ -1521,15 +1528,59 @@ class ChatApp(App):
                     )
                     proc.stdin.write(text.encode())  # type: ignore[union-attr]
                     proc.stdin.close()  # type: ignore[union-attr]
+                    return proc.wait(timeout=2) == 0
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    return False
                 except Exception:
-                    pass
-                return
+                    return False
+        # No clipboard tool found on Linux — OSC 52 was sent but is
+        # unverifiable (fire-and-forget). Check for common misconfigurations
+        # that would prevent it from working.
+        return self._osc52_likely_works()
+
+    def _osc52_likely_works(self) -> bool:
+        """Heuristic check for whether OSC 52 can reach the terminal.
+
+        Returns False when we can detect that tmux has set-clipboard off
+        (which disables OSC 52 handling). Returns True otherwise, including
+        when we can't tell. Note: allow-passthrough is intentionally NOT
+        checked — with set-clipboard on, tmux handles clipboard itself
+        regardless of allow-passthrough.
+        """
+        import os
+        import shutil
+        import subprocess
+
+        if os.environ.get("TMUX"):
+            tmux_bin = shutil.which("tmux")
+            if not tmux_bin:
+                return True  # Can't check, assume OK
+            try:
+                out = subprocess.run(
+                    [tmux_bin, "show", "-gv", "set-clipboard"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if out.returncode == 0 and out.stdout.strip() == "off":
+                    return False
+            except Exception:
+                return True  # Can't reach tmux server, assume OK
+        return True
+
+    _copy_failed_notified: bool = False
 
     def _check_and_copy_selection(self) -> None:
         selected = self.screen.get_selected_text()
         if selected and len(selected.strip()) > 0:
-            self.copy_to_clipboard(selected)
-            self.notify("Copied", timeout=1)
+            success = self.copy_to_clipboard(selected)
+            if success:
+                self._copy_failed_notified = False
+                self.notify("Copied", timeout=1)
+            elif not self._copy_failed_notified:
+                self._copy_failed_notified = True
+                self.notify("Copy failed", severity="warning", timeout=2)
 
     def action_quit(self) -> None:  # type: ignore[override]
         # If history search is visible, cancel it
