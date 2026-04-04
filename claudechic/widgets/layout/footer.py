@@ -204,24 +204,40 @@ class StatusFooter(Static):
             app_width - used - CWD_PADDING - (SESSION_PADDING if has_session else 0), 0
         )
 
-        # Compute per-label budgets (cwd wins priority, session gets remainder)
+        # Compute per-label budgets based on actual rendered lengths.
+        # Cwd is formatted first to determine its real width, then session
+        # gets all remaining space. This avoids over-allocating to cwd when
+        # the path is short (e.g. "~" only uses 1 char, not the full budget).
         if has_cwd and has_session:
-            # Cwd gets first claim (capped at MAX_CWD_LENGTH), session gets the rest
-            cwd_budget = min(total_budget, MAX_CWD_LENGTH)
-            session_budget = max(total_budget - cwd_budget, 0)
+            cwd_max = min(total_budget, MAX_CWD_LENGTH)
+            cwd_text = format_cwd(self._cwd, cwd_max)
+            cwd_actual = len(cwd_text)
+            if cwd_actual < MIN_CWD_LENGTH:
+                # Cwd too short to display — give everything to session
+                cwd_budget = 0
+                session_budget = total_budget
+            else:
+                cwd_budget = cwd_actual
+                session_budget = max(total_budget - cwd_actual, 0)
         elif has_session:
             session_budget = total_budget
             cwd_budget = 0
+            cwd_text = ""
         else:  # has_cwd only
             cwd_budget = min(total_budget, MAX_CWD_LENGTH)
             session_budget = 0
+            cwd_text = ""
 
         # Render cwd label
         if cwd_label:
             if cwd_budget < MIN_CWD_LENGTH or not has_cwd:
                 cwd_label.add_class("hidden")
             else:
-                cwd_label.update(format_cwd(self._cwd, cwd_budget))
+                # Use pre-formatted text when available (dual-label path)
+                if has_session and cwd_text:
+                    cwd_label.update(cwd_text)
+                else:
+                    cwd_label.update(format_cwd(self._cwd, cwd_budget))
                 cwd_label.remove_class("hidden")
 
         # Render session label
