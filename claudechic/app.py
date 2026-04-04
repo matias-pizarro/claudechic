@@ -2008,6 +2008,7 @@ class ChatApp(App):
         chat_view = self._chat_view
         if chat_view:
             chat_view.clear()
+        agent.session_id = None  # Clear stale session_id before reconnect
         await agent.disconnect()
         options = self._make_options(
             cwd=agent.cwd, agent_name=agent.name, model=agent.model
