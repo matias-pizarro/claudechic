@@ -45,6 +45,20 @@ async def submit_command(app, pilot, command: str):
     await pilot.pause()
 
 
+def make_fake_pty(output: str = "", returncode: int = 0, was_cancelled: bool = False):
+    """Create a fake run_in_pty_cancellable replacement for UI tests.
+
+    Real PTY execution is unreliable in Textual's headless run_test() context
+    (login shell produces empty output on FreeBSD). Use this factory to build
+    deterministic replacements for shell command UI tests.
+    """
+
+    async def fake_pty(cmd, shell, cwd, env, cancel_event):
+        return (output, returncode, was_cancelled)
+
+    return fake_pty
+
+
 @pytest.fixture
 def mock_sdk():
     """Patch SDK to not actually connect.

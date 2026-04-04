@@ -18,7 +18,7 @@ from claudechic.messages import (
     ToolResultMessage,
 )
 from claude_agent_sdk import ToolUseBlock, ToolResultBlock
-from tests.conftest import wait_for_workers, submit_command
+from tests.conftest import wait_for_workers, submit_command, make_fake_pty
 
 
 @pytest.mark.asyncio
@@ -580,16 +580,14 @@ async def test_bang_command_inline_shell(mock_sdk):
     from unittest.mock import patch
     from claudechic.widgets import ShellOutputWidget
 
-    async def fake_pty(cmd, shell, cwd, env, cancel_event):
-        return ("hello\r\n", 0, False)
-
     app = ChatApp()
     async with app.run_test() as pilot:
         chat_view = app._chat_view
         assert chat_view is not None
 
         with patch(
-            "claudechic.shell_runner.run_in_pty_cancellable", side_effect=fake_pty
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=make_fake_pty(output="hello\r\n"),
         ):
             input_widget = app.query_one("#input", ChatInput)
             input_widget.text = "!echo hello"
@@ -611,16 +609,14 @@ async def test_bang_command_captures_stderr(mock_sdk):
     from unittest.mock import patch
     from claudechic.widgets import ShellOutputWidget
 
-    async def fake_pty(cmd, shell, cwd, env, cancel_event):
-        return ("error\r\n", 0, False)
-
     app = ChatApp()
     async with app.run_test() as pilot:
         chat_view = app._chat_view
         assert chat_view is not None
 
         with patch(
-            "claudechic.shell_runner.run_in_pty_cancellable", side_effect=fake_pty
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=make_fake_pty(output="error\r\n"),
         ):
             input_widget = app.query_one("#input", ChatInput)
             input_widget.text = "!echo error >&2"
@@ -641,16 +637,14 @@ async def test_bang_command_shows_exit_code(mock_sdk):
     from unittest.mock import patch
     from claudechic.widgets import ShellOutputWidget
 
-    async def fake_pty(cmd, shell, cwd, env, cancel_event):
-        return ("", 42, False)
-
     app = ChatApp()
     async with app.run_test() as pilot:
         chat_view = app._chat_view
         assert chat_view is not None
 
         with patch(
-            "claudechic.shell_runner.run_in_pty_cancellable", side_effect=fake_pty
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=make_fake_pty(returncode=42),
         ):
             input_widget = app.query_one("#input", ChatInput)
             input_widget.text = "!exit 42"
