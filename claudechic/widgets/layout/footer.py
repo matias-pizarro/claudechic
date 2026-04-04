@@ -229,6 +229,7 @@ class StatusFooter(Static):
             if session_budget < MIN_SESSION_LENGTH or not has_session:
                 session_label.add_class("hidden")
             else:
+                assert self._session_id is not None  # narrowed by has_session guard
                 session_label.update(format_session_id(self._session_id, session_budget))
                 session_label.remove_class("hidden")
 

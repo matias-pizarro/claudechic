@@ -74,7 +74,7 @@ claudechic/
     ├── layout/        # Structural/container widgets
     │   ├── chat_view.py # ChatView - renders agent messages
     │   ├── sidebar.py # AgentSidebar, AgentItem, WorktreeItem
-    │   ├── footer.py  # StatusFooter, AutoEditLabel, ModelLabel
+    │   ├── footer.py  # StatusFooter, SessionIndicator, AutoEditLabel, ModelLabel
     │   ├── indicators.py # IndicatorWidget, CPUBar, ContextBar, ProcessIndicator
     │   └── processes.py # ProcessPanel, ProcessItem
     ├── reports/       # In-page report widgets
