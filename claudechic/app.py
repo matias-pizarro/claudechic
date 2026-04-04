@@ -76,6 +76,7 @@ from claudechic.widgets import (
     ReviewPanel,
     SelectionPrompt,
     QuestionPrompt,
+    BasePrompt,
     TextAreaAutoComplete,
     HistorySearch,
     AgentSection,
@@ -2294,7 +2295,7 @@ class ChatApp(App):
             event.stop()
 
     def on_key(self, event) -> None:
-        if self.query(SelectionPrompt) or self.query(QuestionPrompt):
+        if isinstance(self.focused, BasePrompt):
             return
         if not self._chat_input or self.focused == self._chat_input:
             return

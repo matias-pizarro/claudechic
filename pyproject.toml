@@ -40,9 +40,11 @@ Repository = "https://github.com/mrocklin/claudechic"
 claudechic = "claudechic.__main__:main"
 
 [dependency-groups]
-dev = [
+dashboard = [
     "altair>=6.0.0",
     "marimo>=0.19.6",
+]
+dev = [
     "mkdocs>=1.6.1",
     "mkdocs-material>=9.7.1",
     "pre-commit>=4.0.0",
