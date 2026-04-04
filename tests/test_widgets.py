@@ -489,6 +489,49 @@ async def test_status_footer_render_cwd_label_shows_with_budget():
         assert label is not None
 
 
+@pytest.mark.asyncio
+async def test_status_footer_set_session_id_hides_when_none():
+    """set_session_id(None) hides the session label."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 3)):
+        footer = app.query_one(StatusFooter)
+        footer._session_id = None
+        footer._render_cwd_label()
+        label = footer.query_one("#session-label")
+        assert "hidden" in label.classes
+
+
+@pytest.mark.asyncio
+async def test_status_footer_set_session_id_hides_when_empty():
+    """set_session_id('') hides the session label."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 3)):
+        footer = app.query_one(StatusFooter)
+        footer._session_id = ""
+        footer._render_cwd_label()
+        label = footer.query_one("#session-label")
+        assert "hidden" in label.classes
+
+
+@pytest.mark.asyncio
+async def test_status_footer_set_session_id_stores_value():
+    """set_session_id stores the value and triggers re-render."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 3)):
+        footer = app.query_one(StatusFooter)
+        footer.set_session_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+        assert footer._session_id == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+
+@pytest.mark.asyncio
+async def test_status_footer_session_id_none_by_default():
+    """_session_id is None on a fresh StatusFooter."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 3)):
+        footer = app.query_one(StatusFooter)
+        assert footer._session_id is None
+
+
 class TestFormatSessionId:
     """Tests for format_session_id() adaptive truncation."""
 

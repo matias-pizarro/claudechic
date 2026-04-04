@@ -9,7 +9,7 @@ from textual.reactive import reactive
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-from claudechic.formatting import format_cwd, MIN_CWD_LENGTH, MAX_CWD_LENGTH
+from claudechic.formatting import format_cwd, format_session_id, MIN_CWD_LENGTH, MAX_CWD_LENGTH, MIN_SESSION_LENGTH
 from claudechic.widgets.base.clickable import ClickableLabel
 from claudechic.widgets.layout.indicators import CPUBar, ContextBar, ProcessIndicator
 from claudechic.processes import BackgroundProcess
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 # CSS "padding: 0 1" on #cwd-label = 1 left + 1 right = 2 horizontal cells
 CWD_PADDING = 2
+SESSION_PADDING = 2  # CSS "padding: 0 1" on .footer-label = 1 left + 1 right
 
 
 class PermissionModeLabel(ClickableLabel):
@@ -82,6 +83,12 @@ class ViModeLabel(Static):
             self.add_class("vi-visual")
 
 
+class SessionIndicator(Static):
+    """Passive session ID label in the footer. Content set by StatusFooter._render_cwd_label."""
+
+    pass
+
+
 async def get_git_branch(cwd: str | None = None) -> str:
     """Get current git branch name (async)."""
     try:
@@ -110,6 +117,7 @@ class StatusFooter(Static):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._cwd: str = ""
+        self._session_id: str | None = None
 
     async def on_mount(self) -> None:
         self.branch = await get_git_branch()
@@ -131,6 +139,7 @@ class StatusFooter(Static):
             yield ContextBar(id="context-bar")
             yield CPUBar(id="cpu-bar")
             yield Static("", id="cwd-label", classes="footer-label hidden")
+            yield SessionIndicator("", id="session-label", classes="footer-label hidden")
             yield Static("", id="branch-label", classes="footer-label")
 
     def set_cwd(self, cwd: str) -> None:
@@ -138,41 +147,90 @@ class StatusFooter(Static):
         self._cwd = cwd
         self.call_after_refresh(self._render_cwd_label)
 
+    def set_session_id(self, session_id: str | None) -> None:
+        """Update session_id value and schedule re-render."""
+        self._session_id = session_id
+        self.call_after_refresh(self._render_cwd_label)
+
     def refresh_cwd_label(self) -> None:
         """Public API for app to trigger cwd budget recomputation."""
         self._render_cwd_label()
 
     def _render_cwd_label(self) -> None:
-        """Recompute cwd budget from sibling widths and render.
+        """Recompute cwd and session label budgets from sibling widths and render.
+
+        Also renders session label (budget split).
 
         CONVENTION: Every method that changes a footer widget's content or
         visibility MUST defer a call to this method via call_after_refresh.
         Integration tests in test_app_ui.py verify this behaviorally.
         """
-        label = self.query_one_optional("#cwd-label", Static)
-        if not label:
+        cwd_label = self.query_one_optional("#cwd-label", Static)
+        session_label = self.query_one_optional("#session-label", SessionIndicator)
+
+        has_cwd = bool(self._cwd)
+        has_session = bool(self._session_id)
+
+        # Hide labels with no content
+        if cwd_label and not has_cwd:
+            cwd_label.add_class("hidden")
+        if session_label and not has_session:
+            session_label.add_class("hidden")
+
+        # Nothing to render — early return
+        if not has_cwd and not has_session:
             return
-        if not self._cwd:
-            label.add_class("hidden")
-            return
+
         try:
             app_width = self.app.size.width
             footer_content = self.query_one("#footer-content")
         except Exception:
-            label.add_class("hidden")
+            if cwd_label:
+                cwd_label.add_class("hidden")
+            if session_label:
+                session_label.add_class("hidden")
             log.debug("_render_cwd_label: footer not ready", exc_info=True)
             return
+
+        # Sum widths of all fixed-size siblings
         used = sum(
             child.outer_size.width
             for child in footer_content.children
-            if child.id not in ("cwd-label", "footer-spacer")
+            if child.id not in ("cwd-label", "session-label", "footer-spacer")
         )
-        budget = min(max(app_width - used - CWD_PADDING, 0), MAX_CWD_LENGTH)
-        if budget < MIN_CWD_LENGTH:
-            label.add_class("hidden")
-        else:
-            label.update(format_cwd(self._cwd, budget))
-            label.remove_class("hidden")
+
+        # Only subtract SESSION_PADDING when session_id is present
+        total_budget = max(
+            app_width - used - CWD_PADDING - (SESSION_PADDING if has_session else 0), 0
+        )
+
+        # Compute per-label budgets (cwd wins priority when budget is tight)
+        if has_cwd and has_session:
+            # Session gets up to 12 chars, but only if cwd can still meet its minimum
+            session_budget = min(12, max(total_budget - MIN_CWD_LENGTH, 0))
+            cwd_budget = min(total_budget - session_budget, MAX_CWD_LENGTH)
+        elif has_session:
+            session_budget = min(12, total_budget)
+            cwd_budget = 0
+        else:  # has_cwd only
+            cwd_budget = min(total_budget, MAX_CWD_LENGTH)
+            session_budget = 0
+
+        # Render cwd label
+        if cwd_label:
+            if cwd_budget < MIN_CWD_LENGTH or not has_cwd:
+                cwd_label.add_class("hidden")
+            else:
+                cwd_label.update(format_cwd(self._cwd, cwd_budget))
+                cwd_label.remove_class("hidden")
+
+        # Render session label
+        if session_label:
+            if session_budget < MIN_SESSION_LENGTH or not has_session:
+                session_label.add_class("hidden")
+            else:
+                session_label.update(format_session_id(self._session_id, session_budget))
+                session_label.remove_class("hidden")
 
     def watch_branch(self, value: str) -> None:
         """Update branch label when branch changes."""
