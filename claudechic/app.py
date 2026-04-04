@@ -1796,13 +1796,16 @@ class ChatApp(App):
             if chat_view:
                 chat_view.clear()
             agent.cwd = new_cwd
-            # Update footer cwd + branch + sidebar for reconnected agent
-            self.status_footer.set_cwd(str(new_cwd))
+            # Update sidebar for reconnected agent (always, sidebar shows all agents)
             self._update_sidebar_agent_context(agent)
-            create_safe_task(
-                self.status_footer.refresh_branch(str(new_cwd)),
-                name="refresh-branch",
-            )
+            # Only update footer if this agent is still active (user may have
+            # switched agents while the reconnect was in flight)
+            if agent is self._agent:
+                self.status_footer.set_cwd(str(new_cwd))
+                create_safe_task(
+                    self.status_footer.refresh_branch(str(new_cwd)),
+                    name="refresh-branch",
+                )
 
             if resume_id:
                 await self._load_and_display_history(resume_id, cwd=new_cwd)
