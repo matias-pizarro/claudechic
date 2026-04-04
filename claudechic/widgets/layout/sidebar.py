@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from textual.app import ComposeResult
+from textual.containers import Horizontal
 from textual.events import Click
 from textual.message import Message
 from textual.reactive import reactive
@@ -13,6 +14,7 @@ from textual.widgets import Static, Label, ListItem
 from rich.text import Text
 
 from claudechic.enums import AgentStatus
+from claudechic.formatting import MAX_CONTEXT_TOKENS, format_cwd, format_tokens
 from claudechic.widgets.primitives.button import Button
 
 
@@ -407,15 +409,27 @@ class AgentItem(SidebarItem):
 
     DEFAULT_CSS = """
     AgentItem {
-        layout: horizontal;
+        height: 5;
+        min-height: 5;
+        layout: vertical;
+        padding: 1 1 0 2;
+    }
+    AgentItem.compact {
+        height: 1;
+        min-height: 1;
+        padding: 0 1 0 2;
     }
     AgentItem.active {
-        padding: 1 1 1 1;
+        padding: 1 1 0 1;
         border-left: wide $primary;
         background: $surface;
     }
     AgentItem.active.compact {
         padding: 0 1 0 1;
+    }
+    AgentItem .agent-top-row {
+        layout: horizontal;
+        height: 1;
     }
     AgentItem .agent-label {
         width: 1fr;
@@ -436,9 +450,24 @@ class AgentItem(SidebarItem):
         color: $error;
         background: $panel-lighten-1;
     }
+    AgentItem .agent-cwd {
+        height: 1;
+        padding: 0 0 0 2;
+        overflow: hidden;
+    }
+    AgentItem .agent-context {
+        height: 1;
+        padding: 0 0 0 2;
+        overflow: hidden;
+    }
+    AgentItem.compact .agent-cwd,
+    AgentItem.compact .agent-context {
+        display: none;
+    }
     """
 
     max_name_length: int = 14
+    max_cwd_length: int = 20
 
     status: reactive[AgentStatus] = reactive(AgentStatus.IDLE)
 
@@ -449,10 +478,16 @@ class AgentItem(SidebarItem):
         self.agent_id = agent_id
         self.display_name = display_name
         self.status = status
+        self._cwd: str = ""
+        self._tokens: int = 0
+        self._max_tokens: int = MAX_CONTEXT_TOKENS
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render_label(), classes="agent-label")
-        yield Static(Text("X"), classes="agent-close")
+        with Horizontal(classes="agent-top-row"):
+            yield Static(self._render_label(), classes="agent-label")
+            yield Static(Text("X"), classes="agent-close")
+        yield Static(self._render_cwd_label(), classes="agent-cwd")
+        yield Static(self._render_context_label(), classes="agent-context")
 
     def _render_label(self) -> Text:
         if self.status == AgentStatus.BUSY:
@@ -466,6 +501,59 @@ class AgentItem(SidebarItem):
             style = "dim"
         name = self.truncate_name(self.display_name)
         return Text.assemble((indicator, style), " ", (name, ""))
+
+    def _render_cwd_label(self) -> Text:
+        """Render the cwd row (dim, segment-truncated via format_cwd)."""
+        cwd = format_cwd(self._cwd, self.max_cwd_length)
+        return Text(cwd, style="dim")
+
+    def _render_context_label(self) -> Text:
+        """Render the context row: percentage and token counts."""
+        pct = min(self._tokens / self._max_tokens, 1.0) if self._max_tokens else 0
+        pct_str = f"{pct * 100:.0f}%"
+
+        if pct < 0.5:
+            color = "dim"
+        elif pct < 0.8:
+            color = "yellow"
+        else:
+            color = "red"
+
+        used = format_tokens(self._tokens)
+        total = format_tokens(self._max_tokens)
+        return Text.assemble(
+            (pct_str, color),
+            (" ", ""),
+            (f"[{used}/{total}]", "dim"),
+        )
+
+    def update_context(
+        self,
+        *,
+        cwd: str | None = None,
+        tokens: int | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Update context info and refresh display."""
+        changed = False
+        if cwd is not None and cwd != self._cwd:
+            self._cwd = cwd
+            changed = True
+        if tokens is not None and tokens != self._tokens:
+            self._tokens = tokens
+            changed = True
+        if max_tokens is not None and max_tokens != self._max_tokens:
+            self._max_tokens = max_tokens
+            changed = True
+        if changed:
+            self._refresh_detail_rows()
+
+    def _refresh_detail_rows(self) -> None:
+        """Update the cwd and context static widgets."""
+        if cwd_widget := self.query_one_optional(".agent-cwd", Static):
+            cwd_widget.update(self._render_cwd_label())
+        if ctx_widget := self.query_one_optional(".agent-context", Static):
+            ctx_widget.update(self._render_context_label())
 
     def watch_status(self, _status: str) -> None:
         """Update label when status changes."""
@@ -539,6 +627,20 @@ class AgentSection(SidebarSection):
         """Update an agent's status."""
         if agent_id in self._agents:
             self._agents[agent_id].status = status
+
+    def update_agent_context(
+        self,
+        agent_id: str,
+        *,
+        cwd: str | None = None,
+        tokens: int | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Update context info for a specific agent's sidebar item."""
+        if agent_id in self._agents:
+            self._agents[agent_id].update_context(
+                cwd=cwd, tokens=tokens, max_tokens=max_tokens
+            )
 
     def add_worktree(self, branch: str, path: Path) -> None:
         """Add a ghost worktree to the sidebar."""

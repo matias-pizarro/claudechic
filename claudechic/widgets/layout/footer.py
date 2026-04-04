@@ -1,6 +1,7 @@
 """Custom footer widget."""
 
 import asyncio
+import logging
 
 from textual.app import ComposeResult
 from textual.message import Message
@@ -8,10 +9,16 @@ from textual.reactive import reactive
 from textual.containers import Horizontal
 from textual.widgets import Static
 
+from claudechic.formatting import format_cwd, MIN_CWD_LENGTH, MAX_CWD_LENGTH
 from claudechic.widgets.base.clickable import ClickableLabel
 from claudechic.widgets.layout.indicators import CPUBar, ContextBar, ProcessIndicator
 from claudechic.processes import BackgroundProcess
 from claudechic.widgets.input.vi_mode import ViMode
+
+log = logging.getLogger(__name__)
+
+# CSS "padding: 0 1" on #cwd-label = 1 left + 1 right = 2 horizontal cells
+CWD_PADDING = 2
 
 
 class PermissionModeLabel(ClickableLabel):
@@ -100,6 +107,10 @@ class StatusFooter(Static):
     model = reactive("")
     branch = reactive("")
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._cwd: str = ""
+
     async def on_mount(self) -> None:
         self.branch = await get_git_branch()
 
@@ -119,17 +130,61 @@ class StatusFooter(Static):
             yield ProcessIndicator(id="process-indicator", classes="hidden")
             yield ContextBar(id="context-bar")
             yield CPUBar(id="cpu-bar")
+            yield Static("", id="cwd-label", classes="footer-label hidden")
             yield Static("", id="branch-label", classes="footer-label")
+
+    def set_cwd(self, cwd: str) -> None:
+        """Update cwd value and schedule re-render."""
+        self._cwd = cwd
+        self.call_after_refresh(self._render_cwd_label)
+
+    def refresh_cwd_label(self) -> None:
+        """Public API for app to trigger cwd budget recomputation."""
+        self._render_cwd_label()
+
+    def _render_cwd_label(self) -> None:
+        """Recompute cwd budget from sibling widths and render.
+
+        CONVENTION: Every method that changes a footer widget's content or
+        visibility MUST defer a call to this method via call_after_refresh.
+        Integration tests in test_app_ui.py verify this behaviorally.
+        """
+        label = self.query_one_optional("#cwd-label", Static)
+        if not label:
+            return
+        if not self._cwd:
+            label.add_class("hidden")
+            return
+        try:
+            app_width = self.app.size.width
+            footer_content = self.query_one("#footer-content")
+        except Exception:
+            label.add_class("hidden")
+            log.debug("_render_cwd_label: footer not ready", exc_info=True)
+            return
+        used = sum(
+            child.outer_size.width
+            for child in footer_content.children
+            if child.id not in ("cwd-label", "footer-spacer")
+        )
+        budget = min(max(app_width - used - CWD_PADDING, 0), MAX_CWD_LENGTH)
+        if budget < MIN_CWD_LENGTH:
+            label.add_class("hidden")
+        else:
+            label.update(format_cwd(self._cwd, budget))
+            label.remove_class("hidden")
 
     def watch_branch(self, value: str) -> None:
         """Update branch label when branch changes."""
         if label := self.query_one_optional("#branch-label", Static):
             label.update(f"⎇ {value}" if value else "")
+        self.call_after_refresh(self._render_cwd_label)
 
     def watch_model(self, value: str) -> None:
         """Update model label when model changes."""
         if label := self.query_one_optional("#model-label", ModelLabel):
             label.update(value if value else "")
+        self.call_after_refresh(self._render_cwd_label)
 
     def watch_permission_mode(self, value: str) -> None:
         """Update permission mode label when setting changes."""
@@ -156,13 +211,16 @@ class StatusFooter(Static):
                 label.set_class(False, "active")
                 label.set_class(False, "plan-mode")
                 label.set_class(False, "plan-swarm-mode")
+        self.call_after_refresh(self._render_cwd_label)
 
     def update_processes(self, processes: list[BackgroundProcess]) -> None:
         """Update the process indicator."""
         if indicator := self.query_one_optional("#process-indicator", ProcessIndicator):
             indicator.update_processes(processes)
+        self.call_after_refresh(self._render_cwd_label)
 
     def update_vi_mode(self, mode: ViMode | None, enabled: bool = True) -> None:
         """Update the vi-mode indicator."""
         if label := self.query_one_optional("#vi-mode-label", ViModeLabel):
             label.set_mode(mode, enabled)
+        self.call_after_refresh(self._render_cwd_label)
