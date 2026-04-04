@@ -94,6 +94,7 @@ from claudechic.widgets.layout.footer import (
     PermissionModeLabel,
     ModelLabel,
     StatusFooter,
+    get_git_branch,
 )
 from claudechic.widgets.prompts import ModelPrompt
 from claudechic.errors import setup_logging  # noqa: F401 - used at startup
@@ -939,13 +940,18 @@ class ChatApp(App):
         self._review_poll_agent_id = None
 
     async def _load_and_display_history(
-        self, session_id: str, cwd: Path | None = None
+        self,
+        session_id: str,
+        cwd: Path | None = None,
+        agent: "Agent | None" = None,
     ) -> None:
         """Load session history into agent and render in chat view.
 
         This uses Agent.messages as the single source of truth.
+        If agent is not provided, defaults to the current active agent.
         """
-        agent = self._agent
+        if agent is None:
+            agent = self._agent
         if not agent:
             return
 
@@ -1802,14 +1808,23 @@ class ChatApp(App):
             # switched agents while the reconnect was in flight)
             if agent is self._agent:
                 self.status_footer.set_cwd(str(new_cwd))
+                # Wrap branch refresh to re-check active agent after the async
+                # git call completes — prevents stale branch from overwriting
+                # a newly-switched agent's branch
+                async def _guarded_refresh_branch():
+                    branch = await get_git_branch(str(new_cwd))
+                    if agent is self._agent:
+                        self.status_footer.branch = branch
+
                 create_safe_task(
-                    self.status_footer.refresh_branch(str(new_cwd)),
+                    _guarded_refresh_branch(),
                     name="refresh-branch",
                 )
 
             if resume_id:
-                await self._load_and_display_history(resume_id, cwd=new_cwd)
-                agent.session_id = resume_id
+                await self._load_and_display_history(
+                    resume_id, cwd=new_cwd, agent=agent
+                )
                 self.notify(f"Resumed session in {new_cwd.name}")
             else:
                 agent.session_id = None
