@@ -48,13 +48,14 @@ class TestRunInPty:
         output, rc = run_in_pty("exit 42", shell, None, dict(os.environ))
         assert rc == 42
 
-    def test_respects_cwd(self):
+    def test_respects_cwd(self, tmp_path):
         """PTY runs command in specified working directory."""
         from claudechic.shell_runner import run_in_pty
 
         shell = os.environ.get("SHELL", "/bin/sh")
-        output, rc = run_in_pty("pwd", shell, "/tmp", dict(os.environ))
-        assert "/tmp" in output
+        cwd = str(tmp_path)
+        output, rc = run_in_pty("pwd", shell, cwd, dict(os.environ))
+        assert cwd in output
         assert rc == 0
 
 
