@@ -1207,6 +1207,12 @@ class ChatApp(App):
         """Reposition right sidebar on resize and handle compact height."""
         self.call_after_refresh(self._position_right_sidebar)
         self.call_after_refresh(self._apply_compact_height)
+        self.call_after_refresh(self._refresh_footer_cwd)
+
+    def _refresh_footer_cwd(self) -> None:
+        """Recompute footer cwd budget after layout changes. Safe before mount."""
+        if self._status_footer is not None:
+            self._status_footer.refresh_cwd_label()
 
     def _position_right_sidebar(self) -> None:
         """Show/hide right sidebar and adjust centering based on terminal width."""
@@ -1790,6 +1796,13 @@ class ChatApp(App):
             if chat_view:
                 chat_view.clear()
             agent.cwd = new_cwd
+            # Update footer cwd + branch + sidebar for reconnected agent
+            self.status_footer.set_cwd(str(new_cwd))
+            self._update_sidebar_agent_context(agent)
+            create_safe_task(
+                self.status_footer.refresh_branch(str(new_cwd)),
+                name="refresh-branch",
+            )
 
             if resume_id:
                 await self._load_and_display_history(resume_id, cwd=new_cwd)
@@ -2408,6 +2421,7 @@ class ChatApp(App):
         self._refresh_reviews(new_agent)
 
         # These happen outside (async/focus)
+        self.status_footer.set_cwd(str(new_agent.cwd))
         create_safe_task(self._async_refresh_files(new_agent), name="refresh-files")
         create_safe_task(
             self.status_footer.refresh_branch(str(new_agent.cwd)), name="refresh-branch"

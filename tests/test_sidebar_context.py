@@ -73,13 +73,17 @@ class TestAgentItemContextLabel:
 
 
 class TestAgentItemCwdLabel:
-    def test_cwd_truncation(self):
-        """Long paths are front-truncated."""
+    def test_cwd_truncation_segment_based(self):
+        """Long paths use segment-based truncation (…/segment)."""
         item = AgentItem("id1", "main", AgentStatus.IDLE)
         item._cwd = "/very/long/path/to/some/deeply/nested/project"
         label = item._render_cwd_label()
         plain = _plain(label)
-        assert plain.startswith("\u2026") or len(plain) <= 20
+        assert len(plain) <= item.max_cwd_length
+        # Segment-based: starts with …/ (not mid-word …)
+        assert plain.startswith("\u2026/")
+        # Should include last segment
+        assert "project" in plain
 
     def test_cwd_short_path(self):
         """Short paths are shown as-is."""

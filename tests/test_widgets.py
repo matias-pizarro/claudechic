@@ -1,5 +1,7 @@
 """Pure widget tests - no SDK needed."""
 
+import asyncio
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -416,6 +418,75 @@ async def test_status_footer_permission_mode():
         rendered = label.render()
         assert hasattr(rendered, "plain")
         assert "plan mode" in rendered.plain.lower()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_status_footer_cwd_hidden_by_default():
+    """#cwd-label starts hidden before any set_cwd call."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 24)):
+        footer = app.query_one(StatusFooter)
+        label = footer.query_one("#cwd-label", Static)
+        assert label.has_class("hidden")
+
+
+@pytest.mark.asyncio
+async def test_status_footer_set_cwd_stores_raw():
+    """set_cwd stores the raw path in _cwd for external reads."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 24)):
+        footer = app.query_one(StatusFooter)
+        footer.set_cwd("/home/user/code/project")
+        assert footer._cwd == "/home/user/code/project"
+
+
+@pytest.mark.asyncio
+async def test_status_footer_set_cwd_empty_hides():
+    """set_cwd with empty string hides the label."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 24)):
+        footer = app.query_one(StatusFooter)
+        # First set a value, then clear it
+        footer._cwd = "something"
+        footer.set_cwd("")
+        # _render_cwd_label runs synchronously from set_cwd's deferred callback;
+        # call it directly to avoid CSS layout dependency
+        footer._render_cwd_label()
+        label = footer.query_one("#cwd-label", Static)
+        assert label.has_class("hidden")
+
+
+@pytest.mark.asyncio
+async def test_status_footer_render_cwd_label_empty():
+    """_render_cwd_label hides label when _cwd is empty."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 24)):
+        footer = app.query_one(StatusFooter)
+        footer._cwd = ""
+        footer._render_cwd_label()
+        label = footer.query_one("#cwd-label", Static)
+        assert label.has_class("hidden")
+
+
+@pytest.mark.asyncio
+async def test_status_footer_render_cwd_label_shows_with_budget():
+    """_render_cwd_label shows cwd when budget is sufficient.
+
+    Note: WidgetTestApp doesn't load styles.tcss, so sibling widgets
+    don't have proper CSS widths. This test uses the real ChatApp's CSS
+    path which is tested in test_app_ui.py integration tests.
+    Here we just verify the method doesn't crash and handles the label.
+    """
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test(size=(120, 24)):
+        footer = app.query_one(StatusFooter)
+        footer._cwd = "~/projects/myapp"
+        # Can't test visibility without real CSS (sibling widths all 120),
+        # but we can verify the method runs without error
+        footer._render_cwd_label()
+        # Label exists and is accessible
+        label = footer.query_one("#cwd-label", Static)
+        assert label is not None
 
 
 @pytest.mark.asyncio

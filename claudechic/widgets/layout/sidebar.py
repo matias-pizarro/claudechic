@@ -1,6 +1,5 @@
 """Agent sidebar widget for multi-agent management."""
 
-import os
 import re
 import time
 from pathlib import Path
@@ -15,7 +14,7 @@ from textual.widgets import Static, Label, ListItem
 from rich.text import Text
 
 from claudechic.enums import AgentStatus
-from claudechic.formatting import MAX_CONTEXT_TOKENS, format_tokens
+from claudechic.formatting import MAX_CONTEXT_TOKENS, format_cwd, format_tokens
 from claudechic.widgets.primitives.button import Button
 
 
@@ -504,15 +503,8 @@ class AgentItem(SidebarItem):
         return Text.assemble((indicator, style), " ", (name, ""))
 
     def _render_cwd_label(self) -> Text:
-        """Render the cwd row (dim, front-truncated)."""
-        cwd = self._cwd
-        if not cwd:
-            return Text("")
-        home = os.path.expanduser("~")
-        if cwd.startswith(home):
-            cwd = "~" + cwd[len(home) :]
-        if len(cwd) > self.max_cwd_length:
-            cwd = "\u2026" + cwd[-(self.max_cwd_length - 1) :]
+        """Render the cwd row (dim, segment-truncated via format_cwd)."""
+        cwd = format_cwd(self._cwd, self.max_cwd_length)
         return Text(cwd, style="dim")
 
     def _render_context_label(self) -> Text:
