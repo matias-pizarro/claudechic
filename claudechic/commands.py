@@ -100,6 +100,7 @@ COMMANDS: list[tuple[str, str, list[str]]] = [
     ("/vim", "Toggle vi mode for input", []),
     ("/processes", "Show background processes", []),
     ("/reviews", "Show roborev reviews", []),
+    ("/session-id", "Show and copy session ID", []),
     (
         "/analytics",
         "Analytics settings (opt-in/opt-out)",
@@ -215,6 +216,10 @@ def handle_command(app: "ChatApp", prompt: str) -> bool:
         _track_command(app, "usage")
         app._handle_usage_command()
         return True
+
+    if cmd == "/session-id":
+        _track_command(app, "session-id")
+        return _handle_session_id(app)
 
     if cmd == "/model" or cmd.startswith("/model "):
         _track_command(app, "model")
@@ -1083,3 +1088,27 @@ def start_plan_swarm(app: "ChatApp", task: str) -> None:
         swarm_id=swarm_id,
     )
     app._send_to_active_agent(orchestrator_prompt, display_as="/plan-swarm")
+
+
+def _handle_session_id(app: "ChatApp") -> bool:
+    """Handle /session-id - show and copy the current session ID."""
+    agent = app._agent
+    session_id = agent.session_id if agent else None
+    agent_id = agent.id if agent else None
+
+    if not session_id:
+        app._show_system_info("No active session", "info", agent_id)
+        return True
+
+    agent_name = agent.name if agent else "unknown"
+    msg = f"Session ID ({agent_name}): {session_id}"
+    app._show_system_info(msg, "info", agent_id)
+
+    # Best-effort clipboard copy
+    try:
+        app.copy_to_clipboard(session_id)
+        app.notify("Copied to clipboard")
+    except Exception:
+        pass  # Clipboard unavailable (SSH, headless) — message already printed
+
+    return True

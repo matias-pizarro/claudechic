@@ -603,6 +603,24 @@ class TestFormatSessionId:
         assert MIN_SESSION_LENGTH == 8
 
 
+def test_session_id_command_in_registry():
+    """The /session-id command is registered for autocomplete and help."""
+    from claudechic.commands import COMMANDS, get_autocomplete_commands
+
+    names = [name for name, _, _ in COMMANDS]
+    assert "/session-id" in names
+
+    autocomplete = get_autocomplete_commands()
+    assert "/session-id" in autocomplete
+
+
+def test_handle_session_id_callable():
+    """_handle_session_id function exists and is callable."""
+    from claudechic.commands import _handle_session_id
+
+    assert callable(_handle_session_id)
+
+
 @pytest.mark.asyncio
 async def test_chat_message_append():
     """ChatMessage accumulates content."""
