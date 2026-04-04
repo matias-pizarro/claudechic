@@ -15,7 +15,7 @@ from claudechic.enums import ToolName
 MAX_CONTEXT_TOKENS = 200_000  # Claude's context window
 MAX_HEADER_WIDTH = 70  # Max width for tool headers
 MIN_CWD_LENGTH = 10  # Below this budget, hide cwd entirely
-MAX_CWD_LENGTH = 60  # Cap to prevent cwd from dominating the bar
+MAX_CWD_LENGTH = 80  # Cap to prevent cwd from dominating the bar
 
 
 def format_cwd(path: str, max_length: int) -> str:
