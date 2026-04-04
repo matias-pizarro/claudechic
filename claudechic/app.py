@@ -1171,12 +1171,18 @@ class ChatApp(App):
             content = data.get("content", "Conversation compacted")
             self._show_system_info(content, "info", event.agent_id)
 
+        elif subtype == "init":
+            # Session ID was captured by agent layer; push to footer
+            agent = self._get_agent(event.agent_id)
+            if agent and self.agent_mgr and event.agent_id == self.agent_mgr.active_id:
+                self.status_footer.set_session_id(agent.session_id)
+
         elif level == "error":
             # Generic error handling for any error-level message
             msg = data.get("content", data.get("error", f"System error: {subtype}"))
             self._show_system_info(str(msg)[:200], "error", event.agent_id)
 
-        elif subtype not in ("stop_hook_summary", "turn_duration", "local_command"):
+        elif subtype not in ("stop_hook_summary", "turn_duration", "local_command", "init"):
             # Unknown subtype with content - might be important (like terms notification)
             content = data.get("content") or data.get("message")
             if content:
@@ -1367,6 +1373,9 @@ class ChatApp(App):
         if event.result and agent:
             agent.session_id = event.result.session_id
             self.refresh_context()
+            # Update session ID in footer (gated to active agent)
+            if self.agent_mgr and event.agent_id == self.agent_mgr.active_id:
+                self.status_footer.set_session_id(agent.session_id)
         if chat_view:
             # End response via ChatView (hides thinking, flushes content)
             chat_view.end_response()
@@ -1424,6 +1433,9 @@ class ChatApp(App):
         try:
             await self._reconnect_agent(agent, session_id)
             agent.session_id = session_id
+            # Update footer if this agent is still active (async — user may have switched)
+            if self.agent_mgr and agent.id == self.agent_mgr.active_id:
+                self.status_footer.set_session_id(agent.session_id)
             self.post_message(ResponseComplete(None))
             self.refresh_context()
             # Check for plan file
@@ -1826,9 +1838,13 @@ class ChatApp(App):
                 await self._load_and_display_history(
                     resume_id, cwd=new_cwd, agent=agent
                 )
+                if agent is self._agent:
+                    self.status_footer.set_session_id(agent.session_id)
                 self.notify(f"Resumed session in {new_cwd.name}")
             else:
                 agent.session_id = None
+                if agent is self._agent:
+                    self.status_footer.set_session_id(None)
                 self.notify(f"SDK reconnected in {new_cwd.name}")
         except Exception as e:
             self.show_error("SDK reconnect failed", e)
@@ -2009,6 +2025,8 @@ class ChatApp(App):
         if chat_view:
             chat_view.clear()
         agent.session_id = None  # Clear stale session_id before reconnect
+        if agent is self._agent:
+            self.status_footer.set_session_id(None)
         await agent.disconnect()
         options = self._make_options(
             cwd=agent.cwd, agent_name=agent.name, model=agent.model
@@ -2442,6 +2460,7 @@ class ChatApp(App):
 
         # These happen outside (async/focus)
         self.status_footer.set_cwd(str(new_agent.cwd))
+        self.status_footer.set_session_id(new_agent.session_id)
         create_safe_task(self._async_refresh_files(new_agent), name="refresh-files")
         create_safe_task(
             self.status_footer.refresh_branch(str(new_agent.cwd)), name="refresh-branch"
