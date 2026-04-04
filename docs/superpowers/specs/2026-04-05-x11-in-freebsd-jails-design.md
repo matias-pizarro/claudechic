@@ -170,7 +170,7 @@ Each component waits for its dependency to be ready before launching:
 2. **Readiness probe:** poll `xdpyinfo -display :99` (retry up to 10 times, 0.5s apart) until success
 3. Start Xpra shadow (only after Xvfb is confirmed ready)
 4. Start x11vnc (only after Xvfb is confirmed ready)
-5. **Readiness probe:** poll x11vnc port with `nc -z 127.0.0.1 5900` until it responds
+5. **Readiness probe:** poll x11vnc port with `socket.connect_ex(("127.0.0.1", 5900))` until it returns 0
 6. Start websockify (only after x11vnc port is listening)
 
 If any readiness probe times out (5s default), the script prints the component's log file path and exits with an error.
@@ -179,9 +179,9 @@ If any readiness probe times out (5s default), the script prints the component's
 
 Each process writes a pidfile to `/tmp/.x11ctl-<component>.pid`. The script validates pidfiles before acting:
 
-- **On start:** check if pidfile exists. If it does, verify the PID is alive AND belongs to the expected process using `ps -p <pid> -o comm=` (not `/proc`, which is unavailable in FreeBSD jails by default). If the PID is stale (dead or wrong process), remove the pidfile and proceed. If the PID is live and correct, skip (idempotent).
-- **On stop:** read PID from file, validate it's the right process via `ps`, send SIGTERM, wait up to 3s, send SIGKILL if still alive. Remove pidfile. If the process is already gone, just clean up the pidfile.
-- **Daemonization note:** Xvfb and x11vnc are backgrounded by the script (`&` + capture `$!`). Xpra daemonizes itself by default and writes its own PID to a file; the script reads Xpra's native pidfile location (`~/.xpra/`) rather than managing it separately.
+- **On start:** check if pidfile exists. If it does, verify the PID is alive AND belongs to the expected process using `subprocess.run(["ps", "-p", str(pid), "-o", "comm="])` (not `/proc`, which is unavailable in FreeBSD jails by default). If the PID is stale (dead or wrong process), remove the pidfile and proceed. If the PID is live and correct, skip (idempotent). Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` to avoid races.
+- **On stop:** read PID from file, validate it's the right process via `ps`, send `SIGTERM` via `os.kill()`, wait up to 3s with `os.waitpid()` / polling, send `SIGKILL` if still alive. Remove pidfile. If the process is already gone, just clean up the pidfile.
+- **Daemonization note:** Xvfb and x11vnc are launched via `subprocess.Popen()` with stdout/stderr redirected to log files; the script captures `.pid`. Xpra daemonizes itself by default and writes its own PID to a file; the script reads Xpra's native pidfile location (`~/.xpra/`) rather than managing it separately.
 
 **Log file management:**
 
@@ -207,7 +207,7 @@ Logs are overwritten on each `start` (not appended) to avoid unbounded growth. T
 - Xpra: use `--tcp-auth=file:filename=/tmp/.x11ctl-xpra-passwd`
 - Or: use SSH tunnels (`ssh -L 10000:localhost:10000 jail-host`) to keep ports on loopback and authenticate via SSH
 
-**Port-in-use detection:** Before starting each component, the script checks whether the target port is already bound using `sockstat -l -p <port>`. If a conflict is detected, the script prints a clear error:
+**Port-in-use detection:** Before starting each component, the script checks whether the target port is already bound. It first attempts a quick `socket.connect_ex()` probe, and if the port is occupied, runs `sockstat -l -p <port>` to identify the conflicting process. If a conflict is detected, the script prints a clear error:
 
 ```
 Error: port 5900 is already in use by pid 1234 (x11vnc)
@@ -273,7 +273,9 @@ ipcs -m 2>/dev/null && echo "SHM available" || echo "SHM not available — add s
 
 ## `x11ctl` Script Design
 
-POSIX shell script, no bash or python dependency. Single file, copy-and-run.
+Python script (stdlib only — no third-party dependencies). Single file, copy-and-run.
+
+**Why Python, not POSIX shell:** The script needs process management with PID validation, readiness probes with retries and timeouts, port-conflict detection via subprocess parsing, cascading stop with dependency ordering, and structured log output. These requirements exceed what POSIX shell handles reliably — PID races, missing arrays, no proper error handling. Python's `subprocess`, `signal`, `os`, and `socket` modules make all of this correct, testable, and readable. Python is already a hard dependency of the project environment.
 
 ### Subcommands
 
@@ -378,7 +380,7 @@ Primary deliverable: `docs/x11-in-freebsd-jails.md`
 ## Deliverables
 
 1. **Runbook** — `docs/x11-in-freebsd-jails.md` — comprehensive guide with all tiers, recipes, troubleshooting
-2. **Script** — `scripts/x11ctl` — POSIX shell, single file, all subcommands documented above
+2. **Script** — `scripts/x11ctl` — Python (stdlib only), single file, all subcommands documented above
 
 ## Out of Scope (Future Work)
 
