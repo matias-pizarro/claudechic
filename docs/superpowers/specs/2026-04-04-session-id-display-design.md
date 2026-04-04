@@ -1,7 +1,7 @@
 # Session ID Capture & Display
 
 **Date:** 2026-04-04
-**Status:** Draft (rev 4 — post round-2 review: roborev/Codex + code-reviewer + architect + contrarian)
+**Status:** Draft (rev 5 — post round-3 review: roborev/Codex + code-reviewer + architect + contrarian)
 **Branch:** `claudechic-session-id`
 
 ## Problem
@@ -16,12 +16,13 @@ The Claude session_id is captured internally but never surfaced to the user. Use
 ## Acceptance Criteria
 
 1. Footer shows the session_id (truncated) before the first response completes (via init message). Requires mocked agent init message in integration test.
-2. After `/clear`, `/session-id` prints "No active session" (session_id cleared before reconnect)
-3. After `_reconnect_sdk()` without resume, `/session-id` prints "No active session"
-4. When a background agent receives an init message or completes a response, the active agent's footer session label does not change
-5. Footer hides the session indicator when budget < `MIN_SESSION_LENGTH`
-6. `/session-id` prints the full ID even when clipboard copy fails (best-effort copy, guaranteed print)
-7. The `compact-height` footer-hidden mode still allows `/session-id` command as the only access path
+2. After `/clear`, footer hides session label immediately and `/session-id` prints "No active session" (session_id cleared before reconnect). Footer remains hidden until new init message arrives.
+3. After `_reconnect_sdk()` without resume, footer hides and `/session-id` prints "No active session"
+4. After `_reconnect_sdk()` with auto-resume, footer shows the resumed session_id once `_load_and_display_history` completes
+5. When a background agent receives an init message or completes a response, the active agent's footer session label does not change
+6. Footer hides the session indicator when budget < `MIN_SESSION_LENGTH`
+7. `/session-id` prints the full ID even when clipboard copy fails (best-effort copy, guaranteed print). The full ID is printed into the chat stream and is visible in screenshots/screen shares — this is intentional (the value is not sensitive).
+8. The `compact-height` footer-hidden mode still allows `/session-id` command as the only access path
 
 ## Non-Goals
 
@@ -46,7 +47,7 @@ if message.subtype == "init" and not self.session_id:
 self.session_id = message.session_id
 ```
 
-Both feed `agent.session_id`. The init message provides the value early (before first response); `ResultMessage` overwrites authoritatively after each response. In practice they match.
+Both feed `agent.session_id`. The init message provides the value early (before first response); `ResultMessage` overwrites authoritatively after each response. In practice they match. Note: the authoritative assignment happens inside `agent._handle_message` — the redundant defensive set at `app.py` `on_response_complete` (`agent.session_id = event.result.session_id`) merely re-writes the same value. Footer push reads `agent.session_id`, not `event.result.session_id`.
 
 Additionally, `agent.connect(options, resume=session_id)` sets `self.session_id = resume` inside `connect()`. The explicit set in `resume_session` at app.py is for clarity/guarantee, not because `connect()` fails to do it.
 
@@ -64,41 +65,45 @@ def session_id(self) -> str | None:
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `SessionIndicator` class | `widgets/layout/footer.py` (add to existing) | Footer display |
+| `SessionIndicator` class | `widgets/layout/footer.py` (add to existing) | Passive render target for session_id |
+| `StatusFooter.set_session_id()` | `widgets/layout/footer.py` (add method) | State owner — stores `_session_id`, triggers re-render |
 | `format_session_id()` | `formatting.py` (add function) | Adaptive truncation |
 | `/session-id` command | `commands.py` (add handler + registry entry) | Print full ID + copy to clipboard |
 
-### 1. SessionIndicator Widget
+### 1. State Ownership
+
+**`StatusFooter` owns the session_id state**, matching how it owns cwd state today:
+
+```python
+# Existing pattern (cwd):
+StatusFooter._cwd: str        # state
+StatusFooter.set_cwd(cwd)     # public API, stores + triggers re-render
+Static("#cwd-label")           # passive render target
+
+# New pattern (session_id):
+StatusFooter._session_id: str | None   # state
+StatusFooter.set_session_id(id)        # public API, stores + triggers re-render
+SessionIndicator("#session-label")     # passive render target
+```
+
+`SessionIndicator` is a minimal `Static` subclass — it has no `set_session_id()` method of its own. It is a passive label that `_render_cwd_label` writes to, exactly like the cwd `Static` label.
+
+### 2. SessionIndicator Widget
 
 **File:** `claudechic/widgets/layout/footer.py` (colocated with `PermissionModeLabel`, `ModelLabel`, `ViModeLabel`)
 
-A `Static` subclass that displays the session_id with adaptive truncation. Minimal — roughly 20-30 lines, consistent with the existing small label classes in this file.
-
-**Rendering:**
-- Active state: `"a1b2c3d4…"` (adaptive truncation based on available width, no prefix — position and dim styling provide context)
-- Empty state: hidden entirely via `add_class("hidden")` (consistent with how `cwd-label` handles the empty case)
-- The caller treats both `None` and empty string `""` identically → hide the widget
-
-**Public API:**
+A `Static` subclass. Minimal — only exists for CSS targeting (`#session-label`) and type-safe `query_one_optional`. No methods beyond what `Static` provides.
 
 ```python
 class SessionIndicator(Static):
-    """Display session ID in the footer."""
-
-    def set_session_id(self, session_id: str | None) -> None:
-        """Update the displayed session_id and schedule footer re-render.
-
-        None or empty string → hide widget.
-        Non-empty string → format and display.
-        """
+    """Passive session ID label in the footer. Content set by StatusFooter._render_cwd_label."""
+    pass
 ```
 
-No `on_click()` handler — click-to-copy is deferred until clickable labels are debugged. The `/session-id` command provides the copy-to-clipboard path.
-
 **CSS ID:** `#session-label`
-**Styling:** Dim text by default, matching the cwd label style. No pointer cursor (no click interaction).
+**Styling:** Inherits from `.footer-label` class (which provides `padding: 0 1`, `color: $text-muted`, `width: auto`). A dedicated `#session-label` CSS rule is optional — only needed if styling diverges from `.footer-label` in the future. No pointer cursor (no click interaction).
 
-### 2. Footer Layout
+### 3. Footer Layout
 
 The actual `StatusFooter.compose()` order is:
 
@@ -114,6 +119,17 @@ yield SessionIndicator("", id="session-label", classes="footer-label hidden")
 yield Static("", id="branch-label", classes="footer-label")
 ```
 
+**`StatusFooter.set_session_id()` method:**
+
+```python
+def set_session_id(self, session_id: str | None) -> None:
+    """Update session_id value and schedule re-render."""
+    self._session_id = session_id
+    self.call_after_refresh(self._render_cwd_label)
+```
+
+This mirrors `set_cwd()` exactly.
+
 **Budget computation:**
 
 The existing `_render_cwd_label()` method is **kept as-is** (no rename — avoids blast radius across 6+ call sites, public API, and tests). Session label budget logic is added inside it with a comment: `# Also renders session label (budget split).`
@@ -121,7 +137,7 @@ The existing `_render_cwd_label()` method is **kept as-is** (no rename — avoid
 **New constant** in `footer.py` alongside `CWD_PADDING`:
 
 ```python
-SESSION_PADDING = 2  # CSS "padding: 0 1" on #session-label = 1 left + 1 right
+SESSION_PADDING = 2  # CSS "padding: 0 1" on .footer-label = 1 left + 1 right
 ```
 
 **Budget exclusion set** — the `used` sum must exclude `session-label` in addition to `cwd-label` and `footer-spacer`:
@@ -134,18 +150,18 @@ used = sum(
 )
 ```
 
-**Session label gets a fixed budget of 12 characters** (enough for 11 hex chars + `…`, collision-free for any realistic session count). Cwd gets the remainder:
+**Session label gets a fixed budget of 12 characters** (enough for 11 hex chars + `…`, collision-free for any realistic session count). Cwd gets the remainder. `SESSION_PADDING` is only subtracted when session_id is present:
 
 ```python
-total_budget = app_width - used - CWD_PADDING - SESSION_PADDING
+# Only subtract SESSION_PADDING when session_id is present
+has_session = bool(self._session_id)
+total_budget = app_width - used - CWD_PADDING - (SESSION_PADDING if has_session else 0)
 
-# Session label: fixed 12-char budget (or full ID if shorter)
-# Cwd: gets the remainder
-if no cwd and no session_id:
-    both hidden
-elif no cwd:
+if not self._cwd and not has_session:
+    # both hidden
+elif not self._cwd:
     session_budget = min(12, total_budget)
-elif no session_id:
+elif not has_session:
     cwd_budget = total_budget
     session_budget = 0
 else:
@@ -153,12 +169,14 @@ else:
     cwd_budget = total_budget - session_budget
 ```
 
-**Hiding thresholds:**
-- `MIN_SESSION_LENGTH = 8` — below this, hide the session indicator (too truncated to be useful)
-- `MIN_CWD_LENGTH = 10` — existing threshold, unchanged
-- When `compact-height` CSS class is active, the entire footer is hidden (existing behavior, no change needed). The `/session-id` command remains the only access path in this mode.
+**Widget query safety:** `query_one_optional("#session-label", SessionIndicator)` may return `None` during early mount (before `compose()` completes). If `None`, skip session rendering and give all budget to cwd. This matches how the existing code handles `query_one_optional("#cwd-label")`.
 
-### 3. format_session_id()
+**Hiding thresholds:**
+- `MIN_SESSION_LENGTH = 8` (imported from `formatting.py`) — below this, hide the session indicator
+- `MIN_CWD_LENGTH = 10` — existing threshold, unchanged
+- When `compact-height` CSS class is active, the entire footer is hidden (existing behavior). The `/session-id` command remains the only access path.
+
+### 4. format_session_id()
 
 **File:** `claudechic/formatting.py`
 
@@ -190,30 +208,29 @@ def format_session_id(session_id: str, budget: int) -> str:
     Rules:
         budget >= len(session_id)  -> full ID (format-agnostic, not hardcoded to 36)
         budget >= 2                -> first (budget - 1) chars + "…"
-        budget < 2                 -> "…"
+        budget < 2                 -> "…" (defensive only — MIN_SESSION_LENGTH prevents this in practice)
     """
 ```
 
-### 4. Update Triggers
+### 5. Update Triggers
 
-**Active-agent gating rule.** The footer-push call (`set_session_id()`) within per-agent event handlers MUST check `event.agent_id == self.agent_mgr.active_id` before executing. This does NOT gate the entire handler — only the footer update line. Background agent events still update `agent.session_id` on the agent model; the footer is refreshed when that agent becomes active via `on_agent_switched`.
+**Active-agent gating rule.** The footer-push call (`status_footer.set_session_id()`) within per-agent event handlers MUST check `event.agent_id == self.agent_mgr.active_id` before executing. This does NOT gate the entire handler — only the footer update line. Background agent events still update `agent.session_id` on the agent model; the footer is refreshed when that agent becomes active via `on_agent_switched`.
 
 **Clear before reconnect rule.** All session-reset paths MUST set `agent.session_id = None` before disconnecting and reconnecting. This includes `_start_new_session` (`/clear`) AND `_reconnect_sdk()` when reconnecting without a resume ID. The init message early-capture path (`if not self.session_id`) is guarded by falsiness — if the old ID lingers, the new init won't overwrite it, leaving a stale ID visible until the first `ResultMessage`.
 
-The `SessionIndicator` is updated in these app.py locations:
+The footer is updated via `status_footer.set_session_id()` at these app.py locations:
 
-| Trigger | Location | What happens | Active-agent gate? |
-|---------|----------|--------------|-------------------|
-| **`on_response_complete`** | Textual message handler, adjacent to `refresh_context()` | Push `agent.session_id` to widget. Authoritative source. | Yes — only push to footer if `event.agent_id == active_id` |
-| **`on_system_notification` (init subtype)** | Textual message handler. **New `elif subtype == "init":` branch** (does not exist today). | Push `agent.session_id` on first connect. Prevents blank state until first response. | Yes — only push to footer if `event.agent_id == active_id` |
-| **`on_agent_switched`** | In the existing footer-update block | Push `new_agent.session_id` to widget. | N/A — this IS the switch event |
-| **`resume_session()`** | After reconnection completes | Push session_id to widget. Note: `resume_session()` is async — user can switch agents before it completes. Guard the footer push with `agent.id == active_id` check before writing. | Yes — guard needed because async |
-| **`_start_new_session` (`/clear`)** | Before `disconnect()` | Set `agent.session_id = None` BEFORE reconnect, then push `None` to widget (resets to hidden). | N/A — explicit user action on active agent |
-| **`_reconnect_sdk()` (no resume)** | When reconnecting SDK state without resuming | `agent.session_id = None` is already set at app.py:1831. Push `None` to widget. | N/A — explicit user action on active agent |
+| Trigger | Location | What happens | Code change | Active-agent gate? |
+|---------|----------|--------------|-------------|-------------------|
+| **`on_response_complete`** | Adjacent to `refresh_context()` | Push `agent.session_id` to footer. Note: `agent.session_id` is already set by the agent layer — the app-level set is redundant/defensive. | Add footer push line | Yes — only if `event.agent_id == active_id` |
+| **`on_system_notification` (init subtype)** | **New `elif subtype == "init":` branch.** Also add `"init"` to the suppression set at the catch-all guard to prevent duplicate display. | Push `agent.session_id` on first connect. Prevents blank state until first response. | Add new branch + footer push | Yes — only if `event.agent_id == active_id` |
+| **`on_agent_switched`** | In the existing footer-update block | Push `new_agent.session_id` to footer. | Add footer push line | N/A — this IS the switch event |
+| **`resume_session()`** | After `_reconnect_agent()` completes | Push session_id to footer. This is async — user can switch agents before it completes. Guard must compare **captured** `agent.id` against **live** `self.agent_mgr.active_id` (not `self._agent.id`, which may have changed). Note: init handler may also fire, producing an idempotent double-push. | Add guarded footer push | Yes — required because async |
+| **`_start_new_session` (`/clear`)** | Before `disconnect()` | **Required code change:** add `agent.session_id = None` (does NOT exist today — `disconnect()` and `connect()` without resume do not clear it). Then push `None` to footer. | Add `session_id = None` + footer push | N/A — explicit user action |
+| **`_reconnect_sdk()` (no resume)** | In the `else` branch | `agent.session_id = None` already exists at app.py:1831. Push `None` to footer. | Add footer push line | N/A — explicit user action |
+| **`_reconnect_sdk()` (with resume)** | In the `if resume_id:` branch, after `_load_and_display_history` | Push `agent.session_id` to footer. Guard with `if agent is self._agent` (existing pattern at app.py:1810). Without this, footer shows stale/no session_id until first response. | Add guarded footer push | Yes — guard with `agent is self._agent` |
 
-All update paths call `set_session_id()` which internally calls `call_after_refresh(self._render_cwd_label)` per the existing footer convention.
-
-### 5. /session-id Command
+### 6. /session-id Command
 
 **File:** `claudechic/commands.py`
 
@@ -237,14 +254,16 @@ All update paths call `set_session_id()` which internally calls `call_after_refr
 
 ```
 SDK init message -------> agent.session_id (early)
-SDK ResultMessage ------> agent.session_id (authoritative)
-/clear -----------------> agent.session_id = None
-_reconnect_sdk(no resume) -> agent.session_id = None
+SDK ResultMessage ------> agent.session_id (authoritative, also set defensively in app.py)
+/clear -----------------> agent.session_id = None  [NEW CODE — does not exist today]
+_reconnect_sdk(no resume) -> agent.session_id = None  [existing]
+_reconnect_sdk(with resume) -> agent.session_id set via _load_and_display_history
 agent switch ------------> footer reads new_agent.session_id
                               |
-                              +---> StatusFooter.SessionIndicator
-                              |       set_session_id() -> format_session_id(id, budget)
-                              |       hidden when None/empty or budget < MIN_SESSION_LENGTH
+                              +---> StatusFooter.set_session_id()
+                              |       stores _session_id, calls _render_cwd_label
+                              |       _render_cwd_label -> format_session_id(id, budget)
+                              |       SessionIndicator hidden when None/empty or budget < MIN_SESSION_LENGTH
                               |       [gated: only if agent is active]
                               |
                               +---> /session-id command
@@ -256,11 +275,11 @@ agent switch ------------> footer reads new_agent.session_id
 | File | Change |
 |------|--------|
 | `claudechic/formatting.py` | Add `MIN_SESSION_LENGTH` constant, `format_session_id()` function |
-| `claudechic/widgets/layout/footer.py` | Add `SessionIndicator` class, `SESSION_PADDING` constant, yield in `compose()`, add session budget logic inside `_render_cwd_label` |
+| `claudechic/widgets/layout/footer.py` | Add `SessionIndicator` class (passive), `SESSION_PADDING` constant, `_session_id` field, `set_session_id()` method, yield in `compose()`, add session budget logic inside `_render_cwd_label` |
 | `claudechic/commands.py` | Add `/session-id` to `COMMANDS` registry, add handler function |
-| `claudechic/app.py` | Call `set_session_id()` at 6 trigger points (see Section 4), add `elif subtype == "init":` branch in `on_system_notification` |
-| `claudechic/styles.tcss` | Add `#session-label` styling (dim, padding) |
-| `tests/test_widgets.py` | Add `SessionIndicator` widget tests, `format_session_id` tests |
+| `claudechic/app.py` | Add `agent.session_id = None` in `_start_new_session` (bug fix), call `status_footer.set_session_id()` at 7 trigger points, add `elif subtype == "init":` branch + suppression in `on_system_notification` |
+| `claudechic/styles.tcss` | Add `#session-label` rule if needed (`.footer-label` class may suffice) |
+| `tests/test_widgets.py` | Add `SessionIndicator` widget tests, `format_session_id` unit tests |
 | `CLAUDE.md` | Add `/session-id` to Commands section, `SessionIndicator` to Widget Hierarchy |
 
 ## Known Issues
@@ -278,14 +297,17 @@ agent switch ------------> footer reads new_agent.session_id
 | Reconnect failure after `/clear` | session_id remains None, footer hidden, `/session-id` prints "No active session". User must use `/resume` to recover old session. |
 | Footer render with None or empty session_id | Widget hidden, no error |
 | `format_session_id` called with empty string | Precondition violation — caller must not call with empty string (treat as None, hide widget) |
+| `_render_cwd_label` runs before `SessionIndicator` mounted | `query_one_optional` returns None, skip session rendering, give all budget to cwd |
 
 ## Implementation Stages
 
-Ordered by dependency — session lifecycle correctness before UI:
+Ordered by dependency and risk — **lifecycle correctness first**, then UI, then wiring:
 
-1. **`format_session_id()` + unit tests** — pure function, no dependencies
-2. **`SessionIndicator` widget + footer layout + budget** — colocate in `footer.py`, add session budget logic inside `_render_cwd_label`, widget tests. Ensure `_reconnect_sdk` already sets `session_id = None` (it does at app.py:1831).
-3. **Event wiring + `/session-id` command + all tests** — 6 triggers with active-agent gating, command handler, COMMANDS registry, integration tests, failure-prone flow tests
+1. **Lifecycle fixes + `format_session_id()`** — Add `agent.session_id = None` in `_start_new_session` before `disconnect()` (bug fix). Add `format_session_id()` pure function + unit tests. No UI changes yet.
+2. **`SessionIndicator` widget + footer layout + budget** — Add passive `SessionIndicator` class, `_session_id` field, `set_session_id()` method, `SESSION_PADDING` constant, budget logic inside `_render_cwd_label`, yield in `compose()`. Widget tests.
+3. **Event wiring + `/session-id` command** — 7 trigger points with active-agent gating. Command handler + COMMANDS registry. Split into reviewable sub-PRs if needed:
+   - 3a: Event wiring (triggers 1-7) + integration tests
+   - 3b: `/session-id` command + command tests + CLAUDE.md update
 
 ## Future Work
 
@@ -296,13 +318,14 @@ Ordered by dependency — session lifecycle correctness before UI:
 ## Testing Strategy
 
 1. **Unit tests for `format_session_id()`** — budget edge cases (0, 1, 2, 8, 35, 36, 100), various ID lengths, ellipsis character (`…`) correctness
-2. **Widget tests for `SessionIndicator`** — render states (None hides, empty string hides, short ID, full UUID), `set_session_id()` triggers re-render
+2. **Widget tests for `SessionIndicator`** — render states (None hides, empty string hides, short ID, full UUID), `set_session_id()` on StatusFooter triggers re-render
 3. **Command test for `/session-id`** — output format with agent name, None case, COMMANDS registry entry exists
-4. **Footer layout test** — session indicator participates in budget computation, hides at narrow widths, shows at wide widths, conditional budget when one label absent. Use ChatApp-level test (not WidgetTestApp) for reliable width-budget verification.
+4. **Footer layout test** — session indicator participates in budget computation, hides at narrow widths, shows at wide widths, conditional budget when one label absent, medium-width regression (12-char session reservation doesn't suppress cwd prematurely). Use ChatApp-level test (not WidgetTestApp) for reliable width-budget verification.
 5. **Integration test** — session_id flows from agent through to footer display after `on_response_complete`
 6. **Failure-prone flow tests:**
-   - `/clear` before first response — session_id must be None, footer hidden
-   - `_reconnect_sdk()` without resume — session_id must be None, footer hidden
+   - `/clear` — session_id is None, footer hidden immediately, stays hidden until new init
+   - `_reconnect_sdk()` without resume — session_id is None, footer hidden
+   - `_reconnect_sdk()` with auto-resume — footer shows resumed session_id after `_load_and_display_history`
    - Init-event display after reconnect — footer shows new session_id immediately
    - Background agent completes response while foreground agent is active — foreground footer must not change
    - Background agent receives init message while foreground agent is active — foreground footer must not change
