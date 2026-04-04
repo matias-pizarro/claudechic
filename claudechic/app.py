@@ -58,6 +58,7 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
+from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.history import append_to_history
@@ -971,9 +972,16 @@ class ChatApp(App):
                 usage = await agent.client.get_context_usage()
                 if usage:
                     agent.tokens = usage.get("totalTokens", 0)
-                    raw_max = usage.get("rawMaxTokens", 0)
-                    if raw_max > 0:
+                    # Try rawMaxTokens first (raw model window), fall back to
+                    # maxTokens (effective limit after autocompact buffer)
+                    raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens", 0)
+                    if raw_max and raw_max > 0:
                         agent.max_tokens = raw_max
+                    else:
+                        log.debug(
+                            "refresh_context: no max_tokens in response, keys=%s",
+                            list(usage.keys()),
+                        )
                     self.context_bar.tokens = agent.tokens
                     self.context_bar.max_tokens = agent.max_tokens
                     self._update_sidebar_agent_context(agent)
@@ -986,8 +994,6 @@ class ChatApp(App):
         if tokens is not None:
             agent.tokens = tokens
             self.context_bar.tokens = tokens
-            # Always sync max_tokens to context_bar and sidebar (may have been
-            # set by a prior successful get_context_usage call)
             self.context_bar.max_tokens = agent.max_tokens
             self._update_sidebar_agent_context(agent)
 
@@ -2837,6 +2843,24 @@ class ChatApp(App):
             desc.split("·")[0].strip() if "·" in desc else active.get("displayName", "")
         )
         self.status_footer.model = model_name
+
+        # Set max_tokens from model display name as early fallback
+        # (get_context_usage will override later with exact value)
+        agent = self._agent
+        if agent and agent.max_tokens == MAX_CONTEXT_TOKENS:
+            display_name = active.get("displayName", "")
+            context_size = parse_context_size(display_name)
+            if context_size is None:
+                # Try model ID (e.g., "claude-opus-4-6[1m]")
+                model_id = active.get("value", "")
+                context_size = parse_context_size(model_id)
+            if context_size is None:
+                # Try description (e.g., "Opus 4.6 · 1M context")
+                context_size = parse_context_size(desc)
+            if context_size and context_size > 0:
+                agent.max_tokens = context_size
+                self.context_bar.max_tokens = context_size
+                self._update_sidebar_agent_context(agent)
 
     def _update_sidebar_agent_context(self, agent: Agent) -> None:
         """Push agent's tokens/max_tokens and cwd to its sidebar item."""

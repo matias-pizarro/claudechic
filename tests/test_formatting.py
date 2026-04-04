@@ -53,3 +53,20 @@ class TestParseContextSize:
 
     def test_model_id_no_bracket(self):
         assert parse_context_size("claude-sonnet-4-6") is None
+
+    def test_plain_with_keyword(self):
+        """SDK displayName format: 'Opus 4.6 with 1M context'."""
+        assert parse_context_size("Opus 4.6 with 1M context") == 1_000_000
+
+    def test_plain_middle_dot(self):
+        """SDK description format: 'Opus 4.6 · 1M context · ...'."""
+        assert (
+            parse_context_size("Opus 4.6 · 1M context · extended thinking") == 1_000_000
+        )
+
+    def test_plain_200k(self):
+        assert parse_context_size("Haiku 4.5 with 200K context") == 200_000
+
+    def test_short_name_no_context(self):
+        """SDK may return just 'Sonnet' with no context info."""
+        assert parse_context_size("Sonnet") is None
