@@ -1,73 +1,108 @@
-# Remove CWD Row from Sidebar AgentItem
+# Hide CWD Row from Sidebar AgentItem
 
 **Date:** 2026-04-04
-**Status:** Draft
+**Status:** Draft (v2 — revised after 4-agent review)
 **Branch:** simplify-sidebar
 
 ## Summary
 
-Remove the current working directory (CWD) display row from the sidebar `AgentItem` widget. Each agent entry shrinks from three rows (name, CWD, context/tokens) to two rows (name, context/tokens). The footer CWD display and all supporting utilities remain untouched.
+Hide the CWD display row in sidebar `AgentItem` via CSS (`display: none`). Each agent entry visually shrinks from three rows to two. All Python code, data flow, and tests remain intact. Trivially reversible by removing one CSS line.
 
 ## Motivation
 
-The CWD is already shown in the status footer for the active agent. Displaying it again in the sidebar adds visual noise without providing new information. Removing it tightens the sidebar, giving more vertical space to the agent list and todo panel.
+The CWD is already shown in the status footer for the active agent. Hiding it in the sidebar reduces visual noise and gives more vertical space to the agent list and todo panel.
+
+### Accepted tradeoff
+
+The footer only shows the **active** agent's CWD. Hiding sidebar CWD means users with multiple agents lose at-a-glance directory visibility for inactive agents. This is accepted because:
+
+- The `/agent` command still lists all agent directories
+- The MCP `list_agents` tool still shows per-agent CWD
+- The remote API (`/state`) still exposes `item._cwd` per agent
+- Clicking an agent switches to it and updates the footer CWD immediately
 
 ## Design
 
+### Approach: CSS-only hide
+
+After a 4-agent review (RoboRev, code reviewer, architect, contrarian), the original deletion approach was replaced with a CSS-only hide. Rationale:
+
+- **Zero Python changes** — no risk of breaking `remote.py` (`item._cwd` access), MCP tools, or call chains
+- **Zero test changes** — all existing tests continue to pass
+- **Trivially reversible** — remove one CSS rule to restore sidebar CWD
+- **No height/layout bugs** — Textual's `display: none` collapses the row automatically
+
 ### What changes
 
-#### `claudechic/widgets/layout/sidebar.py` — `AgentItem` class
+#### `claudechic/widgets/layout/sidebar.py` — `AgentItem.DEFAULT_CSS`
 
-1. **Remove `_cwd` field** and its `""` initialization in `__init__`.
-2. **Remove `max_cwd_length`** constant (currently `20`).
-3. **Remove `_render_cwd_label()` method** that formats the CWD text.
-4. **Remove the `.agent-cwd` Label** from `compose()` — the label that occupies row 2.
-5. **Simplify `update_context()`** — remove the `cwd` parameter and all CWD-related update logic. Keep only `tokens` and `max_tokens` parameters and their rendering.
+Add `display: none` to the existing `.agent-cwd` rule and reduce `AgentItem` height from 5 to 4:
 
-After these changes, `AgentItem` renders:
-
-```
-Row 1: [status-indicator] [agent-name] [close-button]
-Row 2: [context-usage %] [token-counts]
-```
-
-#### `claudechic/styles.tcss`
-
-Remove the following CSS rules:
-
-```tcss
+```python
+# Before
+AgentItem {
+    height: 5;
+    min-height: 5;
+    ...
+}
 AgentItem .agent-cwd {
     height: 1;
     padding: 0 0 0 2;
     overflow: hidden;
 }
+
+# After
+AgentItem {
+    height: 4;
+    min-height: 4;
+    ...
+}
+AgentItem .agent-cwd {
+    height: 1;
+    padding: 0 0 0 2;
+    overflow: hidden;
+    display: none;
+}
 ```
 
-Also remove any `AgentItem.compact .agent-cwd` rule if it exists as a separate block.
-
-#### Tests — `tests/test_sidebar_context.py`
-
-Remove or update assertions that check for CWD content in `AgentItem`. Any test that calls `update_context()` with a `cwd` argument must be updated to drop that parameter.
+That's it. Two edits in one string literal.
 
 ### What stays unchanged
 
-- **Footer CWD display** — `StatusFooter.set_cwd()`, `StatusFooter._render_cwd_label()`, and the `#cwd-label` CSS rule all remain.
-- **`format_cwd()` in `formatting.py`** — still used by the footer. All constants (`MAX_CWD_LENGTH`, `MIN_CWD_LENGTH`) remain.
-- **`tests/test_formatting.py`** — `format_cwd()` tests stay as-is.
-- **`WorktreeItem`** — does not display CWD today, no changes needed.
-- **Observer protocol** — `AgentObserver` and `AgentManagerObserver` are unaffected; CWD data still flows to the footer via `ChatApp` handlers.
+- **All Python code** — `_cwd` field, `_render_cwd_label()`, `max_cwd_length`, `update_context(cwd=...)`, `_refresh_detail_rows()`, `format_cwd` import — all remain.
+- **All call chains** — `ChatApp._update_sidebar_agent_context()` → `AgentSection.update_agent_context()` → `AgentItem.update_context()` — unchanged.
+- **`remote.py`** — `/state` endpoint reads `item._cwd` — continues to work.
+- **`mcp.py`** — `list_agents` tool shows `agent.cwd` — continues to work.
+- **Footer CWD display** — `StatusFooter.set_cwd()` and `#cwd-label` — unchanged.
+- **`format_cwd()` in `formatting.py`** — still used by footer, still tested.
+- **All tests** — `tests/test_sidebar_context.py` and `tests/test_formatting.py` — unchanged.
+- **Observer protocols** — no changes needed.
+- **`WorktreeItem`** — does not display CWD, no changes needed.
 
-### Callers of `update_context()`
+### Non-goals
 
-Any call site passing `cwd=` to `AgentItem.update_context()` must be updated to drop that argument. This is expected to be in `ChatApp` (or `ChatScreen`) where agent status events are handled. The CWD value continues to be forwarded to `StatusFooter.set_cwd()` — only the sidebar path is removed.
+- No changes to the agent data flow or observer protocols
+- No changes to `remote.py`, `mcp.py`, or `/agent` command output
+- No config flag (YAGNI — if we want one later, the CSS hide is easy to gate)
+
+### Acceptance criteria
+
+- No blank row where CWD was — Textual collapses `display: none` elements
+- Footer remains the only visible CWD surface
+- Agent switching and reconnect still update footer CWD
+- `/agent` command still lists per-agent directories
+- Remote API `/state` still returns per-agent `_cwd`
+- All existing tests pass without modification
 
 ## Risks
 
-- **Low risk.** This is a deletion-only change with no new logic.
-- **Reversibility:** If sidebar CWD is wanted later, re-add the label and method. `format_cwd()` and all infrastructure remain.
+- **Minimal.** Two CSS values change in one string literal. No logic changes.
+- **Reversibility:** Remove `display: none` and restore `height: 5` / `min-height: 5`.
 
 ## Testing
 
-- Run existing test suite: `uv run python -m pytest tests/ -n auto -q`
-- Verify sidebar renders correctly with 1 and multiple agents
-- Verify footer CWD still updates on agent switch
+- `uv run python -m pytest tests/ -n auto -q` — all tests pass unchanged
+- Visual: sidebar shows 2-row agent items (name + context), no blank gaps
+- Visual: footer CWD updates on agent switch
+- Visual: compact mode still works (CWD was already hidden in compact)
+- Verify: `/agent` command output unchanged
