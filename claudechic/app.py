@@ -1302,7 +1302,7 @@ class ChatApp(App):
         # Height costs (lines) - based on actual CSS
         # AgentSection title: padding 1 1 1 1 = 3 lines (top + text + bottom)
         AGENT_SECTION_TITLE = 3
-        AGENT_EXPANDED = 3  # height: 3 with padding
+        AGENT_EXPANDED = 4  # height: 4 (name + context + padding + spacing)
         AGENT_COMPACT = 1  # height: 1 without padding
         # TodoPanel: border-top(1) + padding(2) + title with padding(2) = 5 lines overhead
         TODO_OVERHEAD = 5
