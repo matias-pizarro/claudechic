@@ -4,7 +4,7 @@
 
 **Goal:** Hide the CWD row in sidebar AgentItem via CSS so each agent entry shows 2 rows instead of 3.
 
-**Architecture:** Two CSS value changes in `AgentItem.DEFAULT_CSS` within `sidebar.py`. No Python logic, test, or data flow changes.
+**Architecture:** Two CSS value changes in `AgentItem.DEFAULT_CSS` within `sidebar.py`, plus fix a stale sidebar packing constant in `app.py`. No test changes.
 
 **Tech Stack:** Python, Textual CSS
 
@@ -15,6 +15,7 @@
 ## File Map
 
 - Modify: `claudechic/widgets/layout/sidebar.py:410-467` (DEFAULT_CSS string only)
+- Modify: `claudechic/app.py:1305` (fix stale `AGENT_EXPANDED` packing constant)
 
 No files created. No tests modified.
 
@@ -75,12 +76,24 @@ In the same `DEFAULT_CSS` string (line ~453-457), change:
     }
 ```
 
-- [ ] **Step 4: Run tests to confirm nothing broke**
+- [ ] **Step 4: Fix stale `AGENT_EXPANDED` packing constant**
+
+In `claudechic/app.py` (line ~1305), the sidebar packing logic hard-codes the expanded agent height. This constant was stale (said 3, actual CSS was 5). Update it to match the new height of 4:
+
+```python
+# Before
+        AGENT_EXPANDED = 3  # height: 3 with padding
+
+# After
+        AGENT_EXPANDED = 4  # height: 4 (name + context + padding + spacing)
+```
+
+- [ ] **Step 5: Run tests to confirm nothing broke**
 
 Run: `uv run python -m pytest tests/ -n auto -q`
 Expected: All tests pass (same count as Step 1).
 
-- [ ] **Step 5: Visual verification**
+- [ ] **Step 6: Visual verification**
 
 Launch: `uv run claudechic`
 Verify:
@@ -89,9 +102,11 @@ Verify:
 - Compact mode still works (sidebar items collapse to 1 row)
 - `/agent` command still lists per-agent directories
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add claudechic/widgets/layout/sidebar.py
-git commit -m "feat: hide CWD row in sidebar AgentItem via CSS"
+git add claudechic/widgets/layout/sidebar.py claudechic/app.py
+git commit -m "feat: hide CWD row in sidebar AgentItem via CSS
+
+Also fix stale AGENT_EXPANDED packing constant (3 -> 4)."
 ```
