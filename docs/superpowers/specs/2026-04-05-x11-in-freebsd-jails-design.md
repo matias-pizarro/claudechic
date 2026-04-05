@@ -247,15 +247,15 @@ The script also cleans up stale X server artifacts left by a previous unclean sh
 
 All four components are launched via `subprocess.Popen()` with `--daemon=no` for Xpra (see above). This means all processes are direct children of the `x11ctl` Python process, and the script captures PIDs from `Popen.pid`.
 
-Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile stores the PID and elapsed time at creation for robust identity validation.
+Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile stores the PID and the creation epoch timestamp for robust identity validation.
 
-Format: `<pid> <etimes>\n` (e.g., `1234 5\n`)
+Format: `<pid> <created_epoch>\n` (e.g., `1234 1712345678\n`)
 
-The elapsed time is captured from `ps -p <pid> -o etimes=` at creation. `etimes` returns a single integer (seconds since process start) — machine-readable, no whitespace ambiguity, no parsing needed. On subsequent reads, the script recomputes the expected elapsed time (`current_etimes ≈ stored_etimes + seconds_since_pidfile_creation`) and validates within a tolerance of ±2s. This eliminates PID-reuse false positives: even if the OS reuses a PID for an unrelated process, the elapsed time will not match. (`ps -o etimes=` is available on FreeBSD without `/proc`.)
+At creation, `created_epoch` is set to `int(time.time())`. Both fields are single integers — no whitespace ambiguity, trivially parseable with `line.split()`. On validation, the script compares `ps -p <pid> -o etimes=` (current elapsed seconds) against `time.time() - created_epoch` (expected elapsed seconds). If the process was started around the time the pidfile was created (within ±5s tolerance), the PID is ours. If the elapsed time is wildly different, the PID was reused by an unrelated process. No hidden state — both values needed for validation are self-contained in the pidfile + current wall clock. (`ps -o etimes=` returns a single integer and is available on FreeBSD without `/proc`.)
 
-- **On start:** check if pidfile exists. If it does, read PID and stored etimes. Verify the PID is alive via `os.kill(pid, 0)`, belongs to the expected process via `ps -p <pid> -o comm=`, AND has a consistent elapsed time via `ps -p <pid> -o etimes=` (within ±2s of expected). If any check fails (dead, wrong process, or wrong elapsed time), the PID is stale — remove the pidfile and proceed. If all checks pass, skip (idempotent).
+- **On start:** check if pidfile exists. If it does, read PID and created_epoch. Verify the PID is alive via `os.kill(pid, 0)`, belongs to the expected process via `ps -p <pid> -o comm=`, AND the process age matches: `abs(ps_etimes - (now - created_epoch)) < 5`. If any check fails (dead, wrong process, or age mismatch), the PID is stale — remove the pidfile and proceed. If all checks pass, skip (idempotent).
 - **On stop (same invocation):** for child processes, use `Popen.terminate()` (SIGTERM), then `Popen.wait(timeout=3)`, then `Popen.kill()` (SIGKILL) if still alive. Remove pidfile.
-- **On stop (different invocation):** read PID and etimes from pidfile. Validate identity (PID alive + process name + elapsed time consistent). If valid, send `os.kill(pid, signal.SIGTERM)`, poll with `os.kill(pid, 0)` in a loop (up to 3s, 0.1s interval), then `os.kill(pid, signal.SIGKILL)` if still alive. `os.waitpid()` is NOT used here because the processes are not children of this invocation. Remove pidfile. If identity validation fails, just clean up the stale pidfile.
+- **On stop (different invocation):** read PID and created_epoch from pidfile. Validate identity (PID alive + process name + age match). If valid, send `os.kill(pid, signal.SIGTERM)`, poll with `os.kill(pid, 0)` in a loop (up to 3s, 0.1s interval), then `os.kill(pid, signal.SIGKILL)` if still alive. `os.waitpid()` is NOT used here because the processes are not children of this invocation. Remove pidfile. If identity validation fails, just clean up the stale pidfile.
 
 **Log file management:**
 
@@ -355,7 +355,7 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 
 **Why Python, not POSIX shell:** The script needs process management with PID validation, readiness probes with retries and timeouts, port-conflict detection via socket bind attempts, cascading stop with dependency ordering, and structured log output. These requirements exceed what POSIX shell handles reliably — PID races, missing arrays, no proper error handling. Python's stdlib modules make all of this correct, testable, and readable. Python is already a hard dependency of the project environment.
 
-**Single-instance assumption:** The script assumes one instance per jail. The fixed paths (`/tmp/.x11ctl-*`), default display (`:99`), and default ports (10000, 5900, 6080) all imply a single running stack. Running two instances in the same jail requires overriding `X11CTL_DISPLAY` and all port env vars. The script does not enforce single-instance with a lock — the port-in-use detection and display-socket check naturally prevent double-starts.
+**Single-instance per jail:** The script supports exactly one running stack per jail. All state files (`/tmp/.x11ctl-*` pidfiles, logs, tiers file, Xauth) use fixed paths. The display (`:99`) and ports (10000, 5900, 6080) are fixed defaults. Running multiple stacks in one jail is explicitly unsupported — the port-in-use detection and display-socket check will block a second `start` with a clear error. Multi-instance is listed under Out of Scope.
 
 **Privilege model:**
 - `x11ctl setup` requires root (runs `pkg install`). The command checks `os.geteuid() == 0` and exits with a clear error if not root.
@@ -376,7 +376,7 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 
 ### Behavior
 
-- **Idempotent** — `start` validates pidfiles (PID alive + process name + start time via `ps`) before launching; `stop` is safe when nothing is running
+- **Idempotent** — `start` validates pidfiles (PID alive + process name via `ps` + age match via `etimes` vs creation epoch) before launching; `stop` is safe when nothing is running
 - **Layered** — `--xpra` implies `--headless`; `--vnc` implies `--headless`; `--all` starts everything
 - **Readiness-gated** — each component waits for its dependency to be ready before starting (see Startup sequence above)
 - **Port-conflict detection** — authoritative `socket.bind()` attempt before launching; `sockstat` for diagnostics on conflict (exit code 2)
@@ -395,6 +395,22 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 - If the tiers file is missing (e.g., after manual cleanup), `status` checks whatever pidfiles exist and reports their state with a warning that the desired tier is unknown.
 
 This means `status` exit 0 = "everything that was requested is running", exit 1 = "something that was requested is down."
+
+**Tiers file lifecycle — mutation rules for every path:**
+
+| Operation | Tiers file action |
+|-----------|------------------|
+| `start --headless` | Write `headless` (overwrite if exists) |
+| `start --xpra` | Write `headless xpra` (implies headless) |
+| `start --all` | Write `headless xpra vnc` |
+| `stop --vnc` (partial) | Rewrite file removing `vnc` → `headless xpra` |
+| `stop --xpra` (partial) | Rewrite file removing `xpra` → `headless` |
+| `stop --headless` (cascades) | Remove tiers file entirely (nothing running) |
+| `stop --all` | Remove tiers file entirely |
+| Partial-start rollback | Remove tiers file (rollback = nothing running) |
+| Stale-file recovery | `status` warns "tiers file exists but processes missing"; `start` overwrites |
+
+The tiers file is always in sync with what x11ctl believes is running. `stop` updates it to reflect the new desired state. `stop --all` and full rollback delete it. File permissions: `0644` (readable by anyone for status checks, writable by the x11ctl user).
 
 ### Start/Stop Asymmetry
 
@@ -452,7 +468,7 @@ Primary deliverable: `docs/x11-in-freebsd-jails.md`
 
 2. Prerequisites
    - Host-side: jail.conf settings (sysvshm, devfs)
-   - In-jail: SHM verification check, Python >=3.11
+   - In-jail: SHM verification check, Python >=3.10
    - Network: port/firewall considerations, localhost vs bind-all
 
 3. Simplest Path: Headless One-Liner
@@ -487,7 +503,7 @@ Primary deliverable: `docs/x11-in-freebsd-jails.md`
    - Alternative: tigervnc-server (integrated Xvfb+VNC)
 
 7. x11ctl Script Reference
-   - Installation (copy script, make executable, verify Python >=3.11)
+   - Installation (copy script, make executable, verify Python >=3.10)
    - All subcommands with examples
    - Environment variable overrides
    - --bind-all flag for network exposure
