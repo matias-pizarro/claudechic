@@ -974,7 +974,8 @@ class ChatApp(App):
             self.context_bar.tokens = 0
             return
         # Try SDK API first (gives both tokens and max_tokens)
-        if agent.client:
+        # get_context_usage() requires claude-agent-sdk >= 0.1.55
+        if agent.client and hasattr(agent.client, "get_context_usage"):
             try:
                 usage = await agent.client.get_context_usage()
                 if usage:
