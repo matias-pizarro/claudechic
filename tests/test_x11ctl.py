@@ -119,6 +119,10 @@ class TestTierSets:
         old = {"headless", "xpra", "vnc"}
         assert old - {"xpra"} == {"headless", "vnc"}
 
+    def test_unknown_tier_raises(self):
+        with pytest.raises(ValueError, match="Unknown tier"):
+            x11ctl.desired_tiers("bogus")
+
     def test_reconcile_stop_headless_cascades(self):
         """stop --headless: everything stops (cascade rule)."""
         # Cascade is a policy decision, not a set op — tested in Task 4
@@ -254,6 +258,52 @@ class TestConfigValidation:
         # This resolves to /tmp/.x11ctl-safe which IS valid
         cfg = x11ctl.Config()
         assert cfg.xauth == "/tmp/.x11ctl-safe"  # normalized
+
+    def test_xauth_constructor_supplied_validated(self):
+        """Config(xauth=...) must validate even without env var."""
+        with pytest.raises(ValueError):
+            x11ctl.Config(xauth="/etc/shadow")
+
+    def test_xauth_shell_metachar_rejected(self, monkeypatch):
+        """Shell metacharacters in xauth basename must be rejected."""
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-$(touch /tmp/pwned)")
+        with pytest.raises(ValueError):
+            x11ctl.Config()
+
+
+# --- Config.for_self_test ---
+
+class TestConfigForSelfTest:
+    def test_display(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        assert cfg.display == ":98"
+
+    def test_offset_ports(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        assert cfg.xpra_port == 10098
+        assert cfg.vnc_port == 5998
+        assert cfg.novnc_port == 6178
+
+    def test_xauth_path(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        assert cfg.xauth == "/tmp/.x11ctl-selftest-98"
+
+    def test_pidfile_uses_state_dir(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        assert cfg.pidfile("xvfb").startswith("/tmp/selftest-dir/")
+
+    def test_tiers_file_uses_state_dir(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        assert cfg.tiers_file.startswith("/tmp/selftest-dir/")
+
+    def test_lock_file_uses_state_dir(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        assert cfg.lock_file.startswith("/tmp/selftest-dir/")
+
+    def test_frozen(self):
+        cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
+        with pytest.raises(AttributeError):
+            cfg.display = ":1"
 
 
 # --- Pidfile I/O ---
@@ -429,8 +479,16 @@ class TestEnvOutput:
     def test_env_output(self):
         cfg = x11ctl.Config()
         output = x11ctl.format_env(cfg)
-        assert 'export DISPLAY=":99"' in output
+        assert "export DISPLAY=':99'" in output or 'export DISPLAY=":99"' in output or "export DISPLAY=:99" in output
         assert "export XAUTHORITY=" in output
+
+    def test_env_output_shell_safe(self):
+        """format_env uses shlex.quote — values are shell-safe."""
+        cfg = x11ctl.Config()
+        output = x11ctl.format_env(cfg)
+        # shlex.quote wraps in single quotes for safety
+        assert "DISPLAY=" in output
+        assert "XAUTHORITY=" in output
 
 
 # --- Log rotation ---

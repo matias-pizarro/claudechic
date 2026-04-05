@@ -12,6 +12,7 @@ import argparse
 import fcntl
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -30,7 +31,7 @@ from typing import Callable, Optional
 
 _DISPLAY_RE = re.compile(r"^:\d+$")
 _SCREEN_RE = re.compile(r"^\d+x\d+x\d+$")
-_XAUTH_RE = re.compile(r"^/tmp/\.x11ctl-[^/]+$")
+_XAUTH_RE = re.compile(r"^/tmp/\.x11ctl-[A-Za-z0-9._-]+$")
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ class Config:
     xpra_port: int = field(default_factory=lambda: int(os.environ.get("X11CTL_XPRA_PORT", "10000")))
     vnc_port: int = field(default_factory=lambda: int(os.environ.get("X11CTL_VNC_PORT", "5900")))
     novnc_port: int = field(default_factory=lambda: int(os.environ.get("X11CTL_NOVNC_PORT", "6080")))
-    xauth: str = field(default_factory=lambda: "")
+    xauth: str = field(default_factory=lambda: os.environ.get("X11CTL_XAUTH", ""))
     state_prefix: str = field(default=".x11ctl")
     state_dir: str = field(default="")
 
@@ -54,18 +55,21 @@ class Config:
         # Validate screen
         if not _SCREEN_RE.match(self.screen):
             raise ValueError(f"X11CTL_SCREEN must match ^\\d+x\\d+x\\d+$ (got {self.screen!r})")
-        # Validate and normalize xauth
-        raw_xauth = os.environ.get("X11CTL_XAUTH", "")
+        # Resolve xauth: use self.xauth (from env or constructor), fallback to default
+        raw_xauth = self.xauth
         if raw_xauth:
             normalized = str(Path(raw_xauth).resolve(strict=False))
-            if not _XAUTH_RE.match(normalized):
-                raise ValueError(
-                    f"X11CTL_XAUTH must resolve to /tmp/.x11ctl-<name> "
-                    f"(got {raw_xauth!r} -> {normalized!r})"
-                )
-            object.__setattr__(self, "xauth", normalized)
-        elif not self.xauth:
+            if normalized != raw_xauth:
+                object.__setattr__(self, "xauth", normalized)
+        else:
             object.__setattr__(self, "xauth", "/tmp/.x11ctl-xauth")
+        # Always validate the final xauth value — catches constructor-supplied
+        # paths (e.g. Config(xauth="/etc/shadow")) and env-supplied paths alike.
+        if not _XAUTH_RE.match(self.xauth):
+            raise ValueError(
+                f"xauth must resolve to /tmp/.x11ctl-<safe-name> "
+                f"(got {raw_xauth!r} -> {self.xauth!r})"
+            )
 
     @property
     def display_number(self) -> int:
@@ -120,8 +124,13 @@ _TIER_DEPS: dict[str, set[str]] = {
 
 
 def desired_tiers(tier: str) -> set[str]:
-    """Return the set of tiers implied by a tier name."""
-    return set(_TIER_DEPS.get(tier, set()))
+    """Return the set of tiers implied by a tier name.
+
+    Raises ValueError for unknown tier names.
+    """
+    if tier not in _TIER_DEPS:
+        raise ValueError(f"Unknown tier: {tier!r} (valid: {', '.join(sorted(_TIER_DEPS))})")
+    return set(_TIER_DEPS[tier])
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +299,7 @@ def acquire_lock(
 ) -> Optional[int]:
     """Acquire a file lock. Returns fd on success, None on timeout."""
     try:
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
     except OSError:
         return None
 
@@ -369,10 +378,14 @@ def identify_port_user(port: int) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def format_env(cfg: Config) -> str:
-    """Format DISPLAY and XAUTHORITY as shell export lines."""
+    """Format DISPLAY and XAUTHORITY as shell export lines.
+
+    Uses shlex.quote() to prevent shell injection if values contain
+    metacharacters (defense in depth — xauth regex already blocks them).
+    """
     return (
-        f'export DISPLAY="{cfg.display}"\n'
-        f'export XAUTHORITY="{cfg.xauth}"\n'
+        f"export DISPLAY={shlex.quote(cfg.display)}\n"
+        f"export XAUTHORITY={shlex.quote(cfg.xauth)}\n"
     )
 
 
@@ -401,8 +414,9 @@ def create_xauth_file(path: str) -> None:
     if os.path.exists(path):
         os.unlink(path)
 
-    # Create with O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    # Create with O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW — prevents TOCTOU
+    # symlink replacement between the pre-check and this open.
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     os.close(fd)
 
 
