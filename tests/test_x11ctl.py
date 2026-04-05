@@ -123,9 +123,8 @@ class TestTierSets:
         with pytest.raises(ValueError, match="Unknown tier"):
             x11ctl.desired_tiers("bogus")
 
-    def test_reconcile_stop_headless_cascades(self):
-        """stop --headless: everything stops (cascade rule)."""
-        # Cascade is a policy decision, not a set op — tested in Task 4
+    # Note: cascade stop (--headless stops everything) is a policy decision
+    # tested in Task 4 with mock components, not a pure set operation.
 
 
 # --- CLI parsing ---
@@ -270,6 +269,35 @@ class TestConfigValidation:
         with pytest.raises(ValueError):
             x11ctl.Config()
 
+    def test_port_negative_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_XPRA_PORT", "-1")
+        with pytest.raises(ValueError, match="must be 1-65535"):
+            x11ctl.Config()
+
+    def test_port_too_high_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_VNC_PORT", "70000")
+        with pytest.raises(ValueError, match="must be 1-65535"):
+            x11ctl.Config()
+
+    def test_port_zero_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_NOVNC_PORT", "0")
+        with pytest.raises(ValueError, match="must be 1-65535"):
+            x11ctl.Config()
+
+    def test_bind_invalid_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_BIND", "not-an-ip")
+        with pytest.raises(ValueError, match="valid IPv4"):
+            x11ctl.Config()
+
+    def test_bind_valid_loopback(self):
+        cfg = x11ctl.Config()
+        assert cfg.bind == "127.0.0.1"
+
+    def test_bind_valid_all(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_BIND", "0.0.0.0")
+        cfg = x11ctl.Config()
+        assert cfg.bind == "0.0.0.0"
+
 
 # --- Config.for_self_test ---
 
@@ -381,6 +409,26 @@ class TestTiersFile:
         with pytest.raises(OSError):
             x11ctl.write_tiers(str(link), {"headless"})
 
+    def test_read_rejects_symlink(self, tmp_path):
+        """read_tiers should reject symlinks."""
+        target = tmp_path / "target"
+        target.write_text("headless\n")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        assert x11ctl.read_tiers(str(link)) is None
+
+    def test_read_unknown_tier_names_returns_none(self, tmp_path):
+        """read_tiers should return None for files with unknown tier names."""
+        path = str(tmp_path / "tiers")
+        Path(path).write_text("headless bogus_tier\n")
+        assert x11ctl.read_tiers(path) is None
+
+    def test_read_valid_tier_names(self, tmp_path):
+        """read_tiers accepts only known tier names."""
+        path = str(tmp_path / "tiers")
+        x11ctl.write_tiers(path, {"headless", "vnc"})
+        assert x11ctl.read_tiers(path) == {"headless", "vnc"}
+
 
 # --- Locking ---
 
@@ -412,6 +460,25 @@ os.close(fd)
         )
         assert result.stdout.strip() == "blocked"
         x11ctl.release_lock(lock_fd)
+
+    def test_lock_rejects_symlink(self, tmp_path):
+        """acquire_lock should fail on symlinks due to O_NOFOLLOW."""
+        target = tmp_path / "target.lock"
+        target.write_text("")
+        link = tmp_path / "symlink.lock"
+        link.symlink_to(target)
+        lock_fd = x11ctl.acquire_lock(str(link), exclusive=True, timeout=1.0)
+        assert lock_fd is None  # Should fail due to O_NOFOLLOW
+
+    def test_shared_lock(self, tmp_path):
+        """Shared locks should be compatible with each other."""
+        lock_path = str(tmp_path / "test.lock")
+        fd1 = x11ctl.acquire_lock(lock_path, exclusive=False)
+        fd2 = x11ctl.acquire_lock(lock_path, exclusive=False)
+        assert fd1 is not None
+        assert fd2 is not None
+        x11ctl.release_lock(fd2)
+        x11ctl.release_lock(fd1)
 
     def test_lock_timeout_returns_none(self, tmp_path):
         """acquire_lock should return None after timeout when lock is held by another process."""
