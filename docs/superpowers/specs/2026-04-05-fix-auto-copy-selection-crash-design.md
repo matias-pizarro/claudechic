@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-05
 **Status:** Revised after 4-agent review
-**Revision:** 4 (rev 3: test coverage, UX, debounce framing; rev 4: fix timer handle-clobbering race, accurate debounce criterion)
+**Revision:** 5 (rev 4: handle-clobbering fix; rev 5: tighter acceptance criteria, 8 tests, log volume tradeoff)
 
 ## Problem
 
@@ -127,7 +127,7 @@ def _safe_get_selected_text(self) -> str | None:
 Key decisions:
 - Catches **only `IndexError`** -- the single evidenced exception from `Selection.extract()` line 66.
 - Returns `None` on failure -- callers already check truthiness of the result.
-- `log.debug()` not `log.warning()` -- this is expected behavior during streaming, not an anomaly.
+- `log.debug()` not `log.warning()` -- this is expected behavior during streaming, not an anomaly. No rate-limiting or sampling is applied: the debounce timer ensures at most one stale-selection log entry per 50ms window, which is acceptable at debug level. If log volume becomes a concern, the first mitigation would be to raise the file handler level, not to throttle this specific message.
 
 ### Both call sites use the helper
 
@@ -175,14 +175,16 @@ The callback does **not** clear `_copy_timer`. Doing so would introduce a handle
 
 This follows the existing timer-management pattern in the codebase (see `_review_poll_timer` at app.py:898).
 
-### Tests (6 tests in test_app_ui.py)
+### Tests (8 tests in test_app_ui.py)
 
 1. **`test_check_and_copy_selection_handles_index_error`** -- mock `screen.get_selected_text` to raise `IndexError`, assert method returns without crash, assert no "Copied" notification.
 2. **`test_action_copy_selection_handles_index_error`** -- same for the keybinding path.
-3. **`test_check_and_copy_selection_copies_on_success`** -- mock `screen.get_selected_text` to return text, mock `copy_to_clipboard` to return `True`, assert `copy_to_clipboard` is called and "Copied" notification is shown.
+3. **`test_check_and_copy_selection_copies_on_success`** -- mock `screen.get_selected_text` to return text, mock `copy_to_clipboard` to return `True`, assert `copy_to_clipboard` is called and "Copied" notification is shown (1-second timeout).
 4. **`test_mouse_up_debounce_cancels_previous_timer`** -- call `on_mouse_up` twice, assert the first timer's `stop()` was called before the second `set_timer`.
 5. **`test_safe_get_selected_text_logs_on_stale_selection`** -- mock `screen.get_selected_text` to raise `IndexError`, assert `log.debug` is called with the expected message.
 6. **`test_check_and_copy_selection_ignores_whitespace`** -- mock `screen.get_selected_text` to return `"\n  \n"`, assert `copy_to_clipboard` is NOT called.
+7. **`test_old_timer_callback_does_not_clobber_new_timer`** -- simulate an old callback firing after a newer timer is stored: set `_copy_timer` to a mock timer, call `_check_and_copy_selection`, assert `_copy_timer` still references the mock (not `None`).
+8. **`test_action_copy_selection_copies_whitespace_only`** -- mock `screen.get_selected_text` to return `"\n  \n"`, assert `copy_to_clipboard` IS called (manual copy preserves whitespace-only selections for backwards compatibility).
 
 ## Goals and Non-Goals
 
@@ -206,6 +208,8 @@ This follows the existing timer-management pattern in the codebase (see `_review
 
 **Silent failure UX (both auto-copy and manual copy):** Auto-copy is a convenience feature. A failed auto-copy producing no toast is intentional -- the "Copied" toast's *absence* is sufficient signal. For manual copy (`action_copy_selection`), the same logic applies: the user expects "Copied to clipboard" on success; its absence signals something went wrong. Showing a "Selection lost" toast was considered and rejected for both paths: it would fire during rapid scrolling and streaming, creating noise. The user re-selects naturally.
 
+**Distinguishing failure modes:** A stale selection (IndexError) produces a `log.debug()` entry and no user-visible output. A clipboard write failure produces a "Copy failed" warning toast. These are distinguishable both in the UI (no toast vs warning toast) and in logs (debug-level "Stale selection" vs the warning-level notification path).
+
 **Method placement:** `_safe_get_selected_text` is a private method on `ChatApp` rather than a standalone function because it accesses `self.screen`, a Textual framework attribute. Extracting it would require passing the screen reference, adding coupling for no benefit. It belongs with the other clipboard methods on ChatApp.
 
 ## Acceptance Criteria
@@ -213,12 +217,12 @@ This follows the existing timer-management pattern in the codebase (see `_review
 **Functional:**
 - [ ] `_check_and_copy_selection` does not crash when `screen.get_selected_text()` raises `IndexError`
 - [ ] `action_copy_selection` does not crash when `screen.get_selected_text()` raises `IndexError`
-- [ ] Successful selections still copy and show the "Copied" toast
-- [ ] Stale selections produce a `log.debug()` entry (visible in `~/claudechic-dev.log` where debug logging is enabled by default)
+- [ ] Successful auto-copy shows "Copied" toast (1s timeout); successful manual copy shows "Copied to clipboard"
+- [ ] Stale selections emit a `log.debug()` record (observable in the log file when file logging is active; the log destination is environment-dependent)
 - [ ] New mouse-up events cancel the previously tracked timer when possible; stale callbacks do not crash (debounce is best-effort optimization, not a hard guarantee)
 
 **Non-functional:**
-- [ ] All 6 new tests pass
+- [ ] All 8 new tests pass
 - [ ] Pre-commit hooks pass (ruff, ruff-format, pyright)
 - [ ] No behavioral change for the success path -- identical UX when copy works
 
