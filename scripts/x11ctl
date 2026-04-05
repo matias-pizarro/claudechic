@@ -305,8 +305,10 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
     # Check 1: alive
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return False  # Process exists but not ours; treat as invalid
 
     # Check 2: process name
     try:

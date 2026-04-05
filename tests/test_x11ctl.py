@@ -485,6 +485,11 @@ class TestValidatePid:
         ancient_epoch = int(x11ctl.time.time()) - 365 * 86400  # 1 year ago
         assert x11ctl.validate_pid(pid, ancient_epoch, comm) is False
 
+    def test_permission_error_returns_false(self):
+        """PermissionError from os.kill returns False (not our process)."""
+        with patch("os.kill", side_effect=PermissionError):
+            assert x11ctl.validate_pid(os.getpid(), int(x11ctl.time.time()), "python") is False
+
     def test_ps_comm_nonzero_exit_is_invalid(self):
         """ps returning non-zero exit code should invalidate PID."""
         pid = os.getpid()
