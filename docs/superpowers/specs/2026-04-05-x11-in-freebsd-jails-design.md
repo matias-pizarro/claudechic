@@ -1,7 +1,7 @@
 # X11 in FreeBSD Jails — Design Spec
 
 **Date:** 2026-04-05
-**Status:** Draft (rev 4 — post round-3 review: roborev + code-reviewer + architect + contrarian)
+**Status:** Draft (rev 5 — post round-4 review: roborev + code-reviewer + architect + contrarian)
 **Scope:** Running X11 applications inside any FreeBSD jail — headless testing, remote viewing, GUI development, and window automation.
 
 ## Problem
@@ -247,15 +247,15 @@ The script also cleans up stale X server artifacts left by a previous unclean sh
 
 All four components are launched via `subprocess.Popen()` with `--daemon=no` for Xpra (see above). This means all processes are direct children of the `x11ctl` Python process, and the script captures PIDs from `Popen.pid`.
 
-Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile stores the PID and the process start time for robust identity validation.
+Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile stores the PID and elapsed time at creation for robust identity validation.
 
-Format: `<pid> <start_time>\n` (e.g., `1234 1712345678\n`)
+Format: `<pid> <etimes>\n` (e.g., `1234 5\n`)
 
-The start time is captured from `ps -p <pid> -o lstart=` at creation and stored alongside the PID. On subsequent reads, the script validates **both** PID liveness and start-time match. This eliminates PID-reuse false positives: even if the OS reuses a PID for an unrelated process, the start time will differ. (`ps -o lstart=` is available on FreeBSD without `/proc`.)
+The elapsed time is captured from `ps -p <pid> -o etimes=` at creation. `etimes` returns a single integer (seconds since process start) — machine-readable, no whitespace ambiguity, no parsing needed. On subsequent reads, the script recomputes the expected elapsed time (`current_etimes ≈ stored_etimes + seconds_since_pidfile_creation`) and validates within a tolerance of ±2s. This eliminates PID-reuse false positives: even if the OS reuses a PID for an unrelated process, the elapsed time will not match. (`ps -o etimes=` is available on FreeBSD without `/proc`.)
 
-- **On start:** check if pidfile exists. If it does, read PID and start time. Verify the PID is alive via `os.kill(pid, 0)`, belongs to the expected process via `ps -p <pid> -o comm=`, AND has the same start time via `ps -p <pid> -o lstart=`. If any check fails (dead, wrong process, or wrong start time), the PID is stale — remove the pidfile and proceed. If all checks pass, skip (idempotent).
+- **On start:** check if pidfile exists. If it does, read PID and stored etimes. Verify the PID is alive via `os.kill(pid, 0)`, belongs to the expected process via `ps -p <pid> -o comm=`, AND has a consistent elapsed time via `ps -p <pid> -o etimes=` (within ±2s of expected). If any check fails (dead, wrong process, or wrong elapsed time), the PID is stale — remove the pidfile and proceed. If all checks pass, skip (idempotent).
 - **On stop (same invocation):** for child processes, use `Popen.terminate()` (SIGTERM), then `Popen.wait(timeout=3)`, then `Popen.kill()` (SIGKILL) if still alive. Remove pidfile.
-- **On stop (different invocation):** read PID and start time from pidfile. Validate identity (PID alive + process name + start time match). If valid, send `os.kill(pid, signal.SIGTERM)`, poll with `os.kill(pid, 0)` in a loop (up to 3s, 0.1s interval), then `os.kill(pid, signal.SIGKILL)` if still alive. `os.waitpid()` is NOT used here because the processes are not children of this invocation. Remove pidfile. If identity validation fails, just clean up the stale pidfile.
+- **On stop (different invocation):** read PID and etimes from pidfile. Validate identity (PID alive + process name + elapsed time consistent). If valid, send `os.kill(pid, signal.SIGTERM)`, poll with `os.kill(pid, 0)` in a loop (up to 3s, 0.1s interval), then `os.kill(pid, signal.SIGKILL)` if still alive. `os.waitpid()` is NOT used here because the processes are not children of this invocation. Remove pidfile. If identity validation fails, just clean up the stale pidfile.
 
 **Log file management:**
 
@@ -349,7 +349,9 @@ ipcs -m 2>/dev/null && echo "SHM available" || echo "SHM not available — add s
 
 Python script (stdlib only — no third-party dependencies). Single file, copy-and-run.
 
-**Runtime:** Python `>=3.11` with `#!/usr/local/bin/python3` shebang (FreeBSD convention). Uses only stdlib modules: `subprocess`, `signal`, `os`, `socket`, `argparse`, `time`, `json`, `pathlib`.
+**Runtime:** Python `>=3.10` with `#!/usr/local/bin/python3` shebang (FreeBSD convention). Uses only stdlib modules: `subprocess`, `signal`, `os`, `socket`, `argparse`, `time`, `json`, `pathlib`. No features beyond 3.10 are required; the floor matches the host project's `pyproject.toml` (`requires-python = ">=3.10"`). FreeBSD 15 ships 3.11 as the default.
+
+**Packaging:** `x11ctl` lives at `scripts/x11ctl` in the repository — an unpackaged standalone helper, same as the existing `scripts/claudechic-remote`. It is NOT a pip-installed console entry point and has no dependency on the claudechic package. Copy it into a jail and run directly.
 
 **Why Python, not POSIX shell:** The script needs process management with PID validation, readiness probes with retries and timeouts, port-conflict detection via socket bind attempts, cascading stop with dependency ordering, and structured log output. These requirements exceed what POSIX shell handles reliably — PID races, missing arrays, no proper error handling. Python's stdlib modules make all of this correct, testable, and readable. Python is already a hard dependency of the project environment.
 
@@ -374,7 +376,7 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 
 ### Behavior
 
-- **Idempotent** — `start` validates pidfiles (PID alive + process name match via `ps` + nonce) before launching; `stop` is safe when nothing is running
+- **Idempotent** — `start` validates pidfiles (PID alive + process name + start time via `ps`) before launching; `stop` is safe when nothing is running
 - **Layered** — `--xpra` implies `--headless`; `--vnc` implies `--headless`; `--all` starts everything
 - **Readiness-gated** — each component waits for its dependency to be ready before starting (see Startup sequence above)
 - **Port-conflict detection** — authoritative `socket.bind()` attempt before launching; `sockstat` for diagnostics on conflict (exit code 2)
@@ -382,7 +384,17 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 - **Localhost by default** — all TCP listeners bind to `127.0.0.1`. Pass `--bind-all` to bind to `0.0.0.0` for network access
 - **Clean shutdown** — SIGTERM, 3s grace, SIGKILL; removes pidfiles and Xauth
 - **Dependency-aware stop** — `stop --headless` warns and stops Xpra/VNC first if they're running (they depend on Xvfb). `stop --all` stops top-down: websockify → x11vnc → Xpra → Xvfb.
-- **Status exit codes** — 0 = all requested components running, 1 = some down. Exit code 2 (port conflict) is only returned by `start`, never by `status` or `stop`.
+- **Status exit codes** — 0 = all expected components running, 1 = some expected components down. Exit code 2 (port conflict) is only returned by `start`, never by `status` or `stop`.
+
+### Status Health Model
+
+`status` needs to know which components were requested. The `start` subcommand persists the active tier set to `/tmp/.x11ctl-tiers` (a simple file containing e.g., `headless xpra` or `headless xpra vnc`). The `status` subcommand reads this file to determine which components are "expected" vs "not requested":
+
+- If only `--headless` was started, `status` reports Xvfb's health. Xpra and VNC are shown as "not started" (informational), not counted toward the exit code.
+- If `--all` was started, all four components are expected and checked.
+- If the tiers file is missing (e.g., after manual cleanup), `status` checks whatever pidfiles exist and reports their state with a warning that the desired tier is unknown.
+
+This means `status` exit 0 = "everything that was requested is running", exit 1 = "something that was requested is down."
 
 ### Start/Stop Asymmetry
 
@@ -405,8 +417,17 @@ The `x11ctl` script includes a `self-test` subcommand that exercises the accepta
 x11ctl self-test --tier1    # Start headless, verify xdpyinfo, take screenshot, stop, verify cleanup
 x11ctl self-test --tier2    # Start Xpra, verify HTML5 port responds, stop
 x11ctl self-test --tier3    # Start VNC, verify port responds, stop
-x11ctl self-test --all      # All of the above + idempotency test (start/stop/start cycle)
+x11ctl self-test --all      # All of the above + idempotency + failure-path tests
 ```
+
+The `--all` self-test includes these failure-path scenarios:
+
+- **Stale PID recovery:** kill Xvfb with SIGKILL, verify `start --headless` recovers (stale pidfile + `/tmp/.X99-lock` cleanup)
+- **Partial-start rollback:** start `--vnc` with x11vnc port pre-occupied, verify Xvfb is torn down and no orphans remain
+- **Idempotent start:** `start --headless` twice in a row succeeds without error
+- **Signal forwarding:** `x11ctl run sleep 60 &`, send SIGTERM to x11ctl, verify both sleep and Xvfb are terminated
+- **Xauth symlink rejection:** create a symlink at the Xauth path, verify `start` rejects it with a clear error
+- **Status with partial tiers:** start `--headless` only, verify `status` reports Xvfb healthy and does not flag Xpra/VNC as "down"
 
 ### Manual (runbook checklist)
 
@@ -414,10 +435,11 @@ The runbook includes a verification checklist for operators:
 
 1. Run `x11ctl start --headless` and verify `xdpyinfo` output
 2. Run `x11ctl screenshot /tmp/test.png` and verify PNG with `file /tmp/test.png`
-3. Run `x11ctl start --xpra` and open `http://jail-ip:10000` in a browser (requires `--bind-all` or SSH tunnel)
-4. Run `x11ctl start --vnc` and connect with a VNC client to port 5900 (requires `--bind-all` or SSH tunnel)
+3. Run `x11ctl start --xpra` and open `http://127.0.0.1:10000` from inside the jail (or via `--bind-all` / SSH tunnel from outside)
+4. Run `x11ctl start --vnc` and connect with a VNC client to `127.0.0.1:5900` (or via `--bind-all` / SSH tunnel)
 5. Kill Xvfb with `kill -9`, then run `x11ctl start --headless` — verify it recovers (stale PID handling)
 6. Run `x11ctl status` and verify output matches expectations
+7. Run `x11ctl start --headless`, then `x11ctl status` — verify Xpra/VNC shown as "not started", exit code 0
 
 ## Runbook Structure
 
@@ -489,14 +511,14 @@ Primary deliverable: `docs/x11-in-freebsd-jails.md`
     - "MIT-SHM error" — sysvshm not enabled on host
     - "VNC shows black screen" — missing -noxdamage
     - "Xpra won't start" — check XAUTHORITY env var, fallback to VNC stack
-    - Stale pidfiles / orphaned processes — how x11ctl handles PID validation + nonce
+    - Stale pidfiles / orphaned processes — how x11ctl handles PID validation + start-time check
     - Log file locations (.log and .log.prev) for each component
 ```
 
 ## Deliverables
 
 1. **Runbook** — `docs/x11-in-freebsd-jails.md` — comprehensive guide with all tiers, recipes, verification, troubleshooting
-2. **Script** — `scripts/x11ctl` — Python (stdlib only, `>=3.11`), single file, all subcommands documented above
+2. **Script** — `scripts/x11ctl` — Python (stdlib only, `>=3.10`), standalone single file (not a packaged entry point), all subcommands documented above
 
 ## Out of Scope (Future Work)
 
