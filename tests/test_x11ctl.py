@@ -485,6 +485,19 @@ class TestValidatePid:
         ancient_epoch = int(x11ctl.time.time()) - 365 * 86400  # 1 year ago
         assert x11ctl.validate_pid(pid, ancient_epoch, comm) is False
 
+    def test_ps_comm_nonzero_exit_is_invalid(self):
+        """ps returning non-zero exit code should invalidate PID."""
+        pid = os.getpid()
+        original_run = subprocess.run
+        def mock_run(cmd, **kwargs):
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "comm=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+            return original_run(cmd, **kwargs)
+        with patch("subprocess.run", side_effect=mock_run):
+            assert x11ctl.validate_pid(pid, int(x11ctl.time.time()), "python") is False
+
     def test_2factor_fallback_when_etimes_empty(self):
         """validate_pid should succeed on 2-factor (alive + comm) when etimes is empty."""
         pid = os.getpid()
@@ -540,6 +553,19 @@ class TestValidatePidTristate:
         comm = result.stdout.strip()
         ancient_epoch = int(x11ctl.time.time()) - 365 * 86400
         assert x11ctl.validate_pid_tristate(pid, ancient_epoch, comm) == "dead"
+
+    def test_ps_comm_nonzero_exit_returns_dead(self):
+        """ps returning non-zero exit code returns 'dead'."""
+        pid = os.getpid()
+        original_run = subprocess.run
+        def mock_run(cmd, **kwargs):
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "comm=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+            return original_run(cmd, **kwargs)
+        with patch("subprocess.run", side_effect=mock_run):
+            assert x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), "python") == "dead"
 
     def test_ps_comm_timeout_returns_unknown(self):
         """ps timeout during comm check returns 'unknown'."""

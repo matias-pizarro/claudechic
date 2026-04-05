@@ -314,6 +314,8 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
             ["ps", "-p", str(pid), "-o", "comm="],
             capture_output=True, text=True, timeout=5,
         )
+        if result.returncode != 0:
+            return False  # ps failed — process likely dead
         actual_comm = result.stdout.strip()
         if not actual_comm or actual_comm != expected_comm:
             return False
@@ -329,13 +331,14 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
             ["ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True, text=True, timeout=5,
         )
-        etimes_str = result.stdout.strip()
-        if etimes_str:
+        if result.returncode != 0:
+            pass  # ps failed for etimes — fall through to 2-factor
+        elif etimes_str := result.stdout.strip():
             etimes = int(etimes_str)
             expected_age = int(time.time()) - created_epoch
             if abs(etimes - expected_age) > 5:
                 return False  # Age mismatch — PID was reused
-        # If etimes_str is empty, skip age check (2-factor only)
+        # If etimes_str is empty or ps failed, skip age check (2-factor only)
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
         pass  # etimes unavailable — proceed with 2-factor result
 
@@ -366,6 +369,8 @@ def validate_pid_tristate(
             ["ps", "-p", str(pid), "-o", "comm="],
             capture_output=True, text=True, timeout=5,
         )
+        if result.returncode != 0:
+            return "dead"  # ps failed — process likely dead
         actual_comm = result.stdout.strip()
         if not actual_comm or actual_comm != expected_comm:
             return "dead"
@@ -378,13 +383,14 @@ def validate_pid_tristate(
             ["ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True, text=True, timeout=5,
         )
-        etimes_str = result.stdout.strip()
-        if etimes_str:
+        if result.returncode != 0:
+            pass  # ps failed for etimes — fall through to 2-factor
+        elif etimes_str := result.stdout.strip():
             etimes = int(etimes_str)
             expected_age = int(time.time()) - created_epoch
             if abs(etimes - expected_age) > 5:
                 return "dead"  # Age mismatch — PID was reused
-        # If etimes_str is empty, skip age check (2-factor only)
+        # If etimes_str is empty or ps failed, skip age check (2-factor only)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return "unknown"
     except ValueError:
