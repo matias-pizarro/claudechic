@@ -9,6 +9,7 @@ import argparse
 import fcntl
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,9 +64,9 @@ class Config:
         # Xauth: resolve then validate with regex
         raw_xauth = xauth or os.environ.get("X11CTL_XAUTH", "/tmp/.x11ctl-xauth")
         normalized = str(Path(raw_xauth).resolve(strict=False))
-        if not re.match(r"^/tmp/\.x11ctl-[^/]+$", normalized):
+        if not re.match(r"^/tmp/\.x11ctl-[A-Za-z0-9._-]+$", normalized):
             raise ValueError(
-                f"X11CTL_XAUTH must match ^/tmp/.x11ctl-[^/]+$ after normalization, "
+                f"X11CTL_XAUTH must match ^/tmp/.x11ctl-[A-Za-z0-9._-]+$ after normalization, "
                 f"got {normalized!r} (from {raw_xauth!r})"
             )
         object.__setattr__(self, "xauth", normalized)
@@ -392,10 +394,13 @@ def identify_port_user(port: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 def format_env(cfg: Config) -> str:
-    """Format shell export statements for DISPLAY and XAUTHORITY."""
+    """Format shell export statements for DISPLAY and XAUTHORITY.
+
+    Uses shlex.quote() for safe shell interpolation via eval "$(x11ctl env)".
+    """
     return (
-        f'export DISPLAY="{cfg.display}"\n'
-        f'export XAUTHORITY="{cfg.xauth}"\n'
+        f"export DISPLAY={shlex.quote(cfg.display)}\n"
+        f"export XAUTHORITY={shlex.quote(cfg.xauth)}\n"
     )
 
 
@@ -434,7 +439,7 @@ def create_xauth_file(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def wait_ready(
-    check: callable,
+    check: Callable[[], bool],
     retries: int = 10,
     delay: float = 0.5,
 ) -> bool:
@@ -457,7 +462,7 @@ def main() -> int:
     """Main entry point. Returns exit code."""
     args = parse_args()
     if args.command is None:
-        parse_args(["--help"])
+        print("x11ctl: no subcommand specified. Use --help for usage.", file=sys.stderr)
         return 1
 
     # Subcommand dispatch will be wired in later tasks

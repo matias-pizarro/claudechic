@@ -331,6 +331,14 @@ class TestTiersFile:
         with pytest.raises(OSError):
             x11ctl.write_tiers(str(link), {"headless"})
 
+    def test_read_rejects_symlink(self, tmp_path):
+        """read_tiers should reject symlinks per O_NOFOLLOW."""
+        target = tmp_path / "target"
+        target.write_text("headless xpra\n")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        assert x11ctl.read_tiers(str(link)) is None
+
 
 # --- Locking ---
 
@@ -425,12 +433,67 @@ class TestPortCheck:
 
 # --- Env output ---
 
+# --- Config.for_self_test ---
+
+class TestConfigForSelfTest:
+    def test_self_test_display(self, tmp_path):
+        state_dir = str(tmp_path / ".x11ctl-selftest-98-fake")
+        os.makedirs(state_dir, mode=0o700)
+        cfg = x11ctl.Config.for_self_test(display_num=98, state_dir=state_dir)
+        assert cfg.display == ":98"
+
+    def test_self_test_offset_ports(self, tmp_path):
+        state_dir = str(tmp_path / ".x11ctl-selftest-98-fake")
+        os.makedirs(state_dir, mode=0o700)
+        cfg = x11ctl.Config.for_self_test(display_num=98, state_dir=state_dir)
+        assert cfg.xpra_port == 10098
+        assert cfg.vnc_port == 5998
+        assert cfg.novnc_port == 6178
+
+    def test_self_test_xauth_flat(self, tmp_path):
+        state_dir = str(tmp_path / ".x11ctl-selftest-98-fake")
+        os.makedirs(state_dir, mode=0o700)
+        cfg = x11ctl.Config.for_self_test(display_num=98, state_dir=state_dir)
+        assert cfg.xauth == "/tmp/.x11ctl-selftest-98"
+
+    def test_self_test_state_in_dir(self, tmp_path):
+        state_dir = str(tmp_path / ".x11ctl-selftest-97-fake")
+        os.makedirs(state_dir, mode=0o700)
+        cfg = x11ctl.Config.for_self_test(display_num=97, state_dir=state_dir)
+        assert state_dir in cfg.pidfile("xvfb")
+        assert state_dir in cfg.tiers_file
+        assert state_dir in cfg.lock_file
+
+
+# --- Port identification ---
+
+class TestIdentifyPortUser:
+    def test_returns_none_when_sockstat_missing(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert x11ctl.identify_port_user(5900) is None
+
+    def test_returns_none_on_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("sockstat", 5)):
+            assert x11ctl.identify_port_user(5900) is None
+
+    def test_returns_description_when_port_in_use(self):
+        mock_output = "USER     COMMAND    PID   FD PROTO  LOCAL ADDRESS         FOREIGN ADDRESS\nroot     x11vnc     1234  5  tcp4   127.0.0.1:5900        *:*\n"
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=mock_output, stderr=""
+        )):
+            result = x11ctl.identify_port_user(5900)
+            assert result is not None
+            assert "x11vnc" in result
+
+
 class TestEnvOutput:
     def test_env_output(self):
         cfg = x11ctl.Config()
         output = x11ctl.format_env(cfg)
-        assert 'export DISPLAY=":99"' in output
+        assert "export DISPLAY=" in output
+        assert ":99" in output
         assert "export XAUTHORITY=" in output
+        assert cfg.xauth in output
 
 
 # --- Log rotation ---
