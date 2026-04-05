@@ -7,7 +7,6 @@ import subprocess
 import sys
 import socket as _socket
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
