@@ -891,3 +891,179 @@ def test_main_calls_run_without_size_when_no_width():
 
         # Verify app.run was called without size parameter
         mock_app.run.assert_called_once_with()
+
+
+# --- Selection copy safety tests ---
+
+
+@pytest.mark.asyncio
+async def test_check_and_copy_selection_handles_index_error(mock_sdk):
+    """Auto-copy does not crash when get_selected_text raises IndexError."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with patch.object(
+            type(app.screen), "get_selected_text", side_effect=IndexError
+        ):
+            app._check_and_copy_selection()
+            await pilot.pause()
+        # No crash, no "Copied" notification
+        assert not any(n.message == "Copied" for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_action_copy_selection_handles_index_error(mock_sdk):
+    """Manual copy does not crash when get_selected_text raises IndexError."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with patch.object(
+            type(app.screen), "get_selected_text", side_effect=IndexError
+        ):
+            app.action_copy_selection()
+            await pilot.pause()
+        # No crash, no "Copied to clipboard" notification
+        assert not any(n.message == "Copied to clipboard" for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_safe_get_selected_text_logs_on_stale_selection(mock_sdk):
+    """Stale selection emits a debug log entry."""
+    app = ChatApp()
+    async with app.run_test():
+        with (
+            patch.object(type(app.screen), "get_selected_text", side_effect=IndexError),
+            patch("claudechic.app.log") as mock_log,
+        ):
+            result = app._safe_get_selected_text()
+        assert result is None
+        mock_log.debug.assert_called_once_with(
+            "Stale selection coordinates, skipping copy"
+        )
+
+
+@pytest.mark.asyncio
+async def test_mouse_up_debounce_cancels_previous_timer(mock_sdk):
+    """Second mouse-up cancels the first timer before scheduling a new one."""
+    app = ChatApp()
+    async with app.run_test():
+        mock_timer_1 = MagicMock()
+        mock_timer_2 = MagicMock()
+        timers = iter([mock_timer_1, mock_timer_2])
+
+        with patch.object(app, "set_timer", side_effect=lambda *a, **k: next(timers)):
+            # Simulate two mouse-up events
+            # MouseUp(widget, x, y, delta_x, delta_y, button, shift, meta, ctrl, ...)
+            from textual.events import MouseUp
+
+            event = MouseUp(
+                None, 0, 0, 0, 0, 0, False, False, False, screen_x=0, screen_y=0
+            )
+            app.on_mouse_up(event)
+            assert app._copy_timer is mock_timer_1
+
+            app.on_mouse_up(event)
+            mock_timer_1.stop.assert_called_once()
+            assert app._copy_timer is mock_timer_2
+
+
+@pytest.mark.asyncio
+async def test_check_and_copy_selection_does_not_clear_copy_timer(mock_sdk):
+    """Regression guard: _check_and_copy_selection must never clear _copy_timer.
+
+    If someone adds self._copy_timer = None to the callback, it would
+    introduce a handle-clobbering race where an old callback firing after
+    a newer timer is stored would lose the new timer reference.
+    This test passes trivially today (the callback doesn't touch _copy_timer),
+    but guards against that regression.
+    """
+    app = ChatApp()
+    async with app.run_test():
+        mock_new_timer = MagicMock()
+        app._copy_timer = mock_new_timer
+
+        # Simulate the old callback firing
+        with patch.object(type(app.screen), "get_selected_text", return_value=None):
+            app._check_and_copy_selection()
+
+        # _copy_timer must still reference the new timer, not be cleared
+        assert app._copy_timer is mock_new_timer
+
+
+@pytest.mark.asyncio
+async def test_check_and_copy_selection_copies_on_success(mock_sdk):
+    """Auto-copy calls copy_to_clipboard and shows 'Copied' on success.
+
+    Note: The "Copied" notification has timeout=1. Assertions run immediately
+    after pilot.pause(), well within the 1s window. If this test becomes flaky
+    under heavy CI load, the notification may be reaped before the assertion.
+    """
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with (
+            patch.object(
+                type(app.screen),
+                "get_selected_text",
+                return_value="hello world",
+            ),
+            patch.object(app, "copy_to_clipboard", return_value=True) as mock_copy,
+        ):
+            app._check_and_copy_selection()
+            await pilot.pause()
+        mock_copy.assert_called_once_with("hello world")
+        assert any(n.message == "Copied" for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_check_and_copy_selection_ignores_whitespace(mock_sdk):
+    """Auto-copy skips whitespace-only selections."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with (
+            patch.object(
+                type(app.screen),
+                "get_selected_text",
+                return_value="\n  \n",
+            ),
+            patch.object(app, "copy_to_clipboard") as mock_copy,
+        ):
+            app._check_and_copy_selection()
+            await pilot.pause()
+        mock_copy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_action_copy_selection_copies_whitespace_only(mock_sdk):
+    """Manual copy preserves whitespace-only selections (backwards compat)."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with (
+            patch.object(
+                type(app.screen),
+                "get_selected_text",
+                return_value="\n  \n",
+            ),
+            patch.object(app, "copy_to_clipboard", return_value=True) as mock_copy,
+        ):
+            app.action_copy_selection()
+            await pilot.pause()
+        mock_copy.assert_called_once_with("\n  \n")
+
+
+@pytest.mark.asyncio
+async def test_check_and_copy_selection_clipboard_failure_shows_warning(mock_sdk):
+    """Clipboard failure shows 'Copy failed' warning (distinguishes from stale selection)."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with (
+            patch.object(
+                type(app.screen),
+                "get_selected_text",
+                return_value="hello world",
+            ),
+            patch.object(app, "copy_to_clipboard", return_value=False),
+        ):
+            app._check_and_copy_selection()
+            await pilot.pause()
+        assert any(
+            n.message == "Copy failed" and n.severity == "warning"
+            for n in app._notifications
+        )

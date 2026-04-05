@@ -974,7 +974,8 @@ class ChatApp(App):
             self.context_bar.tokens = 0
             return
         # Try SDK API first (gives both tokens and max_tokens)
-        if agent.client:
+        # get_context_usage() requires claude-agent-sdk >= 0.1.55
+        if agent.client and hasattr(agent.client, "get_context_usage"):
             try:
                 usage = await agent.client.get_context_usage()
                 if usage:
@@ -1182,7 +1183,12 @@ class ChatApp(App):
             msg = data.get("content", data.get("error", f"System error: {subtype}"))
             self._show_system_info(str(msg)[:200], "error", event.agent_id)
 
-        elif subtype not in ("stop_hook_summary", "turn_duration", "local_command", "init"):
+        elif subtype not in (
+            "stop_hook_summary",
+            "turn_duration",
+            "local_command",
+            "init",
+        ):
             # Unknown subtype with content - might be important (like terms notification)
             content = data.get("content") or data.get("message")
             if content:
@@ -1451,7 +1457,7 @@ class ChatApp(App):
             chat_view.clear()
 
     def action_copy_selection(self) -> None:
-        selected = self.screen.get_selected_text()
+        selected = self._safe_get_selected_text()
         if selected:
             success = self.copy_to_clipboard(selected)
             if success:
@@ -1512,7 +1518,9 @@ class ChatApp(App):
                     self._close_sidebar_overlay()
             except Exception:
                 pass
-        self.set_timer(0.05, self._check_and_copy_selection)
+        if self._copy_timer is not None:
+            self._copy_timer.stop()
+        self._copy_timer = self.set_timer(0.05, self._check_and_copy_selection)
 
     def copy_to_clipboard(self, text: str) -> bool:
         """Copy to both CLIPBOARD (OSC 52) and PRIMARY (xclip/xsel) on Linux.
@@ -1581,10 +1589,20 @@ class ChatApp(App):
                 return True  # Can't reach tmux server, assume OK
         return True
 
+    _copy_timer: Timer | None = None
+
+    def _safe_get_selected_text(self) -> str | None:
+        """Get selected text, returning None if selection coords are stale."""
+        try:
+            return self.screen.get_selected_text()
+        except IndexError:
+            log.debug("Stale selection coordinates, skipping copy")
+            return None
+
     _copy_failed_notified: bool = False
 
     def _check_and_copy_selection(self) -> None:
-        selected = self.screen.get_selected_text()
+        selected = self._safe_get_selected_text()
         if selected and len(selected.strip()) > 0:
             success = self.copy_to_clipboard(selected)
             if success:
@@ -1872,6 +1890,7 @@ class ChatApp(App):
             # switched agents while the reconnect was in flight)
             if agent is self._agent:
                 self.status_footer.set_cwd(str(new_cwd))
+
                 # Wrap branch refresh to re-check active agent after the async
                 # git call completes — prevents stale branch from overwriting
                 # a newly-switched agent's branch
