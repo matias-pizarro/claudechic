@@ -1672,26 +1672,17 @@ class ChatApp(App):
         self._pending_shell_cancels[id(pending_widget)] = on_cancel
 
         async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            tip_handle = loop.call_later(
+                1.0,
+                lambda: self.notify(
+                    "Tip: Use -i flag for interactive commands", timeout=5
+                ),
+            )
             try:
-                # Show tip after 1 second if command is still running
-                loop = asyncio.get_running_loop()
-                tip_handle = loop.call_later(
-                    1.0,
-                    lambda: self.notify(
-                        "Tip: Use -i flag for interactive commands", timeout=5
-                    ),
-                )
-
                 output, returncode, was_cancelled = await run_in_pty_cancellable(
                     cmd, shell, cwd, env, cancel_event
                 )
-                tip_handle.cancel()
-
-                # Clean up cancel handler
-                self._pending_shell_cancels.pop(id(pending_widget), None)
-
-                # Remove pending widget
-                pending_widget.remove()
 
                 if was_cancelled:
                     self.notify("Command cancelled")
@@ -1706,9 +1697,14 @@ class ChatApp(App):
                     chat_view.scroll_if_tailing()
 
             except asyncio.CancelledError:
+                self.notify("Command cancelled")
+            except Exception as exc:
+                log.exception("Shell command failed: %s", cmd)
+                self.notify(f"Command failed: {exc}", severity="error")
+            finally:
+                tip_handle.cancel()
                 self._pending_shell_cancels.pop(id(pending_widget), None)
                 pending_widget.remove()
-                self.notify("Command cancelled")
 
         self.run_worker(
             _run(), name="shell-command", exclusive=False, exit_on_error=False

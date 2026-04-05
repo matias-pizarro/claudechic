@@ -642,8 +642,13 @@ async def test_bang_command_shows_exit_code(mock_sdk):
 @pytest.mark.asyncio
 async def test_bang_command_worker_failure_does_not_exit_app(mock_sdk):
     """Bang command worker errors stay contained so the app remains usable."""
+    from claudechic.widgets import PendingShellWidget
+
     app = ChatApp()
     async with app.run_test() as pilot:
+        chat_view = app._chat_view
+        assert chat_view is not None
+
         with patch(
             "claudechic.shell_runner.run_in_pty_cancellable",
             new=AsyncMock(side_effect=RuntimeError("pty failed")),
@@ -651,6 +656,9 @@ async def test_bang_command_worker_failure_does_not_exit_app(mock_sdk):
             await submit_command(app, pilot, "!echo hello")
             await wait_for_workers(app)
             await pilot.pause()
+
+        assert list(chat_view.query(PendingShellWidget)) == []
+        assert app._pending_shell_cancels == {}
 
         await submit_command(app, pilot, "/agent test-agent")
         await wait_for_workers(app)
