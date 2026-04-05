@@ -7,6 +7,7 @@ import subprocess
 import sys
 import socket as _socket
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -438,6 +439,157 @@ class TestPidfile:
         link = tmp_path / "link.pid"
         link.symlink_to(target)
         assert x11ctl.read_pidfile(str(link)) is None
+
+
+# --- PID identity validation ---
+
+class TestValidatePid:
+    def test_own_process_is_valid(self):
+        """Current process should validate against its own name and derived epoch."""
+        pid = os.getpid()
+        # Get actual comm for this process
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True,
+        )
+        actual_comm = result.stdout.strip()
+        # Derive epoch from actual etimes to avoid flaky ±5s tolerance
+        etimes_result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes="],
+            capture_output=True, text=True,
+        )
+        etimes_str = etimes_result.stdout.strip()
+        if not (etimes_str and etimes_str.isdigit()):
+            pytest.skip(f"ps etimes unavailable (got {etimes_str!r})")
+        created = int(x11ctl.time.time()) - int(etimes_str)
+        assert x11ctl.validate_pid(pid, created, actual_comm) is True
+
+    def test_dead_pid_is_invalid(self):
+        """A PID that doesn't exist should be invalid."""
+        assert x11ctl.validate_pid(99999999, int(x11ctl.time.time()), "fake") is False
+
+    def test_wrong_comm_is_invalid(self):
+        """Current PID but wrong process name should be invalid."""
+        pid = os.getpid()
+        created = int(x11ctl.time.time())
+        assert x11ctl.validate_pid(pid, created, "definitely_not_this") is False
+
+    def test_wrong_epoch_is_invalid(self):
+        """Current PID but epoch from a year ago should be invalid (age mismatch)."""
+        pid = os.getpid()
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True,
+        )
+        comm = result.stdout.strip()
+        ancient_epoch = int(x11ctl.time.time()) - 365 * 86400  # 1 year ago
+        assert x11ctl.validate_pid(pid, ancient_epoch, comm) is False
+
+    def test_2factor_fallback_when_etimes_empty(self):
+        """validate_pid should succeed on 2-factor (alive + comm) when etimes is empty."""
+        pid = os.getpid()
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True,
+        )
+        comm = result.stdout.strip()
+        # Mock ps etimes to return empty (restricted jail scenario)
+        original_run = subprocess.run
+        def mock_run(cmd, **kwargs):
+            # Match on command args, not call order
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "etimes=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            return original_run(cmd, **kwargs)
+        with patch("subprocess.run", side_effect=mock_run):
+            # Should still return True via 2-factor (alive + comm)
+            assert x11ctl.validate_pid(pid, int(x11ctl.time.time()), comm) is True
+
+
+class TestValidatePidTristate:
+    def test_alive_process(self):
+        """Living process with matching comm returns 'alive'."""
+        pid = os.getpid()
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True)
+        comm = result.stdout.strip()
+        # Derive epoch from actual etimes to avoid flaky ±5s tolerance
+        etimes_result = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
+                                       capture_output=True, text=True)
+        etimes_str = etimes_result.stdout.strip()
+        if not (etimes_str and etimes_str.isdigit()):
+            pytest.skip(f"ps etimes unavailable (got {etimes_str!r})")
+        created = int(x11ctl.time.time()) - int(etimes_str)
+        assert x11ctl.validate_pid_tristate(pid, created, comm) == "alive"
+
+    def test_dead_process(self):
+        """Non-existent PID returns 'dead'."""
+        assert x11ctl.validate_pid_tristate(99999999, int(x11ctl.time.time()), "fake") == "dead"
+
+    def test_wrong_comm_returns_dead(self):
+        """Current PID but wrong process name returns 'dead'."""
+        pid = os.getpid()
+        assert x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), "definitely_not_this") == "dead"
+
+    def test_wrong_epoch_returns_dead(self):
+        """Current PID but epoch from a year ago returns 'dead' (age mismatch)."""
+        pid = os.getpid()
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True)
+        comm = result.stdout.strip()
+        ancient_epoch = int(x11ctl.time.time()) - 365 * 86400
+        assert x11ctl.validate_pid_tristate(pid, ancient_epoch, comm) == "dead"
+
+    def test_ps_comm_timeout_returns_unknown(self):
+        """ps timeout during comm check returns 'unknown'."""
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
+
+    def test_ps_etimes_timeout_returns_unknown(self):
+        """ps timeout during etimes check (after comm succeeds) returns 'unknown'."""
+        def mock_run(cmd, **kwargs):
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "etimes=" in cmd[idx]:
+                    raise subprocess.TimeoutExpired("ps", 5)
+                if idx < len(cmd) and "comm=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="python\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", side_effect=mock_run):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
+
+    def test_2factor_fallback_when_etimes_empty(self):
+        """validate_pid_tristate should return 'alive' on 2-factor when etimes empty."""
+        pid = os.getpid()
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True)
+        comm = result.stdout.strip()
+        def mock_run(cmd, **kwargs):
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "etimes=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+                if idx < len(cmd) and "comm=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"{comm}\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", side_effect=mock_run):
+            result = x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), comm)
+            assert result == "alive"  # 2-factor fallback succeeds
+
+    def test_ps_not_found_returns_unknown(self):
+        """Missing ps binary returns 'unknown'."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
+
+    def test_permission_error_returns_unknown(self):
+        """PermissionError from os.kill (can't probe PID) returns 'unknown'."""
+        with patch("os.kill", side_effect=PermissionError):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
 
 
 # --- Tiers file I/O ---

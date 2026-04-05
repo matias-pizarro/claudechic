@@ -289,6 +289,111 @@ def read_pidfile(path: str) -> Optional[tuple[int, int]]:
 
 
 # ---------------------------------------------------------------------------
+# PID identity validation
+# ---------------------------------------------------------------------------
+
+def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
+    """Validate that a PID is alive, has the expected process name, and age matches.
+
+    Uses 3-factor check:
+    1. os.kill(pid, 0) — is the process alive?
+    2. ps -p <pid> -o comm= — does the process name match?
+    3. ps -p <pid> -o etimes= vs time.time() - created_epoch — age match within ±5s?
+
+    Falls back to 2-factor (alive + comm) if etimes is unavailable.
+    """
+    # Check 1: alive
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+
+    # Check 2: process name
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=5,
+        )
+        actual_comm = result.stdout.strip()
+        if not actual_comm or actual_comm != expected_comm:
+            return False
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+    # Check 3: age match (best-effort — enhances confidence but not required)
+    # If etimes is unavailable (restricted jail, ps timeout), we already have
+    # 2-factor validation (PID alive + comm match) which passed above.
+    # The 3rd factor only REJECTS — it never grants access on its own.
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes="],
+            capture_output=True, text=True, timeout=5,
+        )
+        etimes_str = result.stdout.strip()
+        if etimes_str:
+            etimes = int(etimes_str)
+            expected_age = int(time.time()) - created_epoch
+            if abs(etimes - expected_age) > 5:
+                return False  # Age mismatch — PID was reused
+        # If etimes_str is empty, skip age check (2-factor only)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass  # etimes unavailable — proceed with 2-factor result
+
+    # Passed 2-factor (alive + comm) and optionally 3-factor (+ age)
+    return True
+
+
+def validate_pid_tristate(
+    pid: int, created_epoch: int, expected_comm: str
+) -> str:
+    """Like validate_pid but returns 'alive' / 'dead' / 'unknown'.
+
+    'unknown' is returned when the PID cannot be conclusively validated
+    (e.g., ps timeout, missing ps binary, PermissionError on kill probe).
+    Used by stale recovery where 'unknown' means fail-closed (skip cleanup).
+    """
+    # Check 1: alive
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "unknown"  # Process exists but can't probe — fail closed
+
+    # Check 2: process name
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=5,
+        )
+        actual_comm = result.stdout.strip()
+        if not actual_comm or actual_comm != expected_comm:
+            return "dead"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "unknown"
+
+    # Check 3: age match
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes="],
+            capture_output=True, text=True, timeout=5,
+        )
+        etimes_str = result.stdout.strip()
+        if etimes_str:
+            etimes = int(etimes_str)
+            expected_age = int(time.time()) - created_epoch
+            if abs(etimes - expected_age) > 5:
+                return "dead"  # Age mismatch — PID was reused
+        # If etimes_str is empty, skip age check (2-factor only)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "unknown"
+    except ValueError:
+        pass  # Malformed etimes — proceed with 2-factor result
+
+    return "alive"
+
+
+# ---------------------------------------------------------------------------
 # Tiers file I/O
 # ---------------------------------------------------------------------------
 
