@@ -14,7 +14,7 @@
 
 **Return type convention:** All tier start functions (`start_headless`, `start_xpra`, `start_vnc`) share the signature `(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> int` and return: 0=success, 1=general failure, 2=port conflict. `start_headless` ignores the `bind` parameter (Xvfb uses Unix sockets). Helper function `stop_component` returns `bool`: `True` on success or nothing-to-do, `False` when SIGKILL fails (process still running). `clean_stale_x_artifacts` returns `bool`. The `start_command_impl` aggregates component return codes into a single exit code.
 
-**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully.
+**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully. **Note on test vs runtime policy:** The runtime `validate_pid` gracefully degrades to 2-factor (production resilience). The *tests* for `validate_pid` and `validate_pid_tristate` that use live `ps etimes` require etimes to be available (test determinism) — they are skipped on platforms where etimes is unavailable. This is not a contradiction: runtime degrades gracefully, tests require a capable environment.
 
 **Atomic file writes:** Both `write_pidfile` and `write_tiers` MUST use the write-to-temp-then-rename pattern: write to a tempfile in the same directory (`/tmp`), then `os.rename()` directly over the target path. Do NOT unlink the old file first — `os.rename()` atomically replaces the destination, so readers never see a missing file and a crash between unlink and rename cannot lose the last known-good state. Before renaming, check `os.path.lexists(target) and os.path.islink(target)` — if the target is a symlink, raise `OSError` instead of renaming over it. Failure of `write_pidfile` after a successful `Popen` MUST terminate the spawned process and clean up xauth before returning failure.
 
@@ -627,8 +627,8 @@ class TestValidatePid:
             capture_output=True, text=True,
         )
         etimes_str = etimes_result.stdout.strip()
-        assert etimes_str and etimes_str.isdigit(), \
-            f"ps etimes unavailable (got {etimes_str!r}); skip on restricted platforms"
+        if not (etimes_str and etimes_str.isdigit()):
+            pytest.skip(f"ps etimes unavailable (got {etimes_str!r})")
         created = int(x11ctl.time.time()) - int(etimes_str)
         assert x11ctl.validate_pid(pid, created, actual_comm) is True
 
@@ -736,8 +736,8 @@ class TestValidatePidTristate:
         etimes_result = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
                                        capture_output=True, text=True)
         etimes_str = etimes_result.stdout.strip()
-        assert etimes_str and etimes_str.isdigit(), \
-            f"ps etimes unavailable (got {etimes_str!r}); skip on restricted platforms"
+        if not (etimes_str and etimes_str.isdigit()):
+            pytest.skip(f"ps etimes unavailable (got {etimes_str!r})")
         created = int(x11ctl.time.time()) - int(etimes_str)
         assert x11ctl.validate_pid_tristate(pid, created, comm) == "alive"
 
