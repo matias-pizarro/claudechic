@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Coroutine, Any
 
-log = logging.getLogger()
+log = logging.getLogger(__name__)
 
 
 def create_safe_task(

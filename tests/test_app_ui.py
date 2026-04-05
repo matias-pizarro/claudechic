@@ -586,6 +586,7 @@ async def test_bang_command_inline_shell(mock_sdk):
             new=AsyncMock(return_value=("hello\r\n", 0, False)),
         ):
             await submit_command(app, pilot, "!echo hello")
+            await wait_for_workers(app)
             await pilot.pause()
             widgets = list(chat_view.query(ShellOutputWidget))
 
@@ -609,6 +610,7 @@ async def test_bang_command_captures_stderr(mock_sdk):
             new=AsyncMock(return_value=("error\r\n", 0, False)),
         ):
             await submit_command(app, pilot, "!echo error >&2")
+            await wait_for_workers(app)
             await pilot.pause()
             widgets = list(chat_view.query(ShellOutputWidget))
 

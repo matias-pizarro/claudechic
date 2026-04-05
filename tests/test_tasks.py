@@ -27,8 +27,9 @@ class TestCreateSafeTask:
         async def failing():
             raise ValueError("test error")
 
-        task = create_safe_task(failing(), name="test-fail")
-        result = await task
+        with caplog.at_level("ERROR", logger="claudechic"):
+            task = create_safe_task(failing(), name="test-fail")
+            result = await task
 
         # Should return None on failure
         assert result is None
@@ -57,8 +58,9 @@ class TestCreateSafeTask:
         async def failing():
             raise ValueError("oops")
 
-        task = create_safe_task(failing())  # No name
-        await task
+        with caplog.at_level("ERROR", logger="claudechic"):
+            task = create_safe_task(failing())  # No name
+            await task
 
         assert "Task 'unnamed' failed" in caplog.text
 
@@ -69,8 +71,9 @@ class TestCreateSafeTask:
         async def returns_none():
             return None
 
-        task = create_safe_task(returns_none(), name="none-returner")
-        result = await task
+        with caplog.at_level("ERROR", logger="claudechic"):
+            task = create_safe_task(returns_none(), name="none-returner")
+            result = await task
 
         assert result is None
         assert "none-returner" not in caplog.text  # No error logged
@@ -82,7 +85,8 @@ class TestCreateSafeTask:
         async def fails_with_message():
             raise ValueError("specific error message here")
 
-        task = create_safe_task(fails_with_message(), name="message-test")
-        await task
+        with caplog.at_level("ERROR", logger="claudechic"):
+            task = create_safe_task(fails_with_message(), name="message-test")
+            await task
 
         assert "specific error message here" in caplog.text
