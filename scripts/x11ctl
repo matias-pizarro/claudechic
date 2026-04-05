@@ -1,0 +1,469 @@
+#!/usr/local/bin/python3
+"""x11ctl — manage X11 inside FreeBSD jails (Xvfb + Xpra + VNC).
+
+Single-file script, stdlib only, Python >=3.10.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Config:
+    """Immutable configuration, constructed from env vars and defaults."""
+
+    display: str = ":99"
+    screen: str = "1920x1080x24"
+    bind: str = "127.0.0.1"
+    xpra_port: int = 10000
+    vnc_port: int = 5900
+    novnc_port: int = 6080
+    xauth: str = "/tmp/.x11ctl-xauth"
+    state_prefix: str = ".x11ctl"
+    state_dir: str | None = None  # override for self-test isolation
+
+    def __init__(
+        self,
+        display: str | None = None,
+        screen: str | None = None,
+        bind: str | None = None,
+        xpra_port: int | None = None,
+        vnc_port: int | None = None,
+        novnc_port: int | None = None,
+        xauth: str | None = None,
+        state_prefix: str | None = None,
+        state_dir: str | None = None,
+    ) -> None:
+        object.__setattr__(self, "display", display or os.environ.get("X11CTL_DISPLAY", ":99"))
+        object.__setattr__(self, "screen", screen or os.environ.get("X11CTL_SCREEN", "1920x1080x24"))
+        object.__setattr__(self, "bind", bind or os.environ.get("X11CTL_BIND", "127.0.0.1"))
+        object.__setattr__(self, "xpra_port", xpra_port if xpra_port is not None else int(os.environ.get("X11CTL_XPRA_PORT", "10000")))
+        object.__setattr__(self, "vnc_port", vnc_port if vnc_port is not None else int(os.environ.get("X11CTL_VNC_PORT", "5900")))
+        object.__setattr__(self, "novnc_port", novnc_port if novnc_port is not None else int(os.environ.get("X11CTL_NOVNC_PORT", "6080")))
+        object.__setattr__(self, "state_prefix", state_prefix or ".x11ctl")
+        object.__setattr__(self, "state_dir", state_dir)
+
+        # Xauth: resolve then validate with regex
+        raw_xauth = xauth or os.environ.get("X11CTL_XAUTH", "/tmp/.x11ctl-xauth")
+        normalized = str(Path(raw_xauth).resolve(strict=False))
+        if not re.match(r"^/tmp/\.x11ctl-[^/]+$", normalized):
+            raise ValueError(
+                f"X11CTL_XAUTH must match ^/tmp/.x11ctl-[^/]+$ after normalization, "
+                f"got {normalized!r} (from {raw_xauth!r})"
+            )
+        object.__setattr__(self, "xauth", normalized)
+
+        # Validate after all fields set
+        self.__post_init_validate()
+
+    def __post_init_validate(self) -> None:
+        if not re.match(r"^:\d+$", self.display):
+            raise ValueError(f"X11CTL_DISPLAY must match ^:\\d+$, got {self.display!r}")
+        if not re.match(r"^\d+x\d+x\d+$", self.screen):
+            raise ValueError(f"X11CTL_SCREEN must match ^\\d+x\\d+x\\d+$, got {self.screen!r}")
+
+    @property
+    def display_number(self) -> int:
+        return int(self.display.lstrip(":"))
+
+    def pidfile(self, component: str) -> str:
+        if self.state_dir:
+            return os.path.join(self.state_dir, f"{component}.pid")
+        return f"/tmp/{self.state_prefix}-{component}.pid"
+
+    def logfile(self, component: str) -> str:
+        if self.state_dir:
+            return os.path.join(self.state_dir, f"{component}.log")
+        return f"/tmp/{self.state_prefix}-{component}.log"
+
+    @property
+    def tiers_file(self) -> str:
+        if self.state_dir:
+            return os.path.join(self.state_dir, "tiers")
+        return f"/tmp/{self.state_prefix}-tiers"
+
+    @property
+    def lock_file(self) -> str:
+        if self.state_dir:
+            return os.path.join(self.state_dir, ".lock")
+        return f"/tmp/{self.state_prefix}.lock"
+
+    @classmethod
+    def for_self_test(cls, display_num: int, state_dir: str) -> Config:
+        """Pure path-derivation factory for self-test isolation. No side effects."""
+        return cls(
+            display=f":{display_num}",
+            xpra_port=10000 + display_num,
+            vnc_port=5900 + display_num,
+            novnc_port=6080 + display_num,
+            xauth=f"/tmp/.x11ctl-selftest-{display_num}",
+            state_prefix=f".x11ctl-selftest-{display_num}",
+            state_dir=state_dir,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tier Logic
+# ---------------------------------------------------------------------------
+
+TIER_DEPS: dict[str, set[str]] = {
+    "headless": {"headless"},
+    "xpra": {"headless", "xpra"},
+    "vnc": {"headless", "vnc"},
+    "all": {"headless", "xpra", "vnc"},
+}
+
+
+def desired_tiers(tier: str) -> set[str]:
+    """Return the full set of tiers implied by a tier name."""
+    return set(TIER_DEPS.get(tier, set()))
+
+
+# ---------------------------------------------------------------------------
+# CLI Parsing
+# ---------------------------------------------------------------------------
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments. Returns namespace with .command and tier flags."""
+    parser = argparse.ArgumentParser(
+        prog="x11ctl",
+        description="Manage X11 inside FreeBSD jails (Xvfb + Xpra + VNC)",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # setup
+    p_setup = sub.add_parser("setup", help="Install required packages")
+    p_setup.add_argument("--tier1", action="store_true")
+    p_setup.add_argument("--tier2", action="store_true")
+    p_setup.add_argument("--tier3", action="store_true")
+    p_setup.add_argument("--all", action="store_true")
+
+    # start
+    p_start = sub.add_parser("start", help="Start X11 components")
+    p_start.add_argument("--headless", action="store_true")
+    p_start.add_argument("--xpra", action="store_true")
+    p_start.add_argument("--vnc", action="store_true")
+    p_start.add_argument("--all", action="store_true")
+    p_start.add_argument("--bind-all", action="store_true")
+
+    # stop
+    p_stop = sub.add_parser("stop", help="Stop X11 components")
+    p_stop.add_argument("--headless", action="store_true")
+    p_stop.add_argument("--xpra", action="store_true")
+    p_stop.add_argument("--vnc", action="store_true")
+    p_stop.add_argument("--all", action="store_true")
+
+    # status
+    sub.add_parser("status", help="Show running component status")
+
+    # env
+    sub.add_parser("env", help="Print export statements for DISPLAY and XAUTHORITY")
+
+    # run
+    p_run = sub.add_parser("run", help="Run command with temporary Xvfb")
+    p_run.add_argument("run_command", nargs=argparse.REMAINDER)
+
+    # screenshot
+    p_screenshot = sub.add_parser("screenshot", help="Capture display to PNG")
+    p_screenshot.add_argument("path", help="Output file path")
+
+    # self-test
+    p_selftest = sub.add_parser("self-test", help="Run diagnostic self-test")
+    p_selftest.add_argument("--tier1", action="store_true")
+    p_selftest.add_argument("--tier2", action="store_true")
+    p_selftest.add_argument("--tier3", action="store_true")
+    p_selftest.add_argument("--all", action="store_true")
+
+    return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# Pidfile I/O
+# ---------------------------------------------------------------------------
+
+def write_pidfile(path: str, pid: int, created_epoch: int) -> None:
+    """Write pidfile atomically: temp file + rename. Rejects symlinks."""
+    dir_path = os.path.dirname(path) or "/tmp"
+    content = f"{pid} {created_epoch}\n"
+
+    # Write to temp file with O_CREAT | O_EXCL | O_NOFOLLOW
+    fd = -1
+    tmp_path = None
+    try:
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".x11ctl-pid-")
+        fd = tmp_fd
+        os.write(fd, content.encode())
+        os.close(fd)
+        fd = -1
+
+        # Check target is not a symlink before rename
+        if os.path.lexists(path) and os.path.islink(path):
+            raise OSError(f"Refusing to write pidfile over symlink: {path}")
+
+        # Atomic rename (replaces destination)
+        os.rename(tmp_path, path)
+        tmp_path = None  # rename succeeded, don't clean up
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def read_pidfile(path: str) -> tuple[int, int] | None:
+    """Read pidfile. Returns (pid, epoch) or None if missing/corrupt/symlink."""
+    if os.path.islink(path):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            data = os.read(fd, 64).decode().strip()
+        finally:
+            os.close(fd)
+        parts = data.split()
+        if len(parts) != 2:
+            return None
+        return int(parts[0]), int(parts[1])
+    except (OSError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Tiers File I/O
+# ---------------------------------------------------------------------------
+
+def write_tiers(path: str, tiers: set[str]) -> None:
+    """Write tiers file atomically. Rejects symlinks."""
+    dir_path = os.path.dirname(path) or "/tmp"
+    content = " ".join(sorted(tiers)) + "\n"
+
+    fd = -1
+    tmp_path = None
+    try:
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".x11ctl-tiers-")
+        fd = tmp_fd
+        os.write(fd, content.encode())
+        os.close(fd)
+        fd = -1
+
+        if os.path.lexists(path) and os.path.islink(path):
+            raise OSError(f"Refusing to write tiers file over symlink: {path}")
+
+        os.rename(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def read_tiers(path: str) -> set[str] | None:
+    """Read tiers file. Returns set of tier names or None if missing."""
+    if os.path.islink(path):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            data = os.read(fd, 256).decode().strip()
+        finally:
+            os.close(fd)
+        if not data:
+            return None
+        return set(data.split())
+    except OSError:
+        return None
+
+
+def delete_tiers(path: str) -> None:
+    """Delete tiers file. Safe if missing."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Locking
+# ---------------------------------------------------------------------------
+
+def acquire_lock(
+    path: str,
+    exclusive: bool = True,
+    timeout: float = 30.0,
+) -> int | None:
+    """Acquire flock on path. Returns fd or None on timeout."""
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        return None
+
+    flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    flag |= fcntl.LOCK_NB
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, flag)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.1)
+
+
+def release_lock(fd: int) -> None:
+    """Release flock and close fd."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+
+def find_binary(name: str) -> str | None:
+    """Find a binary on PATH. Returns full path or None."""
+    return shutil.which(name)
+
+
+def check_binaries(names: list[str]) -> list[str]:
+    """Return list of missing binaries."""
+    return [n for n in names if find_binary(n) is None]
+
+
+# ---------------------------------------------------------------------------
+# Port Detection
+# ---------------------------------------------------------------------------
+
+def check_port_available(host: str, port: int) -> bool:
+    """Check if a TCP port is available by attempting to bind."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def identify_port_user(port: int) -> str | None:
+    """Identify process using a port via sockstat. Returns description or None."""
+    try:
+        result = subprocess.run(
+            ["sockstat", "-l", "-p", str(port)],
+            capture_output=True, text=True, timeout=5,
+        )
+        lines = result.stdout.strip().splitlines()
+        if len(lines) > 1:
+            return lines[1].strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Env Output
+# ---------------------------------------------------------------------------
+
+def format_env(cfg: Config) -> str:
+    """Format shell export statements for DISPLAY and XAUTHORITY."""
+    return (
+        f'export DISPLAY="{cfg.display}"\n'
+        f'export XAUTHORITY="{cfg.xauth}"\n'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Log Rotation
+# ---------------------------------------------------------------------------
+
+def rotate_log(path: str) -> None:
+    """Rotate log: rename current to .prev. Safe if missing."""
+    try:
+        prev = path + ".prev"
+        os.rename(path, prev)
+    except FileNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Xauth
+# ---------------------------------------------------------------------------
+
+def create_xauth_file(path: str) -> None:
+    """Create empty xauth file with mode 0600. Rejects symlinks."""
+    if os.path.islink(path):
+        raise OSError(f"Refusing to create xauth file over symlink: {path}")
+
+    # Remove existing regular file if present
+    if os.path.exists(path):
+        os.unlink(path)
+
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Readiness Probes
+# ---------------------------------------------------------------------------
+
+def wait_ready(
+    check: callable,
+    retries: int = 10,
+    delay: float = 0.5,
+) -> bool:
+    """Poll check() up to retries times with delay between. Returns True on success."""
+    for _ in range(retries):
+        try:
+            if check():
+                return True
+        except Exception:
+            pass
+        time.sleep(delay)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    """Main entry point. Returns exit code."""
+    args = parse_args()
+    if args.command is None:
+        parse_args(["--help"])
+        return 1
+
+    # Subcommand dispatch will be wired in later tasks
+    print(f"x11ctl: subcommand '{args.command}' not yet implemented", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
