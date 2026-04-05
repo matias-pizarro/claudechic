@@ -12,6 +12,11 @@
 
 **Internal structure target:** The single file should not exceed ~800 lines. Code is organized in comment-delimited sections: Config, Tier Logic, Pidfile I/O, Tiers File I/O, PID Validation, Process Lifecycle, Locking, Preflight, Port Detection, Xauth, Log Rotation, Readiness Probes, Subcommands, Main.
 
+**Safety-critical acceptance criteria (in addition to spec AC):**
+- Xauth: `xauth add` failure/timeout aborts startup with clear error; xauth file cleaned up on failure
+- Stale cleanup: live Xvfb artifacts preserved; dead-PID artifacts cleaned; malformed lock cleaned; `ps` timeout → fail closed with manual remediation guidance
+- Cookie: offline generation via `os.urandom` + `xauth add`, no live display required
+
 ---
 
 ## File Map
@@ -774,18 +779,81 @@ Wire up the actual process launch for Tier 1. Integration test conditional on Xv
 # Add to tests/test_x11ctl.py
 
 class TestStaleCleanup:
-    def test_clean_stale_x_artifacts(self, tmp_path, monkeypatch):
-        """Stale lock and socket should be removed when no matching process."""
+    def test_clean_dead_pid_artifacts(self, tmp_path):
+        """Stale lock with dead PID should be removed."""
         lock = tmp_path / ".X99-lock"
-        lock.write_text("12345\n")
+        lock.write_text("99999999\n")  # PID that doesn't exist
         socket_dir = tmp_path / ".X11-unix"
         socket_dir.mkdir()
         socket_file = socket_dir / "X99"
         socket_file.write_text("")
 
-        x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True
         assert not lock.exists()
         assert not socket_file.exists()
+
+    def test_clean_no_artifacts(self, tmp_path):
+        """No artifacts = returns True (nothing to do)."""
+        assert x11ctl.clean_stale_x_artifacts(99, str(tmp_path)) is True
+
+    def test_clean_live_xvfb_preserved(self, tmp_path):
+        """Lock with our own PID (pretend it's Xvfb) should NOT be deleted."""
+        lock = tmp_path / ".X99-lock"
+        # Use a PID we know is alive — but comm won't be "Xvfb"
+        lock.write_text(f"{os.getpid()}\n")
+        # Our process is python, not Xvfb — so this should still clean
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True  # python != Xvfb, safe to clean
+
+    def test_clean_malformed_lock(self, tmp_path):
+        """Malformed lock file (not a PID) should be cleaned."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("not_a_pid\n")
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True
+        assert not lock.exists()
+
+    def test_clean_returns_false_on_timeout(self, tmp_path):
+        """If ps times out, should fail closed (return False)."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("1\n")  # PID 1 (init) — will exist
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # fail closed
+            assert lock.exists()  # not deleted
+
+
+class TestXauthAdd:
+    def test_xauth_add_failure_aborts_startup(self):
+        """If xauth add returns non-zero, start_headless should return False."""
+        cfg = x11ctl.Config()
+        started = []
+
+        with patch.object(x11ctl, "check_binaries", return_value=[]), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "clean_stale_x_artifacts", return_value=True), \
+             patch.object(x11ctl, "create_xauth_file"), \
+             patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=1, stdout="", stderr="auth error",
+             )):
+            result = x11ctl.start_headless(cfg, started)
+            assert result is False
+            assert "xvfb" not in started
+
+    def test_xauth_add_timeout_aborts_startup(self):
+        """If xauth add times out, start_headless should return False."""
+        cfg = x11ctl.Config()
+        started = []
+
+        with patch.object(x11ctl, "check_binaries", return_value=[]), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "clean_stale_x_artifacts", return_value=True), \
+             patch.object(x11ctl, "create_xauth_file"), \
+             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("xauth", 5)):
+            result = x11ctl.start_headless(cfg, started)
+            assert result is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -800,14 +868,22 @@ Expected: FAIL — `clean_stale_x_artifacts` not defined.
 # Stale artifact cleanup
 # ---------------------------------------------------------------------------
 
-def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> None:
+def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
     """Remove stale X server lock and socket files ONLY if no matching Xvfb is running.
 
     Reads PID from the lock file and checks if that PID is a live Xvfb process.
     If it is, artifacts are left untouched (another Xvfb owns them).
+
+    Returns True if artifacts were cleaned or didn't exist.
+    Returns False if cleanup was blocked (live Xvfb or couldn't determine).
+    Caller should print guidance when False is returned.
     """
     lock_path = Path(tmp_dir) / f".X{display_num}-lock"
     socket_path = Path(tmp_dir) / ".X11-unix" / f"X{display_num}"
+
+    # No artifacts = nothing to do
+    if not lock_path.exists() and not socket_path.exists():
+        return True
 
     # Check if a live Xvfb owns these artifacts — FAIL CLOSED
     # Only delete if we have positive evidence the owning PID is gone or not Xvfb.
@@ -822,18 +898,19 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> None:
             )
             comm = result.stdout.strip()
             if comm == "Xvfb":
-                return  # Live Xvfb owns these — don't touch
+                return False  # Live Xvfb owns these — don't touch
             if comm:
                 pass  # PID alive but not Xvfb — stale, safe to clean
             # If comm is empty, process is dead — stale, safe to clean
         except (ValueError, FileNotFoundError):
             pass  # Lock file unreadable/missing — safe to clean (no owner)
         except subprocess.TimeoutExpired:
-            return  # Can't determine owner — fail closed, don't touch
+            return False  # Can't determine owner — fail closed, don't touch
 
     for p in (lock_path, socket_path):
         if p.exists() and not p.is_symlink():
             p.unlink(missing_ok=True)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -861,16 +938,42 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
         print(f"  Run: pkg install {' '.join(missing)}", file=sys.stderr)
         return False
 
-    # Clean stale artifacts
-    clean_stale_x_artifacts(cfg.display_number)
+    # Clean stale artifacts (fail-closed: won't delete if a live Xvfb or unknown owner)
+    if not clean_stale_x_artifacts(cfg.display_number):
+        print(
+            f"Error: stale X artifacts exist for display {cfg.display} and could not be safely removed.\n"
+            f"  A live Xvfb may own them, or process ownership could not be determined.\n"
+            f"  Manual fix: verify no Xvfb is running on {cfg.display}, then:\n"
+            f"    rm -f /tmp/.X{cfg.display_number}-lock /tmp/.X11-unix/X{cfg.display_number}",
+            file=sys.stderr,
+        )
+        return False
 
     # Create xauth file and add a random cookie (display-independent — no live X server needed)
     create_xauth_file(cfg.xauth)
     cookie = os.urandom(16).hex()  # 32-char hex MIT-MAGIC-COOKIE
-    subprocess.run(
-        ["xauth", "-f", cfg.xauth, "add", cfg.display, ".", cookie],
-        capture_output=True, timeout=5,
-    )
+    try:
+        result = subprocess.run(
+            ["xauth", "-f", cfg.xauth, "add", cfg.display, ".", cookie],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            print(f"Error: xauth add failed (exit {result.returncode}): {result.stderr.strip()}", file=sys.stderr)
+            try:
+                os.unlink(cfg.xauth)
+            except FileNotFoundError:
+                pass
+            return False
+    except subprocess.TimeoutExpired:
+        print("Error: xauth add timed out after 5s", file=sys.stderr)
+        try:
+            os.unlink(cfg.xauth)
+        except FileNotFoundError:
+            pass
+        return False
+    except FileNotFoundError:
+        print("Error: xauth binary not found (should have been caught by preflight)", file=sys.stderr)
+        return False
 
     # Rotate log
     logfile = cfg.logfile("xvfb")
