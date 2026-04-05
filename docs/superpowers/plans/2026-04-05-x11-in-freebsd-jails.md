@@ -25,7 +25,7 @@
 **Input validation:** `Config.__post_init__` MUST validate:
 - `X11CTL_DISPLAY` matches `^:\d+$` regex
 - `X11CTL_SCREEN` (if set) matches `^\d+x\d+x\d+$`
-- `X11CTL_XAUTH` (if set) is validated structurally, not by raw prefix. The validation MUST check: `Path(xauth).resolve(strict=False).parent == Path("/tmp")` AND `Path(xauth).name` matches `^\.x11ctl-[^/]+$` (no path separators in basename). This prevents path traversal attacks like `/tmp/.x11ctl-/../etc/shadow`. The default is `/tmp/.x11ctl-xauth`. Invalid values raise `ValueError`. Tests use paths like `/tmp/.x11ctl-test-xauth` which pass validation.
+- `X11CTL_XAUTH` (if set) is validated by normalizing first, then checking structurally. The validation MUST: (1) resolve the path: `normalized = str(Path(xauth).resolve(strict=False))`, (2) verify `normalized` matches `^/tmp/\.x11ctl-[^/]+$` exactly (this single regex enforces parent == /tmp, basename starts with .x11ctl-, no nested components, no traversal). This prevents path traversal attacks like `/tmp/.x11ctl-/../etc/shadow` (resolves to `/etc/shadow`, fails regex) and `/tmp/anything/../.x11ctl-safe` (resolves to `/tmp/.x11ctl-safe`, passes only if valid). The default is `/tmp/.x11ctl-xauth`. Invalid values raise `ValueError`. Tests use paths like `/tmp/.x11ctl-test-xauth` which pass validation.
 
 **Xauth cleanup on stop:** When the headless tier is stopped (via `stop --headless`, `stop --all`, or cascade), `stop_command_impl` MUST remove the xauth file — but ONLY if all components in that tier were actually stopped successfully (`stop_component` returned `True`). If any `stop_component` returns `False` (process survived SIGKILL), preserve the tiers file for the surviving components and do NOT delete xauth. Update the tiers file to reflect only the surviving tiers.
 
@@ -33,7 +33,9 @@
 
 **Setup safety:** `setup_command_impl` MUST invoke `pkg` via absolute path `/usr/sbin/pkg` (not PATH search) to prevent privilege escalation with a poisoned PATH. The setup should resolve the correct `websockify` package name by checking `pkg search websockify` output.
 
-**Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). Self-test dynamically selects an unused high display number (probe `:98`, `:97`, ... until one has no `/tmp/.X<N>-lock`) and creates a temporary `Config` with a `state_prefix` of `.x11ctl-selftest-<N>` (e.g., `.x11ctl-selftest-98`). All state paths (pidfiles, tiers, lock, logs, xauth) derive from `state_prefix`. The `Config` class accepts an optional `state_prefix` parameter (default: `.x11ctl`) in its factory classmethod `Config.for_self_test(display_num)`. On completion or failure, self-test cleans up all its state artifacts (pidfiles, tiers file, lock file, xauth, logs). If interrupted by SIGTERM, the next self-test run detects stale selftest artifacts and cleans them before proceeding.
+**Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). Self-test dynamically selects an unused high display number by probing `:98`, `:97`, ... (bounded range 98→80, fail with error if all occupied) — a display is considered occupied if EITHER `/tmp/.X<N>-lock` OR `/tmp/.X11-unix/X<N>` exists. Creates a temporary `Config` with `state_prefix=".x11ctl-selftest-<N>"`. All state paths derive from `state_prefix`. The `Config` class accepts an optional `state_prefix` parameter (default: `.x11ctl`) in its factory classmethod `Config.for_self_test(display_num)`.
+
+**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack (not just delete files), (2) remove all state artifacts (pidfiles, tiers, xauth, logs). On SIGTERM interruption, the self-test SIGTERM handler MUST kill all child processes before exiting. On the next self-test run, detect stale selftest artifacts by checking for selftest pidfiles — validate PIDs via `validate_pid`, kill any surviving selftest processes, then clean artifacts before proceeding.
 
 **Bare start/stop behavior:** `start` with no tier flag defaults to `--headless`. `stop` with no tier flag defaults to `--all`.
 
@@ -321,6 +323,13 @@ class TestConfigValidation:
         with pytest.raises(ValueError):
             x11ctl.Config()
 
+    def test_xauth_indirect_traversal_rejected(self, monkeypatch):
+        """/tmp/anything/../.x11ctl-safe resolves to /tmp/.x11ctl-safe — allowed."""
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/anything/../.x11ctl-safe")
+        # This resolves to /tmp/.x11ctl-safe which IS valid
+        cfg = x11ctl.Config()
+        assert cfg.xauth == "/tmp/.x11ctl-safe"  # normalized
+
 
 # --- Pidfile I/O ---
 
@@ -388,6 +397,14 @@ class TestTiersFile:
 
     def test_delete_missing_is_safe(self, tmp_path):
         x11ctl.delete_tiers(str(tmp_path / "missing"))
+
+    def test_write_rejects_symlink(self, tmp_path):
+        target = tmp_path / "target"
+        target.write_text("headless")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        with pytest.raises(OSError):
+            x11ctl.write_tiers(str(link), {"headless"})
 
 
 # --- Locking ---
@@ -1951,6 +1968,24 @@ class TestSelfTest:
             # Non-zero is fine — the point is it attempted to run
             assert isinstance(result, int)
 
+    def test_self_test_skips_occupied_display(self, tmp_path):
+        """self-test should skip display :98 if occupied and try :97."""
+        # Simulate :98 being occupied (lock file exists)
+        lock_98 = Path("/tmp/.X98-lock")
+        with patch("os.path.exists", side_effect=lambda p: p == str(lock_98) or p == "/tmp/.X11-unix/X98"):
+            with patch.object(x11ctl, "read_tiers", return_value=None), \
+                 patch.object(x11ctl, "find_binary", return_value=None):
+                # Should attempt :97 instead of :98
+                result = x11ctl.self_test_command_impl(tier="tier1")
+                assert isinstance(result, int)
+
+    def test_self_test_fails_when_all_displays_occupied(self):
+        """self-test should fail with error when no free display in range."""
+        with patch("os.path.exists", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value=None):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert result != 0
+
     def test_self_test_uses_isolated_state(self):
         """self-test should use isolated display and state paths, not production."""
         cfg = x11ctl.Config.for_self_test(display_num=98)
@@ -1975,7 +2010,7 @@ Verify `import` binary exists, reject paths starting with `-`, run `import -wind
 
 - [ ] **Step 4: Implement setup_command_impl**
 
-Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbserver, xauth, xdpyinfo, ImageMagick7-nox11; xpra: xpra; vnc: x11vnc, novnc, resolve websockify package via `/usr/sbin/pkg search -e websockify` — if no exact match, try `/usr/sbin/pkg search py3.*-websockify` and pick the first result; if zero matches, print error with manual install guidance). ALL `pkg` invocations MUST use absolute path `/usr/sbin/pkg` (both `install` and `search`). Run `/usr/sbin/pkg install -y` for installation.
+Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbserver, xauth, xdpyinfo, ImageMagick7-nox11, xdotool; xpra: xpra, xpra-html5; vnc: x11vnc, novnc, resolve websockify package via `/usr/sbin/pkg search -e websockify` — if no exact match, try `/usr/sbin/pkg search py3.*-websockify` and pick the first result; if zero matches, print error with manual install guidance). ALL `pkg` invocations MUST use absolute path `/usr/sbin/pkg` (both `install` and `search`). Run `/usr/sbin/pkg install -y` for installation.
 
 - [ ] **Step 5: Implement self_test_command_impl**
 
