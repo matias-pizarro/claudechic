@@ -39,7 +39,7 @@
 
 **Self-test state layout:** Self-test uses a `mkdtemp`-created `0700` subdirectory under `/tmp` (e.g., `/tmp/.x11ctl-selftest-<N>-<random>/`) for pidfiles, tiers file, and logs. The xauth file remains flat in `/tmp` as `/tmp/.x11ctl-selftest-<N>` (passes the `^/tmp/\.x11ctl-[^/]+$` validation). This split keeps xauth validation consistent while isolating other state in a private directory. The mkdtemp directory creation is NOT done in `Config.for_self_test()` (which remains a pure path-derivation factory). Instead, `self_test_command_impl` (Task 10 Step 5b) creates the mkdtemp directory and passes the path to `Config.for_self_test(display_num, state_dir=<path>)`. This keeps Task 1's Config class side-effect-free.
 
-**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack, (2) remove the xauth file, (3) remove the mkdtemp state directory (`shutil.rmtree`). On SIGTERM/SIGINT interruption, the handler MUST kill all child processes before exiting (exit code 128+SIGNUM). **Stale recovery:** Performed while holding the global lock (so no concurrent self-test can be running). Scan for stale directories matching `/tmp/.x11ctl-selftest-*-*/` (glob). For each: check ownership (`os.stat().st_uid == os.getuid()`); check for a lock file inside — if it is flock-held (try `LOCK_NB`), skip it (live run, should not exist since we hold the global lock, but defensive); read pidfiles inside, validate PIDs via `validate_pid`; for PIDs that are dead or invalid, clean up the pidfile; for PIDs that are alive and valid, `stop_component` them (they are orphaned since no active self-test owns them); then `shutil.rmtree` the directory and `os.unlink` the corresponding flat xauth file. Errors during cleanup (failed rmtree, failed unlink) are logged as warnings but do not abort the self-test.
+**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack, (2) remove the xauth file, (3) remove the mkdtemp state directory (`shutil.rmtree`). On SIGTERM/SIGINT interruption, the handler MUST kill all child processes before exiting (exit code 128+SIGNUM). **Stale recovery:** Performed while holding the global lock (so no concurrent self-test can be running). Scan for stale directories matching `/tmp/.x11ctl-selftest-*-*/` (glob). For each candidate path: (1) `os.lstat()` (NOT `os.stat()` — must not follow symlinks) to check it is a real directory (not a symlink); reject and skip any symlinks; (2) verify ownership (`lstat_result.st_uid == os.getuid()`); (3) open the directory with `os.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)` to get a verified fd, then close it (this confirms it is a real directory we own); (4) read pidfiles inside, validate PIDs via `validate_pid`; for dead/invalid PIDs, clean up pidfile; for alive+valid PIDs, `stop_component` them (orphaned); (5) `shutil.rmtree` the directory; (6) `os.unlink` the corresponding flat xauth file (also checked with `os.lstat` + `not is_symlink` before unlinking). Errors during cleanup (failed rmtree, failed unlink) are logged as warnings but do not abort the self-test.
 
 **Self-test tier coverage:** `self-test --tier1` exercises headless start/status/screenshot/stop. `self-test --tier2` exercises headless+xpra start/status/stop (verifies Xpra HTML5 binding). `self-test --tier3` exercises headless+vnc start/status/stop (verifies VNC+noVNC ports). `self-test --all` exercises all tiers plus idempotency, stale PID recovery, partial rollback, symlink rejection, and partial-tier status. The implementer should add tests for each tier level.
 
@@ -2071,10 +2071,23 @@ Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbse
         stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
         stale_dir.mkdir(mode=0o700)
         with patch("glob.glob", return_value=[str(stale_dir)]), \
-             patch("os.stat") as mock_stat:
-            mock_stat.return_value.st_uid = 99999  # different user
+             patch("os.lstat") as mock_lstat:
+            import stat as _stat
+            mock_lstat.return_value.st_uid = 99999  # different user
+            mock_lstat.return_value.st_mode = _stat.S_IFDIR | 0o700
             x11ctl.clean_stale_selftest_dirs(str(tmp_path))
             assert stale_dir.exists()  # not touched
+
+    def test_self_test_stale_recovery_rejects_symlink(self, tmp_path):
+        """Symlinked stale dir should be skipped (prevents arbitrary rmtree)."""
+        target = tmp_path / "real_dir"
+        target.mkdir()
+        link = tmp_path / ".x11ctl-selftest-98-abc"
+        link.symlink_to(target)
+        with patch("glob.glob", return_value=[str(link)]):
+            x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert target.exists()  # target not deleted
+            assert link.is_symlink()  # symlink not followed
 
     def test_self_test_cleanup_removes_dir_and_xauth(self, tmp_path):
         """Normal cleanup should rmtree state dir and unlink flat xauth."""
