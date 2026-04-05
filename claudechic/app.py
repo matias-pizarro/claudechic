@@ -1518,7 +1518,9 @@ class ChatApp(App):
                     self._close_sidebar_overlay()
             except Exception:
                 pass
-        self.set_timer(0.05, self._check_and_copy_selection)
+        if self._copy_timer is not None:
+            self._copy_timer.stop()
+        self._copy_timer = self.set_timer(0.05, self._check_and_copy_selection)
 
     def copy_to_clipboard(self, text: str) -> bool:
         """Copy to both CLIPBOARD (OSC 52) and PRIMARY (xclip/xsel) on Linux.
@@ -1586,6 +1588,8 @@ class ChatApp(App):
             except Exception:
                 return True  # Can't reach tmux server, assume OK
         return True
+
+    _copy_timer: Timer | None = None
 
     def _safe_get_selected_text(self) -> str | None:
         """Get selected text, returning None if selection coords are stale."""
