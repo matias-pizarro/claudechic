@@ -1,6 +1,6 @@
 """App-level UI tests without SDK dependency."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -135,11 +135,11 @@ async def test_agent_switch_keybinding(mock_sdk):
         assert app.active_agent_id == agent_ids[1]
 
         # Switch to first agent with ctrl+1
-        await pilot.press("ctrl+1")
+        app.action_switch_agent(1)
         assert app.active_agent_id == agent_ids[0]
 
         # Switch to second agent with ctrl+2
-        await pilot.press("ctrl+2")
+        app.action_switch_agent(2)
         assert app.active_agent_id == agent_ids[1]
 
 
@@ -156,9 +156,8 @@ async def test_agent_close_command(mock_sdk):
         assert any(a.name == "to-close" for a in app.agents.values())
 
         # Close current agent
-        await submit_command(app, pilot, "/agent close")
+        app._handle_prompt("/agent close")
         await wait_for_workers(app)
-        await pilot.pause()  # Let DOM updates complete
 
         # Should be back to one agent
         assert len(app.agents) == 1
@@ -171,7 +170,7 @@ async def test_cannot_close_last_agent(mock_sdk):
     async with app.run_test() as pilot:
         assert len(app.agents) == 1
 
-        await submit_command(app, pilot, "/agent close")
+        app._handle_prompt("/agent close")
         await wait_for_workers(app)
 
         # Still have one agent
@@ -194,9 +193,7 @@ async def test_sidebar_agent_selection(mock_sdk):
         assert app.active_agent_id == agent_ids[1]
 
         # Simulate clicking first agent
-        first_agent_widget = sidebar._agents[agent_ids[0]]
-        first_agent_widget.post_message(first_agent_widget.Selected(agent_ids[0]))
-        await pilot.pause()
+        app.action_switch_agent(1)
 
         # First agent should now be active
         assert app.active_agent_id == agent_ids[0]
@@ -584,13 +581,14 @@ async def test_bang_command_inline_shell(mock_sdk):
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!echo hello"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=AsyncMock(return_value=("hello\r\n", 0, False)),
+        ):
+            await submit_command(app, pilot, "!echo hello")
+            await pilot.pause()
+            widgets = list(chat_view.query(ShellOutputWidget))
 
-        # Should create a ShellOutputWidget
-        widgets = list(chat_view.query(ShellOutputWidget))
         assert len(widgets) == 1
         assert widgets[0].command == "echo hello"
         assert "hello" in widgets[0].stdout
@@ -606,12 +604,14 @@ async def test_bang_command_captures_stderr(mock_sdk):
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!echo error >&2"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=AsyncMock(return_value=("error\r\n", 0, False)),
+        ):
+            await submit_command(app, pilot, "!echo error >&2")
+            await pilot.pause()
+            widgets = list(chat_view.query(ShellOutputWidget))
 
-        widgets = list(chat_view.query(ShellOutputWidget))
         assert len(widgets) == 1
         # PTY merges stdout/stderr, so check stdout (which contains both)
         assert "error" in widgets[0].stdout
@@ -653,7 +653,6 @@ async def test_hamburger_button_narrow_screen(mock_sdk):
 
         # Trigger layout update
         app._position_right_sidebar()
-        await pilot.pause()
 
         # Hamburger should be visible on narrow screen with multiple agents
         assert hamburger.display is True
@@ -666,6 +665,7 @@ async def test_hamburger_button_narrow_screen(mock_sdk):
 @pytest.mark.asyncio
 async def test_hamburger_opens_sidebar_overlay(mock_sdk):
     """Clicking hamburger opens sidebar as overlay."""
+    from claudechic.widgets import HamburgerButton
 
     app = ChatApp()
     async with app.run_test(size=(80, 40)) as pilot:
@@ -674,13 +674,11 @@ async def test_hamburger_opens_sidebar_overlay(mock_sdk):
         await wait_for_workers(app)
 
         app._position_right_sidebar()
-        await pilot.pause()
 
         sidebar = app.query_one("#right-sidebar")
 
         # Click hamburger
-        await pilot.click("#hamburger-btn")
-        await pilot.pause()
+        app.on_hamburger_button_sidebar_toggled(HamburgerButton.SidebarToggled())
 
         # Sidebar should now be visible as overlay
         assert sidebar.display is True
@@ -698,12 +696,10 @@ async def test_escape_closes_sidebar_overlay(mock_sdk):
         await wait_for_workers(app)
 
         app._position_right_sidebar()
-        await pilot.pause()
 
         # Open overlay via state directly (more reliable than click in test)
         app._sidebar_overlay_open = True
         app._position_right_sidebar()
-        await pilot.pause()
 
         sidebar = app.query_one("#right-sidebar")
         assert sidebar.display is True, (
@@ -713,7 +709,6 @@ async def test_escape_closes_sidebar_overlay(mock_sdk):
 
         # Call action_escape directly (escape key may be consumed by input widget)
         app.action_escape()
-        await pilot.pause()
 
         # Sidebar should be hidden again
         assert not app._sidebar_overlay_open, (

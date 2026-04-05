@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import sys
 from importlib.metadata import version
 
@@ -24,7 +25,10 @@ def positive_int(value: str) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Claude Chic")
+    parser = argparse.ArgumentParser(
+        description="Claude Chic",
+        formatter_class=lambda prog: argparse.HelpFormatter(prog, width=80),
+    )
     parser.add_argument(
         "--version",
         "-V",
@@ -106,7 +110,12 @@ def main():
             theme_override=args.theme,
             width=args.width,
         )
-        app.run()
+        if args.width is not None:
+            terminal_size = shutil.get_terminal_size()
+            height = getattr(terminal_size, "lines", terminal_size[1])
+            app.run(size=(args.width, height))
+        else:
+            app.run()
     except (KeyboardInterrupt, SystemExit):
         pass
     except Exception:

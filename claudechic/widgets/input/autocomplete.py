@@ -521,6 +521,10 @@ class TextAreaAutoComplete(Widget):
             self._complete(highlighted)
             return True
         elif key == "enter":
+            if self._mode == "shell" and hasattr(self.target, "action_submit"):
+                self.action_hide()
+                self.target.action_submit()  # type: ignore[attr-defined]
+                return True
             self._complete(highlighted, submit=True)
             return True
         elif key == "escape":

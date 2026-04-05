@@ -1674,16 +1674,18 @@ class ChatApp(App):
         async def _run() -> None:
             try:
                 # Show tip after 1 second if command is still running
-                async def show_tip_after_delay() -> None:
-                    await asyncio.sleep(1.0)
-                    self.notify("Tip: Use -i flag for interactive commands", timeout=5)
-
-                tip_task = create_safe_task(show_tip_after_delay(), name="tip-delay")
+                loop = asyncio.get_running_loop()
+                tip_handle = loop.call_later(
+                    1.0,
+                    lambda: self.notify(
+                        "Tip: Use -i flag for interactive commands", timeout=5
+                    ),
+                )
 
                 output, returncode, was_cancelled = await run_in_pty_cancellable(
                     cmd, shell, cwd, env, cancel_event
                 )
-                tip_task.cancel()
+                tip_handle.cancel()
 
                 # Clean up cancel handler
                 self._pending_shell_cancels.pop(id(pending_widget), None)
@@ -1708,7 +1710,7 @@ class ChatApp(App):
                 pending_widget.remove()
                 self.notify("Command cancelled")
 
-        self.run_worker(_run(), exclusive=False)
+        create_safe_task(_run(), name="shell-command")
 
     def _show_session_picker(self) -> None:
         from claudechic.screens import SessionScreen

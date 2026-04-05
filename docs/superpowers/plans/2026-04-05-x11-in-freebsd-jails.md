@@ -875,6 +875,21 @@ class TestStaleCleanup:
             assert lock.exists()  # preserved
             assert socket_file.exists()  # preserved
 
+    def test_clean_returns_false_when_lock_disappears_during_read(self, tmp_path):
+        """If the lock disappears during read, should fail closed."""
+        lock = tmp_path / ".X99-lock"
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+        lock.write_text("12345\n")
+
+        with patch.object(Path, "read_text", side_effect=FileNotFoundError):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # fail closed
+            assert lock.exists()  # preserved
+            assert socket_file.exists()  # preserved
+
 
 class TestXauthAdd:
     def test_xauth_add_failure_aborts_startup(self):
@@ -962,7 +977,7 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
             pid_str = lock_path.read_text().strip()
             pid = int(pid_str)
         except FileNotFoundError:
-            pass  # Lock file disappeared — safe to clean
+            return False  # Lock file disappeared — owner unknown, fail closed
         except ValueError:
             pass  # Malformed lock contents — safe to clean
         else:
