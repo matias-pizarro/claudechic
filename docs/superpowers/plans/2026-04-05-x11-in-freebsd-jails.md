@@ -613,16 +613,21 @@ import subprocess
 
 class TestValidatePid:
     def test_own_process_is_valid(self):
-        """Current process should validate against its own name and recent epoch."""
+        """Current process should validate against its own name and derived epoch."""
         pid = os.getpid()
-        created = int(x11ctl.time.time())
-        comm = "python"  # ps -o comm= for python3 shows "python" or "python3"
         # Get actual comm for this process
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "comm="],
             capture_output=True, text=True,
         )
         actual_comm = result.stdout.strip()
+        # Derive epoch from actual etimes to avoid flaky ±5s tolerance
+        etimes_result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes="],
+            capture_output=True, text=True,
+        )
+        etimes_str = etimes_result.stdout.strip()
+        created = int(x11ctl.time.time()) - int(etimes_str) if etimes_str else int(x11ctl.time.time())
         assert x11ctl.validate_pid(pid, created, actual_comm) is True
 
     def test_dead_pid_is_invalid(self):
