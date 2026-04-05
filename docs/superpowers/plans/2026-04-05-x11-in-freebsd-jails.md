@@ -488,27 +488,26 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
-    # Check 3: age match (graceful fallback if etimes unavailable in jail)
+    # Check 3: age match (best-effort — enhances confidence but not required)
+    # If etimes is unavailable (restricted jail, ps timeout), we already have
+    # 2-factor validation (PID alive + comm match) which passed above.
+    # The 3rd factor only REJECTS — it never grants access on its own.
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True, text=True, timeout=5,
         )
         etimes_str = result.stdout.strip()
-        if not etimes_str:
-            # etimes unavailable (restricted jail) — fall back to 2-factor (PID + comm only)
-            return True
-        etimes = int(etimes_str)
-        expected_age = int(time.time()) - created_epoch
-        if abs(etimes - expected_age) > 5:
-            return False
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        # ps unavailable — fall back to 2-factor (PID + comm passed above)
-        return True
-    except ValueError:
-        # etimes output not parseable — fall back to 2-factor
-        return True
+        if etimes_str:
+            etimes = int(etimes_str)
+            expected_age = int(time.time()) - created_epoch
+            if abs(etimes - expected_age) > 5:
+                return False  # Age mismatch — PID was reused
+        # If etimes_str is empty, skip age check (2-factor only)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass  # etimes unavailable — proceed with 2-factor result
 
+    # Passed 2-factor (alive + comm) and optionally 3-factor (+ age)
     return True
 ```
 
@@ -973,20 +972,20 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
             pid_str = lock_path.read_text().strip()
             pid = int(pid_str)
         except FileNotFoundError:
-            return False  # Lock file disappeared — owner unknown, fail closed
+            return False  # Lock file disappeared mid-read — fail closed
         except ValueError:
-            return False  # Malformed lock contents — owner unknown, fail closed
+            pass  # Malformed lock (not a valid PID) — no determinable owner, safe to clean
         else:
             try:
-                # Check if this PID is still alive
+                # Check if this PID is alive AND is Xvfb
                 result = subprocess.run(
                     ["ps", "-p", str(pid), "-o", "comm="],
                     capture_output=True, text=True, timeout=5,
                 )
                 comm = result.stdout.strip()
-                if comm:
-                    return False  # Live process owns or may have reused this PID — don't touch
-                # If comm is empty, process is dead — stale, safe to clean
+                if comm == "Xvfb":
+                    return False  # Live Xvfb owns these artifacts — don't touch
+                # If comm is empty (dead) or non-Xvfb (PID reused), artifacts are stale
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return False  # Can't determine owner — fail closed, don't touch
 
@@ -1230,9 +1229,9 @@ class TestStartRollback:
         cfg = x11ctl.Config()
         rollback_calls = []
 
-        def mock_start_headless(c, started, **kw):
+        def mock_start_headless(c, started, **kwargs):
             started.append("xvfb")
-            return 0
+            return 0  # int, not bool — matches return type convention
 
         def mock_start_xpra(c, started, **kw):
             return 1  # failure
