@@ -1,7 +1,7 @@
 # X11 in FreeBSD Jails — Design Spec
 
 **Date:** 2026-04-05
-**Status:** Draft (rev 5 — post round-4 review: roborev + code-reviewer + architect + contrarian)
+**Status:** Draft (rev 7 — post round-6 review: roborev + code-reviewer + architect + contrarian)
 **Scope:** Running X11 applications inside any FreeBSD jail — headless testing, remote viewing, GUI development, and window automation.
 
 ## Problem
@@ -180,7 +180,7 @@ Note: `tigervnc-server` is intentionally omitted from the default install. It pr
 
 ## Runtime Requirements
 
-**Python:** `>=3.11` (FreeBSD 15 ships 3.11 as the default `python3`). The script uses stdlib only — no pip packages required.
+**Python:** `>=3.10` (FreeBSD 15 ships 3.11 as the default `python3`). The script uses stdlib only — no pip packages required.
 
 **Shebang:** `#!/usr/local/bin/python3` (FreeBSD convention — `/usr/local/bin` is where `pkg` installs Python). The runbook notes that `#!/usr/bin/env python3` also works if `python3` is on `PATH`.
 
@@ -247,7 +247,7 @@ The script also cleans up stale X server artifacts left by a previous unclean sh
 
 All four components are launched via `subprocess.Popen()` with `--daemon=no` for Xpra (see above). This means all processes are direct children of the `x11ctl` Python process, and the script captures PIDs from `Popen.pid`.
 
-Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL` (prevents races and symlink attacks). The pidfile stores the PID and the creation epoch timestamp for robust identity validation.
+Each PID is written to `/tmp/.x11ctl-<component>.pid`. Pidfiles are created atomically via `os.open()` with `O_CREAT | O_EXCL | O_NOFOLLOW` (prevents races and symlink attacks — same safety as Xauth creation). The tiers file and log files also use `O_NOFOLLOW` on open/create to prevent symlink-based attacks on any `/tmp/.x11ctl-*` artifact. The pidfile stores the PID and the creation epoch timestamp for robust identity validation.
 
 Format: `<pid> <created_epoch>\n` (e.g., `1234 1712345678\n`)
 
@@ -286,7 +286,7 @@ On each `start`, the previous log is preserved as `.log.prev` (renamed, not dele
 ```
 Error: port 5900 is already in use by pid 1234 (x11vnc)
   Run: x11ctl stop --vnc   (to stop the existing instance)
-  Or:  X11CTL_VNC_PORT=5901 x11ctl start --vnc   (to use a different port)
+  Or:  X11CTL_VNC_PORT=5901 x11ctl start --vnc   (to reconfigure the single instance)
 ```
 
 The script exits with status 2 on port conflicts (distinct from status 1 for "component down"). The `status` subcommand never returns 2.
@@ -355,7 +355,9 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 
 **Why Python, not POSIX shell:** The script needs process management with PID validation, readiness probes with retries and timeouts, port-conflict detection via socket bind attempts, cascading stop with dependency ordering, and structured log output. These requirements exceed what POSIX shell handles reliably — PID races, missing arrays, no proper error handling. Python's stdlib modules make all of this correct, testable, and readable. Python is already a hard dependency of the project environment.
 
-**Single-instance per jail:** The script supports exactly one running stack per jail. All state files (`/tmp/.x11ctl-*` pidfiles, logs, tiers file, Xauth) use fixed paths. The display (`:99`) and ports (10000, 5900, 6080) are fixed defaults. Running multiple stacks in one jail is explicitly unsupported — the port-in-use detection and display-socket check will block a second `start` with a clear error. Multi-instance is listed under Out of Scope.
+**Single-instance per jail:** The script supports exactly one running stack per jail. All state files (`/tmp/.x11ctl-*` pidfiles, logs, tiers file, Xauth) use fixed paths. The display (`:99`) and ports (10000, 5900, 6080) are fixed defaults. Running multiple stacks in one jail is explicitly unsupported. Multi-instance is listed under Out of Scope.
+
+**Concurrency serialization:** All mutating commands (`start`, `stop`, `run`) acquire an exclusive `fcntl.flock()` on `/tmp/.x11ctl.lock` before modifying any state files. This prevents concurrent invocations (e.g., two terminals running `start` and `stop` simultaneously) from corrupting pidfiles, the tiers file, or Xauth. Read-only commands (`status`, `env`) acquire a shared lock. The lock file is never deleted (harmless empty file).
 
 **Privilege model:**
 - `x11ctl setup` requires root (runs `pkg install`). The command checks `os.geteuid() == 0` and exits with a clear error if not root.
@@ -398,19 +400,22 @@ This means `status` exit 0 = "everything that was requested is running", exit 1 
 
 **Tiers file lifecycle — mutation rules for every path:**
 
-| Operation | Tiers file action |
-|-----------|------------------|
-| `start --headless` | Write `headless` (overwrite if exists) |
-| `start --xpra` | Write `headless xpra` (implies headless) |
-| `start --all` | Write `headless xpra vnc` |
-| `stop --vnc` (partial) | Rewrite file removing `vnc` → `headless xpra` |
-| `stop --xpra` (partial) | Rewrite file removing `xpra` → `headless` |
-| `stop --headless` (cascades) | Remove tiers file entirely (nothing running) |
-| `stop --all` | Remove tiers file entirely |
-| Partial-start rollback | Remove tiers file (rollback = nothing running) |
-| Stale-file recovery | `status` warns "tiers file exists but processes missing"; `start` overwrites |
+The tiers file stores a set of active tier names (e.g., `headless xpra vnc`). Mutations use **set operations** — `stop` removes the named tier from the set, `start` adds/overwrites. This correctly handles arbitrary combinations:
 
-The tiers file is always in sync with what x11ctl believes is running. `stop` updates it to reflect the new desired state. `stop --all` and full rollback delete it. File permissions: `0644` (readable by anyone for status checks, writable by the x11ctl user).
+| Operation | Tiers file action | Example: was `headless xpra vnc` |
+|-----------|-------------------|----------------------------------|
+| `start --headless` | Write `{headless}` (overwrite) | → `headless` |
+| `start --xpra` | Write `{headless, xpra}` | → `headless xpra` |
+| `start --vnc` | Write `{headless, vnc}` | → `headless vnc` |
+| `start --all` | Write `{headless, xpra, vnc}` | → `headless xpra vnc` |
+| `stop --vnc` | Remove `vnc` from set | → `headless xpra` |
+| `stop --xpra` | Remove `xpra` from set | → `headless vnc` |
+| `stop --headless` (cascades) | Remove all (cascades stop everything) | → file deleted |
+| `stop --all` | Delete tiers file | → file deleted |
+| Partial-start rollback | Delete tiers file (nothing running) | → file deleted |
+| Stale-file recovery | `status` warns "tiers file exists but processes missing"; `start` overwrites | — |
+
+The tiers file is always in sync with what x11ctl believes is running. `stop` removes the stopped tier from the set (not hardcoded rewrites). If the set becomes empty, the file is deleted. `stop --all` and full rollback always delete it. File permissions: `0644` (readable by anyone for status checks, writable by the x11ctl user).
 
 ### Start/Stop Asymmetry
 
