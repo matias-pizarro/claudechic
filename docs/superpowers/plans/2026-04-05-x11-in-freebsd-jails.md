@@ -725,15 +725,51 @@ class TestValidatePidTristate:
         result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
                                 capture_output=True, text=True)
         comm = result.stdout.strip()
-        assert x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), comm) == "alive"
+        # Derive epoch from actual etimes to avoid flaky ±5s tolerance
+        etimes_result = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
+                                       capture_output=True, text=True)
+        etimes_str = etimes_result.stdout.strip()
+        created = int(x11ctl.time.time()) - int(etimes_str) if etimes_str else int(x11ctl.time.time())
+        assert x11ctl.validate_pid_tristate(pid, created, comm) == "alive"
 
     def test_dead_process(self):
         """Non-existent PID returns 'dead'."""
         assert x11ctl.validate_pid_tristate(99999999, int(x11ctl.time.time()), "fake") == "dead"
 
-    def test_ps_timeout_returns_unknown(self):
+    def test_wrong_comm_returns_dead(self):
+        """Current PID but wrong process name returns 'dead'."""
+        pid = os.getpid()
+        assert x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), "definitely_not_this") == "dead"
+
+    def test_wrong_epoch_returns_dead(self):
+        """Current PID but epoch from a year ago returns 'dead' (age mismatch)."""
+        pid = os.getpid()
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True)
+        comm = result.stdout.strip()
+        ancient_epoch = int(x11ctl.time.time()) - 365 * 86400
+        assert x11ctl.validate_pid_tristate(pid, ancient_epoch, comm) == "dead"
+
+    def test_ps_comm_timeout_returns_unknown(self):
         """ps timeout during comm check returns 'unknown'."""
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
+
+    def test_ps_etimes_timeout_returns_unknown(self):
+        """ps timeout during etimes check (after comm succeeds) returns 'unknown'."""
+        call_count = []
+        def mock_run(cmd, **kwargs):
+            call_count.append(1)
+            if len(call_count) == 1:
+                # First call (comm check) succeeds
+                result = subprocess.run.__wrapped__(cmd, **kwargs) if hasattr(subprocess.run, '__wrapped__') else None
+                # Return matching comm
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="python\n", stderr="")
+            else:
+                # Second call (etimes check) times out
+                raise subprocess.TimeoutExpired("ps", 5)
+        with patch("subprocess.run", side_effect=mock_run):
             result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
             assert result == "unknown"
 
@@ -742,11 +778,17 @@ class TestValidatePidTristate:
         with patch("subprocess.run", side_effect=FileNotFoundError):
             result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
             assert result == "unknown"
+
+    def test_permission_error_returns_unknown(self):
+        """PermissionError from os.kill (can't probe PID) returns 'unknown'."""
+        with patch("os.kill", side_effect=PermissionError):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
 ```
 
 - [ ] **Step 6: Implement validate_pid_tristate**
 
-Same logic as `validate_pid` but returns `"alive"` / `"dead"` / `"unknown"`. `ProcessLookupError` from `os.kill(pid, 0)` → `"dead"`. `subprocess.TimeoutExpired` or `FileNotFoundError` during `ps` calls → `"unknown"`. All other paths that would return `True` → `"alive"`, `False` → `"dead"`.
+Same logic as `validate_pid` but returns `"alive"` / `"dead"` / `"unknown"`. Mapping: `ProcessLookupError` from `os.kill(pid, 0)` → `"dead"`. `PermissionError` from `os.kill(pid, 0)` → `"unknown"` (process exists but can't be probed — fail closed). `subprocess.TimeoutExpired` or `FileNotFoundError` during any `ps` call → `"unknown"`. Wrong comm → `"dead"`. Age mismatch → `"dead"`. All paths that would return `True` in `validate_pid` → `"alive"`.
 
 - [ ] **Step 7: Run tests, commit**
 
