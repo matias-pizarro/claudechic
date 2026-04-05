@@ -298,6 +298,23 @@ class TestConfigValidation:
         cfg = x11ctl.Config()
         assert cfg.bind == "0.0.0.0"
 
+    def test_bind_non_canonical_rejected(self, monkeypatch):
+        """Non-canonical IP forms like '127.1' must be rejected."""
+        monkeypatch.setenv("X11CTL_BIND", "127.1")
+        with pytest.raises(ValueError, match="canonical"):
+            x11ctl.Config()
+
+    def test_display_trailing_newline_rejected(self, monkeypatch):
+        """Trailing newline must be rejected ($ vs \\Z)."""
+        monkeypatch.setenv("X11CTL_DISPLAY", ":99\n")
+        with pytest.raises(ValueError, match="must match"):
+            x11ctl.Config()
+
+    def test_screen_trailing_newline_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_SCREEN", "1920x1080x24\n")
+        with pytest.raises(ValueError, match="must match"):
+            x11ctl.Config()
+
 
 # --- Config.for_self_test ---
 
@@ -332,6 +349,14 @@ class TestConfigForSelfTest:
         cfg = x11ctl.Config.for_self_test(98, "/tmp/selftest-dir")
         with pytest.raises(AttributeError):
             cfg.display = ":1"
+
+    def test_env_does_not_affect_selftest(self, monkeypatch):
+        """Dirty env vars must not leak into self-test config."""
+        monkeypatch.setenv("X11CTL_SCREEN", "800x600x16")
+        monkeypatch.setenv("X11CTL_BIND", "0.0.0.0")
+        cfg = x11ctl.Config.for_self_test(97, "/tmp/selftest-dir")
+        assert cfg.screen == "1920x1080x24"  # Known-good default, not env
+        assert cfg.bind == "127.0.0.1"       # Known-good default, not env
 
 
 # --- Pidfile I/O ---
@@ -424,10 +449,16 @@ class TestTiersFile:
         assert x11ctl.read_tiers(path) is None
 
     def test_read_valid_tier_names(self, tmp_path):
-        """read_tiers accepts only known tier names."""
+        """read_tiers accepts only known component tier names."""
         path = str(tmp_path / "tiers")
         x11ctl.write_tiers(path, {"headless", "vnc"})
         assert x11ctl.read_tiers(path) == {"headless", "vnc"}
+
+    def test_read_meta_tier_all_rejected(self, tmp_path):
+        """read_tiers rejects 'all' meta-tier (not a component tier)."""
+        path = str(tmp_path / "tiers")
+        Path(path).write_text("headless all\n")
+        assert x11ctl.read_tiers(path) is None
 
 
 # --- Locking ---
@@ -549,13 +580,16 @@ class TestEnvOutput:
         assert "export DISPLAY=':99'" in output or 'export DISPLAY=":99"' in output or "export DISPLAY=:99" in output
         assert "export XAUTHORITY=" in output
 
-    def test_env_output_shell_safe(self):
-        """format_env uses shlex.quote — values are shell-safe."""
+    def test_env_output_uses_shlex_quote(self):
+        """format_env uses shlex.quote — verify exact quoting format."""
+        import shlex
         cfg = x11ctl.Config()
         output = x11ctl.format_env(cfg)
-        # shlex.quote wraps in single quotes for safety
-        assert "DISPLAY=" in output
-        assert "XAUTHORITY=" in output
+        # shlex.quote produces specific output for these safe values
+        expected_display = f"export DISPLAY={shlex.quote(cfg.display)}"
+        expected_xauth = f"export XAUTHORITY={shlex.quote(cfg.xauth)}"
+        assert expected_display in output
+        assert expected_xauth in output
 
 
 # --- Log rotation ---
