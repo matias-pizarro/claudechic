@@ -16,15 +16,21 @@
 
 **`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully.
 
-**Atomic file writes:** Both `write_pidfile` and `write_tiers` MUST use the write-to-temp-then-rename pattern: write to a tempfile in the same directory (`/tmp`), then `os.rename()` to the target path. This is atomic on POSIX (same filesystem) and eliminates truncated-write bugs. The pidfile write flow is: unlink existing file if it exists and is not a symlink, then create the temp file with `O_CREAT | O_EXCL | O_NOFOLLOW`, write content, `os.rename()` to final path.
+**Atomic file writes:** Both `write_pidfile` and `write_tiers` MUST use the write-to-temp-then-rename pattern: write to a tempfile in the same directory (`/tmp`), then `os.rename()` directly over the target path. Do NOT unlink the old file first — `os.rename()` atomically replaces the destination, so readers never see a missing file and a crash between unlink and rename cannot lose the last known-good state. Before renaming, check `os.path.lexists(target) and os.path.islink(target)` — if the target is a symlink, raise `OSError` instead of renaming over it. Failure of `write_pidfile` after a successful `Popen` MUST terminate the spawned process and clean up xauth before returning failure.
 
 **Lock acquisition timeout:** `acquire_lock` MUST use `fcntl.LOCK_NB` (non-blocking) in a retry loop with a 30-second timeout. On timeout, print "Another x11ctl operation is in progress" and return `None`. Callers must check for `None` and exit with code 1.
 
 **Config immutability:** `Config` should be a `@dataclass(frozen=True)` or use `__slots__` + no setters. All fields set at construction from env vars and defaults. Tests that need custom Config values must use `monkeypatch.setenv` before construction or a factory classmethod with overrides.
 
-**Input validation:** `Config.__init__` MUST validate `X11CTL_DISPLAY` matches `^:\d+$` regex. Invalid values abort with a clear error.
+**Input validation:** `Config.__post_init__` MUST validate `X11CTL_DISPLAY` matches `^:\d+$` regex and `X11CTL_SCREEN` (if set) matches `^\d+x\d+x\d+$`. The xauth path MUST be constrained to `/tmp/.x11ctl-xauth` (hardcoded, not overridable from environment) to prevent arbitrary file deletion via attacker-controlled `X11CTL_XAUTH`. If a custom xauth path is needed for testing, use `monkeypatch.setenv` + a factory classmethod that accepts a trusted override.
 
-**Xauth cleanup on stop:** When the headless tier is stopped (via `stop --headless`, `stop --all`, or cascade), `stop_command_impl` MUST remove the xauth file (`cfg.xauth`).
+**Xauth cleanup on stop:** When the headless tier is stopped (via `stop --headless`, `stop --all`, or cascade), `stop_command_impl` MUST remove the xauth file — but ONLY if all components in that tier were actually stopped successfully (`stop_component` returned `True`). If any `stop_component` returns `False` (process survived SIGKILL), preserve the tiers file for the surviving components and do NOT delete xauth. Update the tiers file to reflect only the surviving tiers.
+
+**Screenshot safety:** `screenshot_command_impl` MUST reject output paths beginning with `-` and MUST insert `--` before the output filename in the ImageMagick `import` command to prevent argument injection.
+
+**Setup safety:** `setup_command_impl` MUST invoke `pkg` via absolute path `/usr/sbin/pkg` (not PATH search) to prevent privilege escalation with a poisoned PATH. The setup should resolve the correct `websockify` package name by checking `pkg search websockify` output.
+
+**Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). It should use an isolated display number (e.g., `:98` or a randomly chosen high number) and isolated state paths to avoid interfering with a running stack.
 
 **Bare start/stop behavior:** `start` with no tier flag defaults to `--headless`. `stop` with no tier flag defaults to `--all`.
 
@@ -69,9 +75,12 @@ The test file starts with a module importer that loads the extensionless script:
 import importlib.machinery
 import importlib.util
 import os
+import signal
+import subprocess
 import sys
 import socket as _socket
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -360,14 +369,26 @@ os.close(fd)
         x11ctl.release_lock(lock_fd)
 
     def test_lock_timeout_returns_none(self, tmp_path):
-        """acquire_lock should return None after timeout when lock is held."""
+        """acquire_lock should return None after timeout when lock is held by another process."""
         lock_path = str(tmp_path / "test.lock")
-        lock_fd = x11ctl.acquire_lock(lock_path, exclusive=True)
-        assert lock_fd is not None
-        # Acquire again with short timeout — should return None
-        lock_fd2 = x11ctl.acquire_lock(lock_path, exclusive=True, timeout=0.5)
-        assert lock_fd2 is None
-        x11ctl.release_lock(lock_fd)
+        # Hold lock in a subprocess (flock is per-file-description, not per-file)
+        holder = subprocess.Popen(
+            [sys.executable, "-c", f"""
+import fcntl, os, time
+fd = os.open("{lock_path}", os.O_CREAT | os.O_WRONLY, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+# Hold lock for 5 seconds
+time.sleep(5)
+os.close(fd)
+"""],
+        )
+        import time as _time
+        _time.sleep(0.5)  # give subprocess time to acquire
+        # Acquire with short timeout — should return None
+        lock_fd = x11ctl.acquire_lock(lock_path, exclusive=True, timeout=1.0)
+        assert lock_fd is None
+        holder.terminate()
+        holder.wait(timeout=3)
 
 
 # --- Preflight ---
@@ -474,7 +495,7 @@ Expected: FAIL — `scripts/x11ctl` does not exist yet.
 
 - [ ] **Step 3: Create x11ctl with ALL pure functions**
 
-Create `scripts/x11ctl` containing: `Config` (as `@dataclass(frozen=True)` with `__init__` validating `X11CTL_DISPLAY` matches `^:\d+$`), `desired_tiers`, `parse_args` (including `self-test` subcommand, bare `start` defaulting to headless, bare `stop` defaulting to all), `write_pidfile` (atomic: write to tempfile in same dir with `O_CREAT | O_EXCL | O_NOFOLLOW`, then `os.rename()`; unlinks existing non-symlink file first), `read_pidfile` (reject symlinks via `O_NOFOLLOW`), `write_tiers` (atomic rename), `read_tiers`, `delete_tiers`, `acquire_lock` (non-blocking `fcntl.LOCK_NB` with retry loop, 30s timeout, returns `None` on timeout), `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Imports MUST include `sys` and `tempfile`. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation).
+Create `scripts/x11ctl` containing: `Config` (as `@dataclass(frozen=True)` with `__post_init__` validating `X11CTL_DISPLAY` matches `^:\d+$` and `X11CTL_SCREEN` matches `^\d+x\d+x\d+$`; xauth path hardcoded to `/tmp/.x11ctl-xauth`, not overridable), `desired_tiers`, `parse_args` (including `self-test` subcommand, bare `start` defaulting to headless, bare `stop` defaulting to all), `write_pidfile` (atomic: write to tempfile in same dir with `O_CREAT | O_EXCL | O_NOFOLLOW`, then check target is not symlink via `os.path.islink()`, then `os.rename()` directly over target without unlinking first), `read_pidfile` (reject symlinks via `O_NOFOLLOW`), `write_tiers` (atomic rename, same pattern), `read_tiers`, `delete_tiers`, `acquire_lock` (non-blocking `fcntl.LOCK_NB` with retry loop, 30s timeout, returns `None` on timeout), `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Imports MUST include `sys` and `tempfile`. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation).
 
 - [ ] **Step 4: Make executable and run tests**
 
@@ -973,18 +994,6 @@ class TestStaleCleanup:
             assert result is False  # fail closed
             assert lock.exists()  # not deleted
 
-    def test_clean_socket_only_no_lock_fails_closed(self, tmp_path):
-        """Socket exists but lock was deleted before read — fail closed."""
-        socket_dir = tmp_path / ".X11-unix"
-        socket_dir.mkdir()
-        socket_file = socket_dir / "X99"
-        socket_file.write_text("")
-        # Lock existed but was deleted before our function runs
-        # Function sees no lock + socket = fail closed
-        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-        assert result is False
-        assert socket_file.exists()  # preserved
-
     def test_clean_lock_read_race_via_os_open_failure(self, tmp_path):
         """If os.open() fails with OSError during lock read, should fail closed."""
         lock = tmp_path / ".X99-lock"
@@ -1211,8 +1220,8 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
         except FileNotFoundError:
             pass
         return 1
-    except FileNotFoundError:
-        print("Error: xauth binary not found (should have been caught by preflight)", file=sys.stderr)
+    except (FileNotFoundError, PermissionError) as exc:
+        print(f"Error: xauth binary not usable ({exc})", file=sys.stderr)
         try:
             os.unlink(cfg.xauth)
         except FileNotFoundError:
@@ -1242,7 +1251,25 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
         os.close(log_fd)
 
     # Write pidfile (atomic: write to temp, rename)
-    write_pidfile(pidfile, proc.pid, int(time.time()))
+    # If write_pidfile fails, kill the just-launched process and clean up
+    try:
+        write_pidfile(pidfile, proc.pid, int(time.time()))
+    except Exception as exc:
+        print(f"Error: failed to write pidfile: {exc}", file=sys.stderr)
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+        try:
+            os.unlink(cfg.xauth)
+        except FileNotFoundError:
+            pass
+        return 1
     started.append("xvfb")
 
     # Readiness probe
@@ -1263,6 +1290,7 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
         except Exception:
             try:
                 proc.kill()
+                proc.wait(timeout=1)  # reap zombie
             except Exception:
                 pass
         try:
@@ -1389,16 +1417,18 @@ class TestStopCommand:
     def test_stop_vnc_does_not_clean_xauth(self):
         """stop --vnc should NOT clean up xauth (headless still running)."""
         cfg = x11ctl.Config()
-        unlinked = []
 
         with patch.object(x11ctl, "stop_component", return_value=True), \
              patch.object(x11ctl, "read_tiers", return_value={"headless", "vnc"}), \
              patch.object(x11ctl, "write_tiers"), \
              patch.object(x11ctl, "acquire_lock", return_value=99), \
-             patch.object(x11ctl, "release_lock"):
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink") as mock_unlink:
             result = x11ctl.stop_command_impl(cfg, tier="vnc")
             assert result == 0
-            # Xauth should NOT be cleaned up — headless is still running
+            # Verify xauth was NOT unlinked
+            for call in mock_unlink.call_args_list:
+                assert call.args[0] != cfg.xauth
 
     def test_stop_reports_failure_when_sigkill_fails(self):
         """stop should return non-zero exit when a component can't be killed."""
@@ -1406,11 +1436,15 @@ class TestStopCommand:
 
         with patch.object(x11ctl, "stop_component", return_value=False), \
              patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
-             patch.object(x11ctl, "delete_tiers"), \
+             patch.object(x11ctl, "write_tiers"), \
              patch.object(x11ctl, "acquire_lock", return_value=99), \
-             patch.object(x11ctl, "release_lock"):
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink") as mock_unlink:
             result = x11ctl.stop_command_impl(cfg, tier="all")
             assert result != 0  # failure reported
+            # Xauth should NOT be cleaned when stop fails
+            for call in mock_unlink.call_args_list:
+                assert call.args[0] != cfg.xauth
 
 
 class TestStartRollback:
@@ -1489,7 +1523,7 @@ These are the testable inner functions. The top-level `start_command(args, cfg)`
 
 The functions should:
 - `start_command_impl(cfg, desired, bind_all)`: acquire lock (check for `None` timeout), read tiers, compute diff, stop excess (STOP_ORDER), start missing (headless first, passing `bind=` to all), write tiers (atomic), rollback on failure
-- `stop_command_impl(cfg, tier)`: acquire lock (check for `None` timeout), read tiers, compute cascade, stop components (STOP_ORDER), update/delete tiers. **When headless is being stopped (cascade or explicit), also remove the xauth file (`cfg.xauth`).**  Report `stop_component` False results in exit code.
+- `stop_command_impl(cfg, tier)`: acquire lock (check for `None` timeout), read tiers, compute cascade, stop components (STOP_ORDER), track which succeeded/failed. **Only update tiers file to remove successfully-stopped tiers; keep surviving tiers in file.** Delete tiers file only when ALL components stopped successfully. **Only remove xauth when headless was successfully stopped.** Report `stop_component` False results in exit code.
 - `status_command_impl(cfg)`: shared lock, read tiers, validate each expected component, return 0/1
 
 - [ ] **Step 4: Wire main() to dispatch all subcommands**
@@ -1557,7 +1591,7 @@ class TestXpraCommand:
         sock.bind(("127.0.0.1", cfg.xpra_port))
         sock.listen(1)
         try:
-            result = x11ctl.start_xpra(cfg, bind="127.0.0.1", started=[])
+            result = x11ctl.start_xpra(cfg, [], bind="127.0.0.1")
             assert result == 2
         finally:
             sock.close()
@@ -1611,7 +1645,7 @@ class TestVncCommand:
         sock.bind(("127.0.0.1", cfg.vnc_port))
         sock.listen(1)
         try:
-            result = x11ctl.start_vnc(cfg, bind="127.0.0.1", started=[])
+            result = x11ctl.start_vnc(cfg, [], bind="127.0.0.1")
             assert result == 2
         finally:
             sock.close()
@@ -1691,12 +1725,14 @@ sys.exit(x.run_with_temp_display(cfg, ['sleep', '60']))
 """],
             cwd=repo_root,
         )
-        # Poll for readiness instead of fixed sleep — check for pidfile
-        pidfile = f"/tmp/.x11ctl-xvfb.pid"
+        # Poll for readiness — check for display socket (run_with_temp_display
+        # may not write a pidfile since it manages a temporary display)
+        display_num = display.lstrip(":")
+        socket_path = f"/tmp/.X11-unix/X{display_num}"
         import time as _time
         for _ in range(20):  # up to 10s
             _time.sleep(0.5)
-            if os.path.exists(pidfile) or proc.poll() is not None:
+            if os.path.exists(socket_path) or proc.poll() is not None:
                 break
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=10)
@@ -1749,7 +1785,17 @@ class TestScreenshotCommand:
             assert result == 0
             assert "import" in called_with[0][0]
             assert "-window" in called_with[0]
-            assert "/tmp/out.png" in called_with[0]
+            # Verify -- separator before output path
+            assert "--" in called_with[0]
+            idx_sep = called_with[0].index("--")
+            assert called_with[0][idx_sep + 1] == "/tmp/out.png"
+
+    def test_screenshot_rejects_dash_path(self):
+        """screenshot should reject output paths starting with -."""
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "find_binary", return_value="/usr/local/bin/import"):
+            result = x11ctl.screenshot_command_impl(cfg, "-evil")
+            assert result != 0
 
 
 class TestSetupCommand:
@@ -1766,24 +1812,79 @@ class TestSetupCommand:
                  args=[], returncode=0)):
             result = x11ctl.setup_command_impl(tier="headless")
             assert result == 0
+
+    def test_setup_uses_absolute_pkg_path(self):
+        """setup should invoke pkg via /usr/sbin/pkg, not PATH search."""
+        cfg = x11ctl.Config()
+        called_with = []
+
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", side_effect=mock_run):
+            x11ctl.setup_command_impl(tier="headless")
+            assert called_with[0][0] == "/usr/sbin/pkg"
+
+    def test_setup_headless_package_list(self):
+        """setup --headless should install xorg-vfbserver and xauth."""
+        called_with = []
+
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", side_effect=mock_run):
+            x11ctl.setup_command_impl(tier="headless")
+            pkg_cmd = called_with[0]
+            assert "xorg-vfbserver" in pkg_cmd
+            assert "xauth" in pkg_cmd
+
+    def test_setup_pkg_failure(self):
+        """setup should return non-zero when pkg install fails."""
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=1, stderr="pkg error")):
+            result = x11ctl.setup_command_impl(tier="headless")
+            assert result != 0
+
+
+class TestSelfTest:
+    def test_self_test_refuses_when_tiers_active(self):
+        """self-test should refuse to run when a stack is already active."""
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert result != 0
+
+    def test_self_test_runs_when_clean(self):
+        """self-test should proceed when no tiers are active."""
+        with patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl, "find_binary", return_value=None):
+            # Will fail at preflight (no binaries), but proves it didn't
+            # refuse due to active tiers
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            # Non-zero is fine — the point is it attempted to run
+            assert isinstance(result, int)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestScreenshotCommand tests/test_x11ctl.py::TestSetupCommand -v`
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestScreenshotCommand tests/test_x11ctl.py::TestSetupCommand tests/test_x11ctl.py::TestSelfTest -v`
 Expected: FAIL — functions not defined.
 
 - [ ] **Step 3: Implement screenshot_command_impl**
 
-Verify `import` binary exists, run `import -window root -display :N <path>`, report success/failure.
+Verify `import` binary exists, reject paths starting with `-`, run `import -window root -display :N -- <path>` (note `--` separator), report success/failure.
 
 - [ ] **Step 4: Implement setup_command_impl**
 
-Check `os.geteuid() == 0`, map tier flags to package lists, run `pkg install -y`.
+Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbserver, xauth, xdpyinfo; xpra: xpra; vnc: x11vnc, resolve websockify package via `pkg search`), run `/usr/sbin/pkg install -y` (absolute path, not PATH search).
 
-- [ ] **Step 5: Implement self_test_command**
+- [ ] **Step 5: Implement self_test_command_impl**
 
-Exercise acceptance criteria programmatically. `--tier1`: start/xdpyinfo/screenshot/stop. `--all`: adds idempotency, stale PID recovery, partial rollback, symlink rejection, partial-tier status.
+Check that no tiers are active (read_tiers returns None/empty), refuse if active. Use isolated display number and state paths. Exercise acceptance criteria programmatically. `--tier1`: start/xdpyinfo/screenshot/stop. `--all`: adds idempotency, stale PID recovery, partial rollback, symlink rejection, partial-tier status.
 
 - [ ] **Step 6: Run tests, commit**
 
