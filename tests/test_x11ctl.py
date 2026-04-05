@@ -315,6 +315,12 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="must match"):
             x11ctl.Config()
 
+    def test_xauth_trailing_newline_rejected(self, monkeypatch):
+        """Trailing newline in xauth must be rejected (\\Z anchor)."""
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-safe\n")
+        with pytest.raises(ValueError):
+            x11ctl.Config()
+
 
 # --- Config.for_self_test ---
 
