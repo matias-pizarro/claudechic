@@ -1,9 +1,25 @@
 """Tests for claudechic.tasks module."""
 
 import asyncio
+import logging
+from contextlib import contextmanager
+
 import pytest
 
 from claudechic.tasks import create_safe_task
+
+
+@contextmanager
+def capture_claudechic_logs(caplog):
+    logger = logging.getLogger("claudechic")
+    logger.addHandler(caplog.handler)
+    old_level = logger.level
+    try:
+        logger.setLevel(logging.ERROR)
+        yield
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(old_level)
 
 
 class TestCreateSafeTask:
@@ -27,7 +43,7 @@ class TestCreateSafeTask:
         async def failing():
             raise ValueError("test error")
 
-        with caplog.at_level("ERROR", logger="claudechic"):
+        with capture_claudechic_logs(caplog):
             task = create_safe_task(failing(), name="test-fail")
             result = await task
 
@@ -58,7 +74,7 @@ class TestCreateSafeTask:
         async def failing():
             raise ValueError("oops")
 
-        with caplog.at_level("ERROR", logger="claudechic"):
+        with capture_claudechic_logs(caplog):
             task = create_safe_task(failing())  # No name
             await task
 
@@ -71,7 +87,7 @@ class TestCreateSafeTask:
         async def returns_none():
             return None
 
-        with caplog.at_level("ERROR", logger="claudechic"):
+        with capture_claudechic_logs(caplog):
             task = create_safe_task(returns_none(), name="none-returner")
             result = await task
 
@@ -85,7 +101,7 @@ class TestCreateSafeTask:
         async def fails_with_message():
             raise ValueError("specific error message here")
 
-        with caplog.at_level("ERROR", logger="claudechic"):
+        with capture_claudechic_logs(caplog):
             task = create_safe_task(fails_with_message(), name="message-test")
             await task
 

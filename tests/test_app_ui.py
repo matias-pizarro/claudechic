@@ -640,6 +640,25 @@ async def test_bang_command_shows_exit_code(mock_sdk):
 
 
 @pytest.mark.asyncio
+async def test_bang_command_worker_failure_does_not_exit_app(mock_sdk):
+    """Bang command worker errors stay contained so the app remains usable."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=AsyncMock(side_effect=RuntimeError("pty failed")),
+        ):
+            await submit_command(app, pilot, "!echo hello")
+            await wait_for_workers(app)
+            await pilot.pause()
+
+        await submit_command(app, pilot, "/agent test-agent")
+        await wait_for_workers(app)
+
+        assert len(app.agents) == 2
+
+
+@pytest.mark.asyncio
 async def test_hamburger_button_narrow_screen(mock_sdk):
     """Hamburger button appears on narrow screens with multiple agents."""
     from claudechic.widgets import HamburgerButton

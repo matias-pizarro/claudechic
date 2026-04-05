@@ -1710,7 +1710,9 @@ class ChatApp(App):
                 pending_widget.remove()
                 self.notify("Command cancelled")
 
-        self.run_worker(_run(), exclusive=False)
+        self.run_worker(
+            _run(), name="shell-command", exclusive=False, exit_on_error=False
+        )
 
     def _show_session_picker(self) -> None:
         from claudechic.screens import SessionScreen
