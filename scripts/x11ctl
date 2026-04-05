@@ -146,9 +146,14 @@ _TIER_DEPS: dict[str, set[str]] = {
 }
 
 
-# Component-level tiers (derived from _TIER_DEPS, excludes "all" meta-tier).
-# Derived rather than hardcoded to prevent silent drift if tiers are added.
-_COMPONENT_TIERS = frozenset(_TIER_DEPS.keys()) - frozenset({"all"})
+# Meta-tiers are aliases/aggregates that expand to component tiers.
+# Any new meta-tier must be listed here; all other _TIER_DEPS keys are components.
+_META_TIERS = frozenset({"all"})
+
+# Component-level tiers: derived from _TIER_DEPS minus known meta-tiers.
+# If a new tier is added to _TIER_DEPS it becomes a component unless listed
+# in _META_TIERS — this is the intended behavior.
+_COMPONENT_TIERS = frozenset(_TIER_DEPS.keys()) - _META_TIERS
 
 
 def desired_tiers(tier: str) -> set[str]:
