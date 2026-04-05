@@ -1,7 +1,7 @@
 # X11 in FreeBSD Jails — Design Spec
 
 **Date:** 2026-04-05
-**Status:** Draft (rev 7 — post round-6 review: roborev + code-reviewer + architect + contrarian)
+**Status:** Final (rev 8 — 7 review rounds, 3/4 PASS since round 3)
 **Scope:** Running X11 applications inside any FreeBSD jail — headless testing, remote viewing, GUI development, and window automation.
 
 ## Problem
@@ -357,7 +357,7 @@ Python script (stdlib only — no third-party dependencies). Single file, copy-a
 
 **Single-instance per jail:** The script supports exactly one running stack per jail. All state files (`/tmp/.x11ctl-*` pidfiles, logs, tiers file, Xauth) use fixed paths. The display (`:99`) and ports (10000, 5900, 6080) are fixed defaults. Running multiple stacks in one jail is explicitly unsupported. Multi-instance is listed under Out of Scope.
 
-**Concurrency serialization:** All mutating commands (`start`, `stop`, `run`) acquire an exclusive `fcntl.flock()` on `/tmp/.x11ctl.lock` before modifying any state files. This prevents concurrent invocations (e.g., two terminals running `start` and `stop` simultaneously) from corrupting pidfiles, the tiers file, or Xauth. Read-only commands (`status`, `env`) acquire a shared lock. The lock file is never deleted (harmless empty file).
+**Concurrency serialization:** All mutating commands (`start`, `stop`, `run`) acquire an exclusive `fcntl.flock()` on `/tmp/.x11ctl.lock` before modifying any state files. This prevents concurrent invocations (e.g., two terminals running `start` and `stop` simultaneously) from corrupting pidfiles, the tiers file, or Xauth. Read-only commands (`status`, `env`) acquire a shared lock. The lock file is opened with `os.open()` using `O_CREAT | O_WRONLY | O_NOFOLLOW`, mode `0o644` — same symlink-safety as other state files. If the path is a symlink, open fails and the script reports the error. The lock file is never deleted (harmless empty file).
 
 **Privilege model:**
 - `x11ctl setup` requires root (runs `pkg install`). The command checks `os.geteuid() == 0` and exits with a clear error if not root.
@@ -400,22 +400,26 @@ This means `status` exit 0 = "everything that was requested is running", exit 1 
 
 **Tiers file lifecycle — mutation rules for every path:**
 
-The tiers file stores a set of active tier names (e.g., `headless xpra vnc`). Mutations use **set operations** — `stop` removes the named tier from the set, `start` adds/overwrites. This correctly handles arbitrary combinations:
+The tiers file stores a set of active tier names (e.g., `headless xpra vnc`).
 
-| Operation | Tiers file action | Example: was `headless xpra vnc` |
-|-----------|-------------------|----------------------------------|
-| `start --headless` | Write `{headless}` (overwrite) | → `headless` |
-| `start --xpra` | Write `{headless, xpra}` | → `headless xpra` |
-| `start --vnc` | Write `{headless, vnc}` | → `headless vnc` |
-| `start --all` | Write `{headless, xpra, vnc}` | → `headless xpra vnc` |
-| `stop --vnc` | Remove `vnc` from set | → `headless xpra` |
-| `stop --xpra` | Remove `xpra` from set | → `headless vnc` |
-| `stop --headless` (cascades) | Remove all (cascades stop everything) | → file deleted |
-| `stop --all` | Delete tiers file | → file deleted |
-| Partial-start rollback | Delete tiers file (nothing running) | → file deleted |
-| Stale-file recovery | `status` warns "tiers file exists but processes missing"; `start` overwrites | — |
+**`start` is declarative** — it defines the desired state, not additive. `start --xpra` means "I want headless + xpra running." If VNC was previously running, it is stopped first (the desired set replaces the old set). This avoids ambiguity about leftover tiers from a previous `start` call.
 
-The tiers file is always in sync with what x11ctl believes is running. `stop` removes the stopped tier from the set (not hardcoded rewrites). If the set becomes empty, the file is deleted. `stop --all` and full rollback always delete it. File permissions: `0644` (readable by anyone for status checks, writable by the x11ctl user).
+**`stop` is subtractive** — it removes the named tier from the current set, stopping the corresponding processes.
+
+| Operation | Tiers file action | Process effect (was `headless xpra vnc`) |
+|-----------|-------------------|------------------------------------------|
+| `start --headless` | Write `{headless}` | Stop xpra + vnc, keep/start headless |
+| `start --xpra` | Write `{headless, xpra}` | Stop vnc, keep/start headless + xpra |
+| `start --vnc` | Write `{headless, vnc}` | Stop xpra, keep/start headless + vnc |
+| `start --all` | Write `{headless, xpra, vnc}` | Keep/start all |
+| `stop --vnc` | Remove `vnc` from set | Stop vnc only → `headless xpra` |
+| `stop --xpra` | Remove `xpra` from set | Stop xpra only → `headless vnc` |
+| `stop --headless` (cascades) | Delete file | Stop everything (cascading) |
+| `stop --all` | Delete file | Stop everything |
+| Partial-start rollback | Delete file | Stop everything started in this invocation |
+| Stale-file recovery | `status` warns | `start` overwrites with new desired state |
+
+The tiers file is always in sync with what x11ctl believes should be running. `start` replaces it with the new desired set and reconciles processes (starting missing ones, stopping excess ones). `stop` removes the named tier and stops its processes. If the set becomes empty, the file is deleted. File permissions: `0644` (readable for status checks, writable by the x11ctl user).
 
 ### Start/Stop Asymmetry
 
