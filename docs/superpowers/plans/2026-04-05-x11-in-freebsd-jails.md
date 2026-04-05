@@ -860,6 +860,21 @@ class TestStaleCleanup:
             assert result is False  # fail closed
             assert lock.exists()  # not deleted
 
+    def test_clean_returns_false_when_ps_missing(self, tmp_path):
+        """If ps is unavailable, should fail closed (return False)."""
+        lock = tmp_path / ".X99-lock"
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+        lock.write_text("12345\n")
+
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # fail closed
+            assert lock.exists()  # preserved
+            assert socket_file.exists()  # preserved
+
 
 class TestXauthAdd:
     def test_xauth_add_failure_aborts_startup(self):
@@ -920,13 +935,13 @@ Expected: FAIL — `clean_stale_x_artifacts` not defined.
 # ---------------------------------------------------------------------------
 
 def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
-    """Remove stale X server lock and socket files ONLY if no matching Xvfb is running.
+    """Remove stale X server lock and socket files only when ownership is safely stale.
 
-    Reads PID from the lock file and checks if that PID is a live Xvfb process.
-    If it is, artifacts are left untouched (another Xvfb owns them).
+    Reads PID from the lock file and checks whether that PID is still alive.
+    If it is, or if the liveness check can't be completed, artifacts are preserved.
 
     Returns True if artifacts were cleaned or didn't exist.
-    Returns False if cleanup was blocked (live Xvfb or couldn't determine).
+    Returns False if cleanup was blocked (live process or couldn't determine).
     Caller should print guidance when False is returned.
     """
     lock_path = Path(tmp_dir) / f".X{display_num}-lock"
@@ -946,19 +961,23 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
         try:
             pid_str = lock_path.read_text().strip()
             pid = int(pid_str)
-            # Check if this PID is still alive
-            result = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "comm="],
-                capture_output=True, text=True, timeout=5,
-            )
-            comm = result.stdout.strip()
-            if comm:
-                return False  # Live process owns or may have reused this PID — don't touch
-            # If comm is empty, process is dead — stale, safe to clean
-        except (ValueError, FileNotFoundError):
-            pass  # Lock file unreadable/missing — safe to clean (no owner)
-        except subprocess.TimeoutExpired:
-            return False  # Can't determine owner — fail closed, don't touch
+        except FileNotFoundError:
+            pass  # Lock file disappeared — safe to clean
+        except ValueError:
+            pass  # Malformed lock contents — safe to clean
+        else:
+            try:
+                # Check if this PID is still alive
+                result = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "comm="],
+                    capture_output=True, text=True, timeout=5,
+                )
+                comm = result.stdout.strip()
+                if comm:
+                    return False  # Live process owns or may have reused this PID — don't touch
+                # If comm is empty, process is dead — stale, safe to clean
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False  # Can't determine owner — fail closed, don't touch
 
     for p in (lock_path, socket_path):
         if p.exists() and not p.is_symlink():
