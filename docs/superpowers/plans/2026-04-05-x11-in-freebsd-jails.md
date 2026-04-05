@@ -35,7 +35,9 @@
 
 **Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). Self-test dynamically selects an unused high display number by probing `:98`, `:97`, ... (bounded range 98→80, fail with error if all occupied) — a display is considered occupied if EITHER `/tmp/.X<N>-lock` OR `/tmp/.X11-unix/X<N>` exists. Creates a temporary `Config` with `state_prefix=".x11ctl-selftest-<N>"`. All state paths derive from `state_prefix`. The `Config` class accepts an optional `state_prefix` parameter (default: `.x11ctl`) in its factory classmethod `Config.for_self_test(display_num)`.
 
-**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack (not just delete files), (2) remove all state artifacts (pidfiles, tiers, xauth, logs). On SIGTERM interruption, the self-test SIGTERM handler MUST kill all child processes before exiting (exit code 128+SIGNUM). On the next self-test run, detect stale selftest artifacts by checking for selftest pidfiles — validate PIDs via `validate_pid`, kill any surviving selftest processes, then clean artifacts before proceeding. Self-test state should use a `mkdtemp`-created `0700` subdirectory under `/tmp` (e.g., `/tmp/.x11ctl-selftest-<N>-<random>/`) for pidfiles, tiers, and xauth to prevent cross-user pidfile spoofing. The directory is removed on cleanup.
+**Self-test state layout:** Self-test uses a `mkdtemp`-created `0700` subdirectory under `/tmp` (e.g., `/tmp/.x11ctl-selftest-<N>-<random>/`) for pidfiles, tiers file, lock file, and logs. The xauth file remains flat in `/tmp` as `/tmp/.x11ctl-selftest-<N>` (passes the `^/tmp/\.x11ctl-[^/]+$` validation). This split keeps xauth validation consistent while isolating other state in a private directory that prevents cross-user pidfile spoofing. `Config.for_self_test(display_num)` creates the mkdtemp directory internally and returns a Config where `pidfile()`, `logfile()`, `tiers_file`, and `lock_file` point inside the directory, while `xauth` points to the flat file.
+
+**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack, (2) remove the xauth file, (3) remove the mkdtemp state directory (`shutil.rmtree`). On SIGTERM/SIGINT interruption, the handler MUST kill all child processes before exiting (exit code 128+SIGNUM). **Stale recovery:** On the next self-test run, scan for stale directories matching `/tmp/.x11ctl-selftest-*-*/` (glob pattern). For each, check ownership (`os.stat().st_uid == os.getuid()`), read pidfiles inside, validate PIDs via `validate_pid`, kill any surviving processes, then `shutil.rmtree` the directory and remove its corresponding flat xauth file.
 
 **Self-test tier coverage:** `self-test --tier1` exercises headless start/status/screenshot/stop. `self-test --tier2` exercises headless+xpra start/status/stop (verifies Xpra HTML5 binding). `self-test --tier3` exercises headless+vnc start/status/stop (verifies VNC+noVNC ports). `self-test --all` exercises all tiers plus idempotency, stale PID recovery, partial rollback, symlink rejection, and partial-tier status. The implementer should add tests for each tier level.
 
@@ -567,7 +569,7 @@ Expected: FAIL — `scripts/x11ctl` does not exist yet.
 
 - [ ] **Step 3: Create x11ctl with ALL pure functions**
 
-Create `scripts/x11ctl` containing: `Config` (as `@dataclass(frozen=True)` with `__post_init__` validating `X11CTL_DISPLAY` matches `^:\d+$`, `X11CTL_SCREEN` matches `^\d+x\d+x\d+$`, and `X11CTL_XAUTH` validated structurally: `resolve().parent == /tmp` and basename matches `^\.x11ctl-[^/]+$` (prevents path traversal); includes a `state_prefix` field (default `.x11ctl`) that all path methods derive from; `Config.for_self_test(display_num)` classmethod returns a Config with dynamic display and `state_prefix=".x11ctl-selftest-<N>"`, isolated xauth), `desired_tiers`, `parse_args` (including `self-test` subcommand, bare `start` defaulting to headless, bare `stop` defaulting to all), `write_pidfile` (atomic: write to tempfile in same dir with `O_CREAT | O_EXCL | O_NOFOLLOW`, then check target is not symlink via `os.path.islink()`, then `os.rename()` directly over target without unlinking first), `read_pidfile` (reject symlinks via `O_NOFOLLOW`), `write_tiers` (atomic rename, same pattern), `read_tiers`, `delete_tiers`, `acquire_lock` (non-blocking `fcntl.LOCK_NB` with retry loop, 30s timeout, returns `None` on timeout), `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Imports MUST include `sys` and `tempfile`. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation).
+Create `scripts/x11ctl` containing: `Config` (as `@dataclass(frozen=True)` with `__post_init__` validating `X11CTL_DISPLAY` matches `^:\d+$`, `X11CTL_SCREEN` matches `^\d+x\d+x\d+$`, and `X11CTL_XAUTH` validated structurally: normalize via `resolve()` then match `^/tmp/\.x11ctl-[^/]+$` (prevents path traversal); includes a `state_prefix` field (default `.x11ctl`) that all path methods derive from; `Config.for_self_test(display_num)` classmethod creates a mkdtemp `0700` directory for pidfiles/tiers/lock/logs, sets xauth flat as `/tmp/.x11ctl-selftest-<N>` (passes validation), and returns a frozen Config), `desired_tiers`, `parse_args` (including `self-test` subcommand, bare `start` defaulting to headless, bare `stop` defaulting to all), `write_pidfile` (atomic: write to tempfile in same dir with `O_CREAT | O_EXCL | O_NOFOLLOW`, then check target is not symlink via `os.path.islink()`, then `os.rename()` directly over target without unlinking first), `read_pidfile` (reject symlinks via `O_NOFOLLOW`), `write_tiers` (atomic rename, same pattern), `read_tiers`, `delete_tiers`, `acquire_lock` (non-blocking `fcntl.LOCK_NB` with retry loop, 30s timeout, returns `None` on timeout), `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Imports MUST include `sys` and `tempfile`. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation).
 
 - [ ] **Step 4: Make executable and run tests**
 
@@ -2003,16 +2005,19 @@ class TestSelfTest:
             assert "display" in captured.err.lower() or "occupied" in captured.err.lower()
 
     def test_self_test_uses_isolated_state(self):
-        """self-test should use isolated display and state paths, not production."""
+        """self-test should use isolated display and split state layout."""
         cfg = x11ctl.Config.for_self_test(display_num=98)
         assert cfg.display == ":98"
         assert cfg.display != ":99"  # not the production display
-        assert "selftest" in cfg.xauth
+        # Xauth is flat in /tmp (passes validation regex)
+        assert cfg.xauth == "/tmp/.x11ctl-selftest-98"
+        import re
+        assert re.match(r"^/tmp/\.x11ctl-[^/]+$", cfg.xauth)
+        # Other state files are inside mkdtemp 0700 directory
         assert "selftest" in cfg.pidfile("xvfb")
+        assert "/" in cfg.pidfile("xvfb").replace("/tmp/", "", 1)  # nested
         assert "selftest" in cfg.tiers_file
         assert "selftest" in cfg.lock_file
-        # All paths must be under /tmp and pass xauth validation
-        assert cfg.xauth.startswith("/tmp/.x11ctl-selftest-")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2028,9 +2033,31 @@ Verify `import` binary exists, reject paths starting with `-`, run `import -wind
 
 Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbserver, xauth, xdpyinfo, ImageMagick7-nox11, xdotool; xpra: xpra, xpra-html5; vnc: x11vnc, novnc, resolve websockify package via `/usr/sbin/pkg search -e websockify` — if no exact match, try `/usr/sbin/pkg search py3.*-websockify` and pick the first result; if zero matches, print error with manual install guidance). ALL `pkg` invocations MUST use absolute path `/usr/sbin/pkg` (both `install` and `search`). Run `/usr/sbin/pkg install -y` for installation.
 
-- [ ] **Step 5: Implement self_test_command_impl**
+- [ ] **Step 5a: Add self-test tier2/tier3 CLI parsing tests**
 
-Check that no tiers are active (read_tiers returns None/empty), refuse if active. Use isolated display number and state paths. Exercise acceptance criteria programmatically. `--tier1`: start/xdpyinfo/screenshot/stop. `--all`: adds idempotency, stale PID recovery, partial rollback, symlink rejection, partial-tier status.
+```python
+    def test_self_test_tier2(self):
+        args = x11ctl.parse_args(["self-test", "--tier2"])
+        assert args.command == "self-test"
+        assert args.tier2 is True
+
+    def test_self_test_tier3(self):
+        args = x11ctl.parse_args(["self-test", "--tier3"])
+        assert args.command == "self-test"
+        assert args.tier3 is True
+```
+
+- [ ] **Step 5b: Implement self_test_command_impl — display selection and state setup**
+
+Check no tiers active. Scan stale selftest dirs (`/tmp/.x11ctl-selftest-*-*/`), verify ownership, kill survivors, rmtree. Probe display 98→80 (check lock AND socket). Call `Config.for_self_test(display_num)` which creates mkdtemp `0700` dir for pidfiles/tiers/lock/logs and flat `/tmp/.x11ctl-selftest-<N>` for xauth.
+
+- [ ] **Step 5c: Implement self_test_command_impl — tier exercises**
+
+`--tier1`: start headless / xdpyinfo / screenshot / stop. `--tier2`: start headless+xpra / verify Xpra HTML5 binding on xpra_port / stop. `--tier3`: start headless+vnc / verify VNC on vnc_port + noVNC on novnc_port / stop. `--all`: runs tier1+tier2+tier3 plus idempotency, stale PID recovery, partial rollback, symlink rejection, partial-tier status.
+
+- [ ] **Step 5d: Implement self_test_command_impl — cleanup and SIGTERM handler**
+
+Register SIGTERM/SIGINT handlers that kill all children then exit 128+SIGNUM. On normal completion/failure: stop_component for each running component, os.unlink xauth, shutil.rmtree state dir.
 
 - [ ] **Step 6: Run tests, commit**
 
