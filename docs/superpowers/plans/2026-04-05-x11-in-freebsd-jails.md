@@ -22,7 +22,10 @@
 
 **Config immutability:** `Config` should be a `@dataclass(frozen=True)` or use `__slots__` + no setters. All fields set at construction from env vars and defaults. Tests that need custom Config values must use `monkeypatch.setenv` before construction or a factory classmethod with overrides.
 
-**Input validation:** `Config.__post_init__` MUST validate `X11CTL_DISPLAY` matches `^:\d+$` regex and `X11CTL_SCREEN` (if set) matches `^\d+x\d+x\d+$`. The xauth path MUST be constrained to `/tmp/.x11ctl-xauth` (hardcoded, not overridable from environment) to prevent arbitrary file deletion via attacker-controlled `X11CTL_XAUTH`. If a custom xauth path is needed for testing, use `monkeypatch.setenv` + a factory classmethod that accepts a trusted override.
+**Input validation:** `Config.__post_init__` MUST validate:
+- `X11CTL_DISPLAY` matches `^:\d+$` regex
+- `X11CTL_SCREEN` (if set) matches `^\d+x\d+x\d+$`
+- `X11CTL_XAUTH` (if set) MUST start with `/tmp/.x11ctl-` to constrain the attack surface while still allowing test isolation (e.g., `/tmp/.x11ctl-test-xauth`). The default is `/tmp/.x11ctl-xauth`. Any value not starting with `/tmp/.x11ctl-` raises `ValueError`. This prevents arbitrary file deletion via attacker-controlled env while allowing `monkeypatch.setenv("X11CTL_XAUTH", str(tmp_path / ".x11ctl-test"))` in tests (where `tmp_path` starts with `/tmp/`).
 
 **Xauth cleanup on stop:** When the headless tier is stopped (via `stop --headless`, `stop --all`, or cascade), `stop_command_impl` MUST remove the xauth file — but ONLY if all components in that tier were actually stopped successfully (`stop_component` returned `True`). If any `stop_component` returns `False` (process survived SIGKILL), preserve the tiers file for the surviving components and do NOT delete xauth. Update the tiers file to reflect only the surviving tiers.
 
@@ -30,7 +33,7 @@
 
 **Setup safety:** `setup_command_impl` MUST invoke `pkg` via absolute path `/usr/sbin/pkg` (not PATH search) to prevent privilege escalation with a poisoned PATH. The setup should resolve the correct `websockify` package name by checking `pkg search websockify` output.
 
-**Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). It should use an isolated display number (e.g., `:98` or a randomly chosen high number) and isolated state paths to avoid interfering with a running stack.
+**Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). Self-test creates a temporary `Config` with an isolated display (`:98`), isolated xauth (`/tmp/.x11ctl-selftest-xauth`), and uses a `state_prefix` parameter on all state paths (pidfiles, tiers, lock, logs become `/tmp/.x11ctl-selftest-*`). The `Config` class should accept an optional `state_prefix` parameter (default: `.x11ctl`) in its factory classmethod `Config.for_self_test()` to enable this isolation. All `pidfile()`, `logfile()`, `tiers_file`, and `lock_file` property methods should derive paths from `state_prefix`. This ensures self-test never touches production state.
 
 **Bare start/stop behavior:** `start` with no tier flag defaults to `--headless`. `stop` with no tier flag defaults to `--all`.
 
@@ -268,6 +271,44 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="must match"):
             x11ctl.Config()
 
+    def test_valid_screen(self):
+        cfg = x11ctl.Config()
+        assert cfg.screen == "1920x1080x24"
+
+    def test_custom_screen(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_SCREEN", "800x600x16")
+        cfg = x11ctl.Config()
+        assert cfg.screen == "800x600x16"
+
+    def test_invalid_screen_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_SCREEN", "bad")
+        with pytest.raises(ValueError, match="must match"):
+            x11ctl.Config()
+
+    def test_screen_injection_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_SCREEN", "1920x1080x24 -evil")
+        with pytest.raises(ValueError, match="must match"):
+            x11ctl.Config()
+
+    def test_xauth_default(self):
+        cfg = x11ctl.Config()
+        assert cfg.xauth == "/tmp/.x11ctl-xauth"
+
+    def test_xauth_valid_override(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-test-xauth")
+        cfg = x11ctl.Config()
+        assert cfg.xauth == "/tmp/.x11ctl-test-xauth"
+
+    def test_xauth_invalid_prefix_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_XAUTH", "/home/attacker/.xauth")
+        with pytest.raises(ValueError, match="must start with"):
+            x11ctl.Config()
+
+    def test_xauth_arbitrary_path_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_XAUTH", "/etc/shadow")
+        with pytest.raises(ValueError, match="must start with"):
+            x11ctl.Config()
+
 
 # --- Pidfile I/O ---
 
@@ -495,7 +536,7 @@ Expected: FAIL — `scripts/x11ctl` does not exist yet.
 
 - [ ] **Step 3: Create x11ctl with ALL pure functions**
 
-Create `scripts/x11ctl` containing: `Config` (as `@dataclass(frozen=True)` with `__post_init__` validating `X11CTL_DISPLAY` matches `^:\d+$` and `X11CTL_SCREEN` matches `^\d+x\d+x\d+$`; xauth path hardcoded to `/tmp/.x11ctl-xauth`, not overridable), `desired_tiers`, `parse_args` (including `self-test` subcommand, bare `start` defaulting to headless, bare `stop` defaulting to all), `write_pidfile` (atomic: write to tempfile in same dir with `O_CREAT | O_EXCL | O_NOFOLLOW`, then check target is not symlink via `os.path.islink()`, then `os.rename()` directly over target without unlinking first), `read_pidfile` (reject symlinks via `O_NOFOLLOW`), `write_tiers` (atomic rename, same pattern), `read_tiers`, `delete_tiers`, `acquire_lock` (non-blocking `fcntl.LOCK_NB` with retry loop, 30s timeout, returns `None` on timeout), `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Imports MUST include `sys` and `tempfile`. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation).
+Create `scripts/x11ctl` containing: `Config` (as `@dataclass(frozen=True)` with `__post_init__` validating `X11CTL_DISPLAY` matches `^:\d+$`, `X11CTL_SCREEN` matches `^\d+x\d+x\d+$`, and `X11CTL_XAUTH` starts with `/tmp/.x11ctl-`; includes a `state_prefix` field (default `.x11ctl`) that all path methods derive from; `Config.for_self_test()` classmethod returns a Config with `display=":98"`, `state_prefix=".x11ctl-selftest"`, isolated xauth), `desired_tiers`, `parse_args` (including `self-test` subcommand, bare `start` defaulting to headless, bare `stop` defaulting to all), `write_pidfile` (atomic: write to tempfile in same dir with `O_CREAT | O_EXCL | O_NOFOLLOW`, then check target is not symlink via `os.path.islink()`, then `os.rename()` directly over target without unlinking first), `read_pidfile` (reject symlinks via `O_NOFOLLOW`), `write_tiers` (atomic rename, same pattern), `read_tiers`, `delete_tiers`, `acquire_lock` (non-blocking `fcntl.LOCK_NB` with retry loop, 30s timeout, returns `None` on timeout), `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Imports MUST include `sys` and `tempfile`. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation).
 
 - [ ] **Step 4: Make executable and run tests**
 
@@ -1433,10 +1474,12 @@ class TestStopCommand:
     def test_stop_reports_failure_when_sigkill_fails(self):
         """stop should return non-zero exit when a component can't be killed."""
         cfg = x11ctl.Config()
+        written_tiers = []
 
         with patch.object(x11ctl, "stop_component", return_value=False), \
              patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
-             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "write_tiers", side_effect=lambda p, t: written_tiers.append(t)), \
+             patch.object(x11ctl, "delete_tiers") as mock_delete, \
              patch.object(x11ctl, "acquire_lock", return_value=99), \
              patch.object(x11ctl, "release_lock"), \
              patch("os.unlink") as mock_unlink:
@@ -1445,6 +1488,34 @@ class TestStopCommand:
             # Xauth should NOT be cleaned when stop fails
             for call in mock_unlink.call_args_list:
                 assert call.args[0] != cfg.xauth
+            # Surviving tiers should be preserved in tiers file
+            mock_delete.assert_not_called()  # tiers file NOT deleted
+            # write_tiers should be called with surviving tier set
+            assert len(written_tiers) >= 1
+            assert "headless" in written_tiers[-1]
+
+
+class TestLockTimeout:
+    def test_start_returns_1_on_lock_timeout(self):
+        """start should return 1 when lock acquisition times out."""
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "acquire_lock", return_value=None):
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 1
+
+    def test_stop_returns_1_on_lock_timeout(self):
+        """stop should return 1 when lock acquisition times out."""
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "acquire_lock", return_value=None):
+            result = x11ctl.stop_command_impl(cfg, tier="all")
+            assert result == 1
+
+    def test_status_returns_1_on_lock_timeout(self):
+        """status should return 1 when lock acquisition times out."""
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "acquire_lock", return_value=None):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 1
 
 
 class TestStartRollback:
@@ -1679,7 +1750,7 @@ class TestRunCommand:
     def test_run_returns_child_exit_code(self, tmp_path, monkeypatch):
         """run should propagate the child's exit code."""
         monkeypatch.setenv("X11CTL_DISPLAY", f":{os.getpid()}")
-        monkeypatch.setenv("X11CTL_XAUTH", str(tmp_path / "xauth"))
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-test-xauth")
         cfg = x11ctl.Config()  # reads from env — no mutation
         rc = x11ctl.run_with_temp_display(cfg, ["/bin/sh", "-c", "exit 42"])
         assert rc == 42
@@ -1691,11 +1762,11 @@ class TestRunCommand:
     def test_run_creates_and_tears_down_display(self, tmp_path, monkeypatch):
         """run should create a temp display and tear it down after."""
         monkeypatch.setenv("X11CTL_DISPLAY", f":{os.getpid()}")
-        monkeypatch.setenv("X11CTL_XAUTH", str(tmp_path / "xauth"))
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-test-xauth")
         cfg = x11ctl.Config()  # reads from env — no mutation
         rc = x11ctl.run_with_temp_display(cfg, ["xdpyinfo"])
         assert rc == 0
-        assert not Path(str(tmp_path / "xauth")).exists()
+        assert not Path("/tmp/.x11ctl-test-xauth").exists()
 
     @pytest.mark.skipif(
         x11ctl.find_binary("Xvfb") is None,
@@ -1704,7 +1775,7 @@ class TestRunCommand:
     def test_run_signal_forwarding(self, tmp_path, monkeypatch):
         """SIGTERM to x11ctl run should kill child and Xvfb."""
         display = f":{os.getpid()}"
-        xauth = str(tmp_path / "xauth")
+        xauth = "/tmp/.x11ctl-test-signal-xauth"
         repo_root = str(Path(__file__).resolve().parent.parent)
         # Launch run in a subprocess so we can signal it.
         # Pass config via environment variables (no Config mutation).
@@ -1712,7 +1783,7 @@ class TestRunCommand:
             [sys.executable, "-c", f"""
 import os, sys
 os.environ["X11CTL_DISPLAY"] = "{display}"
-os.environ["X11CTL_XAUTH"] = "{xauth}"
+os.environ["X11CTL_XAUTH"] = "/tmp/.x11ctl-test-signal-xauth"
 sys.path.insert(0, '.')
 from importlib.machinery import SourceFileLoader
 import importlib.util as _iu
@@ -1867,6 +1938,15 @@ class TestSelfTest:
             result = x11ctl.self_test_command_impl(tier="tier1")
             # Non-zero is fine — the point is it attempted to run
             assert isinstance(result, int)
+
+    def test_self_test_uses_isolated_state(self):
+        """self-test should use isolated display and state paths, not production."""
+        cfg = x11ctl.Config.for_self_test()
+        assert cfg.display != ":99"  # not the production display
+        assert "selftest" in cfg.xauth
+        assert "selftest" in cfg.pidfile("xvfb")
+        assert "selftest" in cfg.tiers_file
+        assert "selftest" in cfg.lock_file
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1880,7 +1960,7 @@ Verify `import` binary exists, reject paths starting with `-`, run `import -wind
 
 - [ ] **Step 4: Implement setup_command_impl**
 
-Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbserver, xauth, xdpyinfo; xpra: xpra; vnc: x11vnc, resolve websockify package via `pkg search`), run `/usr/sbin/pkg install -y` (absolute path, not PATH search).
+Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbserver, xauth, xdpyinfo, ImageMagick7-nox11; xpra: xpra; vnc: x11vnc, novnc, resolve websockify package via `/usr/sbin/pkg search -e websockify` — if no exact match, try `pkg search py3.*-websockify` and pick the first result; if zero matches, print error with manual install guidance), run `/usr/sbin/pkg install -y` (absolute path, not PATH search).
 
 - [ ] **Step 5: Implement self_test_command_impl**
 
