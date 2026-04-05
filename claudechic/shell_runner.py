@@ -19,6 +19,9 @@ if UNIX_PTY_SUPPORT or TYPE_CHECKING:
     import select
 
 
+PTY_POLL_INTERVAL = 0.01
+
+
 def run_in_pty(
     cmd: str, shell: str, cwd: str | None, env: dict[str, str]
 ) -> tuple[str, int]:
@@ -47,7 +50,7 @@ def run_in_pty(
 
         output = b""
         while True:
-            r, _, _ = select.select([master_fd], [], [], 0.01)
+            r, _, _ = select.select([master_fd], [], [], PTY_POLL_INTERVAL)
             if r:
                 try:
                     data = os.read(master_fd, 4096)
@@ -133,7 +136,7 @@ def _run_in_pty_with_cancel(
                     pass
                 break
 
-            r, _, _ = select.select([master_fd], [], [], 0.1)
+            r, _, _ = select.select([master_fd], [], [], PTY_POLL_INTERVAL)
             if r:
                 try:
                     data = os.read(master_fd, 4096)

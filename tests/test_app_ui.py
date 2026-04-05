@@ -1,9 +1,6 @@
 """App-level UI tests without SDK dependency."""
 
 import asyncio
-import os
-import shlex
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -672,20 +669,58 @@ async def test_bang_command_worker_failure_does_not_exit_app(mock_sdk):
 
 @pytest.mark.asyncio
 async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(mock_sdk):
-    """Quiet commands finishing just under 1 second should not show the -i tip."""
+    """Commands that finish before the tip delay should cancel the tip callback."""
     app = ChatApp()
+
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.cancelled = False
+            self.task: asyncio.Task[None] | None = None
+
+        def cancel(self) -> None:
+            self.cancelled = True
+            if self.task is not None:
+                self.task.cancel()
+
+    def fake_call_later(delay, callback, *args):
+        handle = FakeHandle()
+
+        async def fire() -> None:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            if not handle.cancelled:
+                callback(*args)
+
+        handle.task = asyncio.create_task(fire())
+        return handle
+
+    fake_loop = MagicMock()
+    fake_loop.call_later.side_effect = fake_call_later
+
+    async def finish_quickly(*_args):
+        await asyncio.sleep(0)
+        return "", 0, False
+
     async with app.run_test() as pilot:
-        with patch.object(app, "notify") as mock_notify:
+        with (
+            patch.object(app, "notify") as mock_notify,
+            patch("claudechic.app.asyncio.get_running_loop", return_value=fake_loop),
+            patch(
+                "claudechic.shell_runner.run_in_pty_cancellable",
+                new=AsyncMock(side_effect=finish_quickly),
+            ),
+        ):
             app.run_shell_command(
-                f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(0.95)'",
-                os.environ.get("SHELL", "/bin/bash"),
+                "echo hello",
+                "/bin/bash",
                 None,
-                os.environ.copy(),
+                {},
             )
             await wait_for_workers(app)
-            await asyncio.sleep(0.2)
             await pilot.pause()
 
+        fake_loop.call_later.assert_called_once()
+        assert fake_loop.call_later.call_args.args[0] == 1.0
         assert not any(
             call.args and call.args[0] == "Tip: Use -i flag for interactive commands"
             for call in mock_notify.call_args_list
