@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-05-x11-in-freebsd-jails-design.md`
 
+**Internal structure target:** The single file should not exceed ~800 lines. Code is organized in comment-delimited sections: Config, Tier Logic, Pidfile I/O, Tiers File I/O, PID Validation, Process Lifecycle, Locking, Preflight, Port Detection, Xauth, Log Rotation, Readiness Probes, Subcommands, Main.
+
 ---
 
 ## File Map
@@ -17,35 +19,42 @@
 | File | Purpose |
 |------|---------|
 | Create: `scripts/x11ctl` | Main script — all subcommands, process management, state |
-| Create: `tests/test_x11ctl.py` | Unit tests for pure logic (config, pidfile parsing, tier sets, CLI args) |
+| Create: `tests/test_x11ctl.py` | Unit + integration tests (pure logic, PID validation, lifecycle, cascade) |
 | Create: `docs/x11-in-freebsd-jails.md` | Runbook — operator guide with all tiers, recipes, troubleshooting |
 
-The script is intentionally a single file (no package structure) to match the `scripts/claudechic-remote` pattern and enable copy-into-jail deployment. Tests exercise the pure-logic functions by importing the script as a module.
+The script is intentionally a single file (no package structure) to match the `scripts/claudechic-remote` pattern and enable copy-into-jail deployment. Tests exercise both pure-logic functions and process-lifecycle logic by importing the script as a module. Integration tests that require real binaries (Xvfb, xpra, x11vnc) are marked with `@pytest.mark.skipif` and skipped when binaries are absent.
 
 ---
 
-### Task 1: Script skeleton with config and CLI parsing
+### Task 1: Script skeleton — Config, CLI parsing, tier logic, all pure I/O functions
+
+This task creates the script and all pure, independently testable functions. These are low-risk but form the foundation for everything else.
 
 **Files:**
 - Create: `scripts/x11ctl`
 - Create: `tests/test_x11ctl.py`
 
-- [ ] **Step 1: Write failing tests for config defaults and CLI parsing**
+- [ ] **Step 1: Write failing tests for Config, CLI parsing, tier logic, pidfile I/O, tiers file I/O, locking, preflight, port detection, env output, log rotation, xauth creation, and readiness probes**
+
+The test file starts with a module importer that loads the extensionless script:
 
 ```python
 # tests/test_x11ctl.py
-"""Unit tests for x11ctl pure logic. Import the script as a module."""
+"""Unit tests for x11ctl pure logic."""
 import importlib.util
+import os
 import sys
+import socket as _socket
 from pathlib import Path
 
-# Import x11ctl as a module (it's a script, not a package)
+import pytest
+
+
 def _import_x11ctl():
     spec = importlib.util.spec_from_file_location(
         "x11ctl", Path(__file__).parent.parent / "scripts" / "x11ctl"
     )
     mod = importlib.util.module_from_spec(spec)
-    # Prevent argparse from consuming pytest's args
     old_argv = sys.argv
     sys.argv = ["x11ctl"]
     try:
@@ -56,6 +65,8 @@ def _import_x11ctl():
 
 x11ctl = _import_x11ctl()
 
+
+# --- Config ---
 
 class TestConfig:
     def test_default_display(self):
@@ -111,6 +122,8 @@ class TestConfig:
         assert cfg.lock_file == "/tmp/.x11ctl.lock"
 
 
+# --- Tier logic ---
+
 class TestTierSets:
     def test_headless_implies(self):
         assert x11ctl.desired_tiers("headless") == {"headless"}
@@ -124,6 +137,24 @@ class TestTierSets:
     def test_all_tiers(self):
         assert x11ctl.desired_tiers("all") == {"headless", "xpra", "vnc"}
 
+    def test_reconcile_start_declarative(self):
+        """start --xpra when vnc was running: stop vnc, keep headless+xpra."""
+        old = {"headless", "xpra", "vnc"}
+        new = x11ctl.desired_tiers("xpra")
+        assert old - new == {"vnc"}  # to stop
+        assert new - old == set()    # to start (already running)
+
+    def test_reconcile_stop_subtractive(self):
+        """stop --xpra when all running: remove xpra, keep headless+vnc."""
+        old = {"headless", "xpra", "vnc"}
+        assert old - {"xpra"} == {"headless", "vnc"}
+
+    def test_reconcile_stop_headless_cascades(self):
+        """stop --headless: everything stops (cascade rule)."""
+        # Cascade is a policy decision, not a set op — tested in Task 4
+
+
+# --- CLI parsing ---
 
 class TestCLIParsing:
     def test_start_headless(self):
@@ -131,13 +162,9 @@ class TestCLIParsing:
         assert args.command == "start"
         assert args.headless is True
 
-    def test_start_all(self):
-        args = x11ctl.parse_args(["start", "--all"])
-        assert args.command == "start"
+    def test_start_all_bind_all(self):
+        args = x11ctl.parse_args(["start", "--all", "--bind-all"])
         assert args.all is True
-
-    def test_start_bind_all(self):
-        args = x11ctl.parse_args(["start", "--headless", "--bind-all"])
         assert args.bind_all is True
 
     def test_stop_vnc(self):
@@ -162,178 +189,9 @@ class TestCLIParsing:
         args = x11ctl.parse_args(["screenshot", "/tmp/out.png"])
         assert args.command == "screenshot"
         assert args.path == "/tmp/out.png"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py -v`
-Expected: FAIL — `scripts/x11ctl` does not exist yet.
-
-- [ ] **Step 3: Create x11ctl with Config, tier logic, and CLI parsing**
-
-```python
-#!/usr/local/bin/python3
-"""x11ctl — Manage X11 display stack inside FreeBSD jails.
-
-Single-file, stdlib-only. See docs/superpowers/specs/2026-04-05-x11-in-freebsd-jails-design.md
-"""
-from __future__ import annotations
-
-import argparse
-import os
-import sys
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-class Config:
-    """Runtime configuration from env vars with sensible defaults."""
-
-    def __init__(self) -> None:
-        self.display = os.environ.get("X11CTL_DISPLAY", ":99")
-        self.screen = os.environ.get("X11CTL_SCREEN", "1920x1080x24")
-        self.xauth = os.environ.get("X11CTL_XAUTH", "/tmp/.x11ctl-xauth")
-        self.xpra_port = int(os.environ.get("X11CTL_XPRA_PORT", "10000"))
-        self.vnc_port = int(os.environ.get("X11CTL_VNC_PORT", "5900"))
-        self.novnc_port = int(os.environ.get("X11CTL_NOVNC_PORT", "6080"))
-        self.bind = os.environ.get("X11CTL_BIND", "127.0.0.1")
-
-    @property
-    def display_number(self) -> int:
-        return int(self.display.lstrip(":"))
-
-    def pidfile(self, component: str) -> str:
-        return f"/tmp/.x11ctl-{component}.pid"
-
-    def logfile(self, component: str) -> str:
-        return f"/tmp/.x11ctl-{component}.log"
-
-    @property
-    def tiers_file(self) -> str:
-        return "/tmp/.x11ctl-tiers"
-
-    @property
-    def lock_file(self) -> str:
-        return "/tmp/.x11ctl.lock"
 
 
-# ---------------------------------------------------------------------------
-# Tier logic
-# ---------------------------------------------------------------------------
-
-TIER_IMPLIES: dict[str, set[str]] = {
-    "headless": {"headless"},
-    "xpra": {"headless", "xpra"},
-    "vnc": {"headless", "vnc"},
-    "all": {"headless", "xpra", "vnc"},
-}
-
-def desired_tiers(flag: str) -> set[str]:
-    """Return the set of tiers implied by a CLI flag."""
-    return TIER_IMPLIES[flag]
-
-
-# ---------------------------------------------------------------------------
-# CLI parsing
-# ---------------------------------------------------------------------------
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        prog="x11ctl",
-        description="Manage X11 display stack inside FreeBSD jails.",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    # start
-    p_start = sub.add_parser("start", help="Start X11 components")
-    p_start.add_argument("--headless", action="store_true")
-    p_start.add_argument("--xpra", action="store_true")
-    p_start.add_argument("--vnc", action="store_true")
-    p_start.add_argument("--all", action="store_true")
-    p_start.add_argument("--bind-all", action="store_true")
-
-    # stop
-    p_stop = sub.add_parser("stop", help="Stop X11 components")
-    p_stop.add_argument("--headless", action="store_true")
-    p_stop.add_argument("--xpra", action="store_true")
-    p_stop.add_argument("--vnc", action="store_true")
-    p_stop.add_argument("--all", action="store_true")
-
-    # status
-    sub.add_parser("status", help="Show component status")
-
-    # env
-    sub.add_parser("env", help="Print DISPLAY/XAUTHORITY exports")
-
-    # run
-    p_run = sub.add_parser("run", help="Run command with temporary Xvfb")
-    p_run.add_argument("run_command", nargs=argparse.REMAINDER)
-
-    # screenshot
-    p_ss = sub.add_parser("screenshot", help="Capture display to PNG")
-    p_ss.add_argument("path", help="Output PNG path")
-
-    # setup
-    p_setup = sub.add_parser("setup", help="Install packages")
-    p_setup.add_argument("--tier1", action="store_true")
-    p_setup.add_argument("--tier2", action="store_true")
-    p_setup.add_argument("--tier3", action="store_true")
-    p_setup.add_argument("--all", action="store_true")
-
-    # self-test (diagnostic)
-    p_test = sub.add_parser("self-test", help="Run self-test (diagnostic)")
-    p_test.add_argument("--tier1", action="store_true")
-    p_test.add_argument("--tier2", action="store_true")
-    p_test.add_argument("--tier3", action="store_true")
-    p_test.add_argument("--all", action="store_true")
-
-    return parser.parse_args(argv)
-
-
-# ---------------------------------------------------------------------------
-# Main (guard prevents execution on import)
-# ---------------------------------------------------------------------------
-
-def main() -> int:
-    args = parse_args()
-    print(f"x11ctl: {args.command} not yet implemented", file=sys.stderr)
-    return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-```
-
-- [ ] **Step 4: Make script executable**
-
-Run: `chmod +x scripts/x11ctl`
-
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py -v`
-Expected: All PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl skeleton with config, tier logic, CLI parsing"
-```
-
----
-
-### Task 2: Pidfile read/write and identity validation
-
-**Files:**
-- Modify: `scripts/x11ctl`
-- Modify: `tests/test_x11ctl.py`
-
-- [ ] **Step 1: Write failing tests for pidfile operations**
-
-```python
-# Add to tests/test_x11ctl.py
+# --- Pidfile I/O ---
 
 class TestPidfile:
     def test_write_and_read(self, tmp_path):
@@ -344,8 +202,7 @@ class TestPidfile:
         assert epoch == 1712345678
 
     def test_read_missing(self, tmp_path):
-        path = str(tmp_path / "missing.pid")
-        assert x11ctl.read_pidfile(path) is None
+        assert x11ctl.read_pidfile(str(tmp_path / "missing.pid")) is None
 
     def test_read_corrupt(self, tmp_path):
         path = str(tmp_path / "bad.pid")
@@ -355,107 +212,42 @@ class TestPidfile:
     def test_format_two_integers(self, tmp_path):
         path = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(path, 42, 9999999999)
-        content = Path(path).read_text()
-        assert content == "42 9999999999\n"
+        assert Path(path).read_text() == "42 9999999999\n"
 
-    def test_write_creates_with_excl(self, tmp_path):
+    def test_write_overwrites(self, tmp_path):
         path = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(path, 1, 1)
-        # Second write should remove old file first, not fail
         x11ctl.write_pidfile(path, 2, 2)
         pid, _ = x11ctl.read_pidfile(path)
         assert pid == 2
 
-    def test_symlink_rejected(self, tmp_path):
+    def test_write_rejects_symlink(self, tmp_path):
         target = tmp_path / "target"
         target.write_text("fake")
         link = tmp_path / "link.pid"
         link.symlink_to(target)
-        # write_pidfile should reject symlinks
-        import pytest
         with pytest.raises(OSError):
             x11ctl.write_pidfile(str(link), 1, 1)
-```
 
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestPidfile -v`
-Expected: FAIL — `write_pidfile` / `read_pidfile` not defined.
-
-- [ ] **Step 3: Implement pidfile functions**
-
-Add to `scripts/x11ctl` after the Config class:
-
-```python
-import time
-from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# Pidfile I/O
-# ---------------------------------------------------------------------------
-
-def write_pidfile(path: str, pid: int, created_epoch: int) -> None:
-    """Write pidfile atomically. Rejects symlinks via O_NOFOLLOW."""
-    # Remove existing file if it's a regular file
-    p = Path(path)
-    if p.exists():
-        if p.is_symlink():
-            raise OSError(f"Refusing to write pidfile: {path} is a symlink")
-        p.unlink()
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
-    try:
-        os.write(fd, f"{pid} {created_epoch}\n".encode())
-    finally:
-        os.close(fd)
+    def test_read_rejects_symlink(self, tmp_path):
+        """read_pidfile should also reject symlinks per spec O_NOFOLLOW."""
+        target = tmp_path / "target"
+        target.write_text("1234 1712345678\n")
+        link = tmp_path / "link.pid"
+        link.symlink_to(target)
+        assert x11ctl.read_pidfile(str(link)) is None
 
 
-def read_pidfile(path: str) -> tuple[int, int] | None:
-    """Read pidfile. Returns (pid, created_epoch) or None if missing/corrupt."""
-    try:
-        content = Path(path).read_text().strip()
-        parts = content.split()
-        if len(parts) != 2:
-            return None
-        return int(parts[0]), int(parts[1])
-    except (FileNotFoundError, ValueError, OSError):
-        return None
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestPidfile -v`
-Expected: All PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl pidfile read/write with symlink rejection"
-```
-
----
-
-### Task 3: Tiers file I/O and set operations
-
-**Files:**
-- Modify: `scripts/x11ctl`
-- Modify: `tests/test_x11ctl.py`
-
-- [ ] **Step 1: Write failing tests for tiers file operations**
-
-```python
-# Add to tests/test_x11ctl.py
+# --- Tiers file I/O ---
 
 class TestTiersFile:
     def test_write_and_read(self, tmp_path):
         path = str(tmp_path / "tiers")
         x11ctl.write_tiers(path, {"headless", "xpra"})
-        result = x11ctl.read_tiers(path)
-        assert result == {"headless", "xpra"}
+        assert x11ctl.read_tiers(path) == {"headless", "xpra"}
 
     def test_read_missing(self, tmp_path):
-        path = str(tmp_path / "missing")
-        assert x11ctl.read_tiers(path) is None
+        assert x11ctl.read_tiers(str(tmp_path / "missing")) is None
 
     def test_delete(self, tmp_path):
         path = str(tmp_path / "tiers")
@@ -464,122 +256,51 @@ class TestTiersFile:
         assert x11ctl.read_tiers(path) is None
 
     def test_delete_missing_is_safe(self, tmp_path):
-        path = str(tmp_path / "missing")
-        x11ctl.delete_tiers(path)  # should not raise
-
-    def test_reconcile_start_declarative(self):
-        """start --xpra when vnc was running: stop vnc, keep headless+xpra."""
-        old = {"headless", "xpra", "vnc"}
-        new = x11ctl.desired_tiers("xpra")
-        to_stop = old - new
-        to_start = new - old
-        assert to_stop == {"vnc"}
-        assert to_start == set()  # headless+xpra already running
-
-    def test_reconcile_stop_subtractive(self):
-        """stop --xpra when all running: remove xpra, keep headless+vnc."""
-        old = {"headless", "xpra", "vnc"}
-        to_remove = {"xpra"}
-        remaining = old - to_remove
-        assert remaining == {"headless", "vnc"}
-
-    def test_reconcile_stop_headless_cascades(self):
-        """stop --headless cascades: everything stops."""
-        old = {"headless", "xpra", "vnc"}
-        # headless cascade means stop everything
-        remaining = set()  # cascade rule
-        assert remaining == set()
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestTiersFile -v`
-Expected: FAIL — `write_tiers` / `read_tiers` / `delete_tiers` not defined.
-
-- [ ] **Step 3: Implement tiers file functions**
-
-Add to `scripts/x11ctl`:
-
-```python
-# ---------------------------------------------------------------------------
-# Tiers file I/O
-# ---------------------------------------------------------------------------
-
-def write_tiers(path: str, tiers: set[str]) -> None:
-    """Write active tiers set. Uses O_NOFOLLOW for symlink safety."""
-    p = Path(path)
-    if p.is_symlink():
-        raise OSError(f"Refusing to write tiers file: {path} is a symlink")
-    if p.exists():
-        p.unlink()
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
-    try:
-        os.write(fd, " ".join(sorted(tiers)).encode() + b"\n")
-    finally:
-        os.close(fd)
+        x11ctl.delete_tiers(str(tmp_path / "missing"))
 
 
-def read_tiers(path: str) -> set[str] | None:
-    """Read active tiers set. Returns None if missing."""
-    try:
-        content = Path(path).read_text().strip()
-        if not content:
-            return None
-        return set(content.split())
-    except (FileNotFoundError, OSError):
-        return None
+# --- Locking ---
+
+class TestLocking:
+    def test_lock_acquire_release(self, tmp_path):
+        lock_path = str(tmp_path / "test.lock")
+        lock_fd = x11ctl.acquire_lock(lock_path, exclusive=True)
+        assert lock_fd is not None
+        x11ctl.release_lock(lock_fd)
 
 
-def delete_tiers(path: str) -> None:
-    """Delete tiers file if it exists."""
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestTiersFile -v`
-Expected: All PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl tiers file I/O with set operations"
-```
-
----
-
-### Task 4: Locking, preflight checks, and env subcommand
-
-**Files:**
-- Modify: `scripts/x11ctl`
-- Modify: `tests/test_x11ctl.py`
-
-- [ ] **Step 1: Write failing tests for preflight and env**
-
-```python
-# Add to tests/test_x11ctl.py
-import subprocess
+# --- Preflight ---
 
 class TestPreflight:
     def test_find_binary_existing(self):
-        # python3 should always exist
         assert x11ctl.find_binary("python3") is not None
 
     def test_find_binary_missing(self):
         assert x11ctl.find_binary("nonexistent_binary_xyz") is None
 
-    def test_check_binaries_all_present(self):
-        missing = x11ctl.check_binaries(["python3", "sh"])
-        assert missing == []
-
     def test_check_binaries_some_missing(self):
         missing = x11ctl.check_binaries(["python3", "nonexistent_xyz"])
         assert missing == ["nonexistent_xyz"]
 
+
+# --- Port detection ---
+
+class TestPortCheck:
+    def test_available_port(self):
+        assert x11ctl.check_port_available("127.0.0.1", 59999) is True
+
+    def test_occupied_port(self):
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 59998))
+        sock.listen(1)
+        try:
+            assert x11ctl.check_port_available("127.0.0.1", 59998) is False
+        finally:
+            sock.close()
+
+
+# --- Env output ---
 
 class TestEnvOutput:
     def test_env_output(self):
@@ -589,210 +310,21 @@ class TestEnvOutput:
         assert "export XAUTHORITY=" in output
 
 
-class TestLocking:
-    def test_lock_acquire_release(self, tmp_path):
-        lock_path = str(tmp_path / "test.lock")
-        lock_fd = x11ctl.acquire_lock(lock_path, exclusive=True)
-        assert lock_fd is not None
-        x11ctl.release_lock(lock_fd)
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestPreflight tests/test_x11ctl.py::TestEnvOutput tests/test_x11ctl.py::TestLocking -v`
-Expected: FAIL — functions not defined.
-
-- [ ] **Step 3: Implement preflight, env, and locking**
-
-Add to `scripts/x11ctl`:
-
-```python
-import fcntl
-import shutil
-
-# ---------------------------------------------------------------------------
-# Preflight checks
-# ---------------------------------------------------------------------------
-
-TIER_BINARIES: dict[str, list[str]] = {
-    "headless": ["Xvfb", "xauth", "xdpyinfo"],
-    "xpra": ["xpra"],
-    "vnc": ["x11vnc", "websockify"],
-}
-
-def find_binary(name: str) -> str | None:
-    """Find a binary on PATH. Returns full path or None."""
-    return shutil.which(name)
-
-
-def check_binaries(names: list[str]) -> list[str]:
-    """Return list of missing binaries."""
-    return [n for n in names if find_binary(n) is None]
-
-
-# ---------------------------------------------------------------------------
-# Env output
-# ---------------------------------------------------------------------------
-
-def format_env(cfg: Config) -> str:
-    """Format environment exports for shell eval."""
-    return (
-        f'export DISPLAY="{cfg.display}"\n'
-        f'export XAUTHORITY="{cfg.xauth}"\n'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Locking
-# ---------------------------------------------------------------------------
-
-def acquire_lock(path: str, exclusive: bool = True) -> int:
-    """Acquire flock on path. Returns fd. Uses O_NOFOLLOW."""
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
-    try:
-        op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(fd, op)
-    except Exception:
-        os.close(fd)
-        raise
-    return fd
-
-
-def release_lock(fd: int) -> None:
-    """Release flock and close fd."""
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestPreflight tests/test_x11ctl.py::TestEnvOutput tests/test_x11ctl.py::TestLocking -v`
-Expected: All PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl preflight checks, env output, flock locking"
-```
-
----
-
-### Task 5: Port-conflict detection
-
-**Files:**
-- Modify: `scripts/x11ctl`
-- Modify: `tests/test_x11ctl.py`
-
-- [ ] **Step 1: Write failing tests for port checking**
-
-```python
-# Add to tests/test_x11ctl.py
-import socket as _socket
-
-class TestPortCheck:
-    def test_available_port(self):
-        # Use a high ephemeral port that's almost certainly free
-        assert x11ctl.check_port_available("127.0.0.1", 59999) is True
-
-    def test_occupied_port(self):
-        # Bind a port, then check it
-        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", 59998))
-        sock.listen(1)
-        try:
-            assert x11ctl.check_port_available("127.0.0.1", 59998) is False
-        finally:
-            sock.close()
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestPortCheck -v`
-Expected: FAIL — `check_port_available` not defined.
-
-- [ ] **Step 3: Implement port checking**
-
-Add to `scripts/x11ctl`:
-
-```python
-import socket
-import subprocess
-
-# ---------------------------------------------------------------------------
-# Port-conflict detection
-# ---------------------------------------------------------------------------
-
-def check_port_available(host: str, port: int) -> bool:
-    """Check if a port is available for binding. Returns True if free."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.bind((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        sock.close()
-
-
-def identify_port_user(port: int) -> str:
-    """Use sockstat to identify what's using a port. Returns description string."""
-    try:
-        result = subprocess.run(
-            ["sockstat", "-l", "-p", str(port)],
-            capture_output=True, text=True, timeout=5,
-        )
-        lines = result.stdout.strip().split("\n")
-        if len(lines) > 1:
-            return lines[1]  # First data line after header
-        return "unknown"
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "unknown (sockstat unavailable)"
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestPortCheck -v`
-Expected: All PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl port-conflict detection via socket.bind"
-```
-
----
-
-### Task 6: Process lifecycle — start headless (Tier 1)
-
-**Files:**
-- Modify: `scripts/x11ctl`
-- Modify: `tests/test_x11ctl.py`
-
-This is the core task — wiring up `start --headless` to actually launch Xvfb with readiness probes, pidfile management, and log rotation. Since it requires actual Xvfb binaries, the integration test checks are conditional on binary availability.
-
-- [ ] **Step 1: Write failing tests for process helpers**
-
-```python
-# Add to tests/test_x11ctl.py
+# --- Log rotation ---
 
 class TestLogRotation:
     def test_rotate_creates_prev(self, tmp_path):
         log = tmp_path / "test.log"
         log.write_text("old content")
         x11ctl.rotate_log(str(log))
-        prev = tmp_path / "test.log.prev"
-        assert prev.read_text() == "old content"
+        assert (tmp_path / "test.log.prev").read_text() == "old content"
         assert not log.exists()
 
     def test_rotate_missing_is_safe(self, tmp_path):
-        x11ctl.rotate_log(str(tmp_path / "missing.log"))  # no error
+        x11ctl.rotate_log(str(tmp_path / "missing.log"))
 
+
+# --- Xauth ---
 
 class TestXauthCreation:
     def test_creates_with_0600(self, tmp_path):
@@ -807,325 +339,805 @@ class TestXauthCreation:
         target.write_text("x")
         link = tmp_path / "xauth"
         link.symlink_to(target)
-        import pytest
         with pytest.raises(OSError):
             x11ctl.create_xauth_file(str(link))
 
 
-class TestReadinessProbe:
-    def test_probe_with_immediate_success(self):
-        """Test the probe loop logic with a callable that succeeds immediately."""
-        call_count = 0
-        def check():
-            nonlocal call_count
-            call_count += 1
-            return True
-        assert x11ctl.wait_ready(check, retries=3, delay=0.01) is True
-        assert call_count == 1
+# --- Readiness probes ---
 
-    def test_probe_with_eventual_success(self):
-        """Test probe that fails twice then succeeds."""
+class TestReadinessProbe:
+    def test_immediate_success(self):
+        assert x11ctl.wait_ready(lambda: True, retries=3, delay=0.01) is True
+
+    def test_eventual_success(self):
         attempts = []
         def check():
             attempts.append(1)
             return len(attempts) >= 3
         assert x11ctl.wait_ready(check, retries=5, delay=0.01) is True
-        assert len(attempts) == 3
 
-    def test_probe_timeout(self):
-        """Test probe that never succeeds."""
+    def test_timeout(self):
         assert x11ctl.wait_ready(lambda: False, retries=3, delay=0.01) is False
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestLogRotation tests/test_x11ctl.py::TestXauthCreation tests/test_x11ctl.py::TestReadinessProbe -v`
-Expected: FAIL — functions not defined.
+Run: `uv run python -m pytest tests/test_x11ctl.py -v`
+Expected: FAIL — `scripts/x11ctl` does not exist yet.
 
-- [ ] **Step 3: Implement process helpers**
+- [ ] **Step 3: Create x11ctl with ALL pure functions**
 
-Add to `scripts/x11ctl`:
+Create `scripts/x11ctl` containing: `Config`, `desired_tiers`, `parse_args`, `write_pidfile`, `read_pidfile`, `write_tiers`, `read_tiers`, `delete_tiers`, `acquire_lock`, `release_lock`, `find_binary`, `check_binaries`, `check_port_available`, `identify_port_user`, `format_env`, `rotate_log`, `create_xauth_file`, `wait_ready`, and a guarded `main()` stub. Exact implementations as specified in the spec (see spec sections: Display Configuration, PID Management, Tiers File, Port-in-use detection, Xauth, Log rotation). `read_pidfile` must reject symlinks (check `Path(path).is_symlink()` before reading).
 
-```python
-# ---------------------------------------------------------------------------
-# Log rotation
-# ---------------------------------------------------------------------------
+- [ ] **Step 4: Make executable and run tests**
 
-def rotate_log(path: str) -> None:
-    """Rename log to .prev if it exists."""
-    p = Path(path)
-    if p.exists() and not p.is_symlink():
-        prev = Path(path + ".prev")
-        if prev.exists():
-            prev.unlink()
-        p.rename(prev)
-
-
-# ---------------------------------------------------------------------------
-# Xauth
-# ---------------------------------------------------------------------------
-
-def create_xauth_file(path: str) -> None:
-    """Create empty xauth file with mode 0600. Rejects symlinks."""
-    p = Path(path)
-    if p.is_symlink():
-        raise OSError(f"Refusing to create xauth: {path} is a symlink")
-    if p.exists():
-        p.unlink()
-    fd = os.open(
-        path,
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-        0o600,
-    )
-    os.close(fd)
-
-
-# ---------------------------------------------------------------------------
-# Readiness probes
-# ---------------------------------------------------------------------------
-
-def wait_ready(
-    check: callable,
-    retries: int = 10,
-    delay: float = 0.5,
-) -> bool:
-    """Poll check() up to retries times with delay between. Returns True on success."""
-    for _ in range(retries):
-        if check():
-            return True
-        time.sleep(delay)
-    return False
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run python -m pytest tests/test_x11ctl.py::TestLogRotation tests/test_x11ctl.py::TestXauthCreation tests/test_x11ctl.py::TestReadinessProbe -v`
+Run: `chmod +x scripts/x11ctl && uv run python -m pytest tests/test_x11ctl.py -v`
 Expected: All PASS.
-
-- [ ] **Step 5: Implement start_headless, stop_component, and wire up main**
-
-Add to `scripts/x11ctl` the full `start_headless()`, `stop_component()`, `start_command()`, `stop_command()`, and update `main()`. This is the integration point — too large for inline code in the plan. The implementation should:
-
-1. `start_headless(cfg, bind_all)`:
-   - Clean stale X artifacts (`/tmp/.X{N}-lock`, `/tmp/.X11-unix/X{N}`)
-   - Check if Xvfb pidfile already valid (idempotent skip)
-   - Preflight check for `Xvfb`, `xauth`, `xdpyinfo` binaries
-   - Create xauth file, generate cookie via `xauth generate`
-   - Rotate log, launch `Xvfb` via `subprocess.Popen`, write pidfile
-   - Readiness probe via `xdpyinfo -display`
-   - On failure: rollback (kill Xvfb, remove pidfile/xauth)
-
-2. `stop_component(cfg, name)`:
-   - Read pidfile, validate PID identity
-   - SIGTERM → 3s wait → SIGKILL
-   - Remove pidfile
-
-3. `start_command(args, cfg)`:
-   - Determine desired tiers from flags
-   - Acquire exclusive lock
-   - Read current tiers, compute diff (stop excess, start missing)
-   - Write new tiers file
-   - Call `start_headless`, `start_xpra`, `start_vnc` as needed
-
-4. `stop_command(args, cfg)`:
-   - Acquire exclusive lock
-   - Read current tiers
-   - If `--headless`: cascade stop everything
-   - Else: remove named tier, stop its components
-   - Update or delete tiers file
-
-5. Wire `main()` to dispatch to `start_command`, `stop_command`, `status_command`, `env_command`, `run_command`, `screenshot_command`, `setup_command`.
-
-- [ ] **Step 6: Manual integration test (if Xvfb is available)**
-
-Run: `scripts/x11ctl start --headless && scripts/x11ctl status && scripts/x11ctl stop --headless`
-Expected: Xvfb starts, status shows healthy, stop tears down cleanly.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl start/stop headless with readiness probes and rollback"
-```
-
----
-
-### Task 7: Tier 2 (Xpra) and Tier 3 (VNC) start/stop
-
-**Files:**
-- Modify: `scripts/x11ctl`
-
-- [ ] **Step 1: Implement start_xpra(cfg, bind_all)**
-
-The function should:
-- Preflight check for `xpra` binary
-- Check port available for Xpra TCP
-- Rotate log, launch `xpra shadow :N --bind-tcp=HOST:PORT --html=on --daemon=no` with `XAUTHORITY` env var
-- Write pidfile
-- No readiness probe needed (Xpra logs to its own file; failure is visible in status)
-
-- [ ] **Step 2: Implement start_vnc(cfg, bind_all)**
-
-The function should:
-- Preflight check for `x11vnc` and `websockify` binaries
-- Check ports available for VNC and noVNC
-- Rotate logs for both x11vnc and websockify
-- Launch `x11vnc -display :N -rfbport PORT -shared -forever -noxdamage -localhost -auth XAUTH`
-- Readiness probe on VNC port via `socket.connect_ex`
-- Launch `websockify --listen HOST:PORT localhost:VNC_PORT --web=/usr/local/libexec/novnc`
-- Write pidfiles for both
-
-- [ ] **Step 3: Update start_command to handle all tiers**
-
-Wire `start_xpra` and `start_vnc` into the tier reconciliation logic in `start_command`.
-
-- [ ] **Step 4: Manual integration test (if packages available)**
-
-Run: `scripts/x11ctl start --all && scripts/x11ctl status && scripts/x11ctl stop --all`
-Expected: All 4 components start, status shows healthy, stop tears down cleanly.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/x11ctl
-git commit -m "feat: x11ctl Tier 2 (Xpra) and Tier 3 (VNC) start/stop"
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl skeleton with all pure functions and tests"
 ```
 
 ---
 
-### Task 8: status, run, screenshot, setup subcommands
+### Task 2: PID identity validation (`validate_pid`)
+
+The spec's primary defense against PID reuse. This MUST be implemented and tested before any process lifecycle code.
 
 **Files:**
 - Modify: `scripts/x11ctl`
 - Modify: `tests/test_x11ctl.py`
 
-- [ ] **Step 1: Implement status_command(cfg)**
-
-- Acquire shared lock
-- Read tiers file → expected components
-- For each expected component: validate pidfile, check process alive
-- For non-expected components: show "not started" (informational)
-- Print last 5 lines of each log
-- Exit 0 if all expected healthy, 1 if any expected down
-
-- [ ] **Step 2: Implement run_command(args, cfg)**
-
-- Create temporary display (`:$$` like the shell function)
-- Create temp xauth, launch Xvfb, readiness probe
-- Install SIGINT/SIGTERM handlers that forward to child and teardown
-- Run user command with `DISPLAY` and `XAUTHORITY` set
-- Capture exit code, teardown Xvfb, return exit code
-
-- [ ] **Step 3: Implement screenshot_command(args, cfg)**
-
-- Verify `import` binary exists (from ImageMagick)
-- Run `import -window root -display :N <path>`
-- Report success/failure
-
-- [ ] **Step 4: Implement setup_command(args, cfg)**
-
-- Check `os.geteuid() == 0`, fail if not root
-- Map tier flags to package lists
-- Run `pkg install -y <packages>`
-
-- [ ] **Step 5: Write test for run_command signal forwarding**
+- [ ] **Step 1: Write failing tests for validate_pid**
 
 ```python
-class TestRunCommand:
-    def test_format_env_for_run(self):
-        cfg = x11ctl.Config()
-        env = x11ctl.format_env(cfg)
-        assert "DISPLAY" in env
-        assert "XAUTHORITY" in env
+# Add to tests/test_x11ctl.py
+import subprocess
+
+class TestValidatePid:
+    def test_own_process_is_valid(self):
+        """Current process should validate against its own name and recent epoch."""
+        pid = os.getpid()
+        created = int(x11ctl.time.time())
+        comm = "python"  # ps -o comm= for python3 shows "python" or "python3"
+        # Get actual comm for this process
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True,
+        )
+        actual_comm = result.stdout.strip()
+        assert x11ctl.validate_pid(pid, created, actual_comm) is True
+
+    def test_dead_pid_is_invalid(self):
+        """A PID that doesn't exist should be invalid."""
+        assert x11ctl.validate_pid(99999999, int(x11ctl.time.time()), "fake") is False
+
+    def test_wrong_comm_is_invalid(self):
+        """Current PID but wrong process name should be invalid."""
+        pid = os.getpid()
+        created = int(x11ctl.time.time())
+        assert x11ctl.validate_pid(pid, created, "definitely_not_this") is False
+
+    def test_wrong_epoch_is_invalid(self):
+        """Current PID but epoch from a year ago should be invalid (age mismatch)."""
+        pid = os.getpid()
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True,
+        )
+        comm = result.stdout.strip()
+        ancient_epoch = int(x11ctl.time.time()) - 365 * 86400  # 1 year ago
+        assert x11ctl.validate_pid(pid, ancient_epoch, comm) is False
 ```
 
-- [ ] **Step 6: Run all tests**
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestValidatePid -v`
+Expected: FAIL — `validate_pid` not defined.
+
+- [ ] **Step 3: Implement validate_pid**
+
+Add to `scripts/x11ctl`:
+
+```python
+# ---------------------------------------------------------------------------
+# PID identity validation
+# ---------------------------------------------------------------------------
+
+def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
+    """Validate that a PID is alive, has the expected process name, and age matches.
+
+    Uses 3-factor check:
+    1. os.kill(pid, 0) — is the process alive?
+    2. ps -p <pid> -o comm= — does the process name match?
+    3. ps -p <pid> -o etimes= vs time.time() - created_epoch — age match within ±5s?
+    """
+    # Check 1: alive
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+
+    # Check 2: process name
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=5,
+        )
+        actual_comm = result.stdout.strip()
+        if not actual_comm or actual_comm != expected_comm:
+            return False
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+    # Check 3: age match
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes="],
+            capture_output=True, text=True, timeout=5,
+        )
+        etimes = int(result.stdout.strip())
+        expected_age = int(time.time()) - created_epoch
+        if abs(etimes - expected_age) > 5:
+            return False
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return False
+
+    return True
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestValidatePid -v`
+Expected: All PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl validate_pid with 3-factor PID identity check"
+```
+
+---
+
+### Task 3: stop_component — kill escalation with PID validation
+
+**Files:**
+- Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
+
+- [ ] **Step 1: Write failing tests for stop_component**
+
+```python
+# Add to tests/test_x11ctl.py
+import signal
+
+class TestStopComponent:
+    def test_stop_running_process(self, tmp_path):
+        """Start a sleep process, write its pidfile, then stop it."""
+        proc = subprocess.Popen(["sleep", "60"])
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, proc.pid, int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, "sleep")
+        assert result is True
+        assert proc.poll() is not None  # process is dead
+        assert not Path(pidfile).exists()  # pidfile cleaned up
+
+    def test_stop_already_dead(self, tmp_path):
+        """Stop with pidfile pointing to dead process: just clean up."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 99999999, int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, "fake")
+        assert result is True  # cleaned up successfully
+        assert not Path(pidfile).exists()
+
+    def test_stop_no_pidfile(self, tmp_path):
+        """Stop when no pidfile exists: nothing to do."""
+        pidfile = str(tmp_path / "missing.pid")
+        result = x11ctl.stop_component(pidfile, "fake")
+        assert result is True
+
+    def test_stop_stale_pid_different_process(self, tmp_path):
+        """Pidfile points to a PID that's alive but is a different process."""
+        # Use our own PID (python) but claim it should be "Xvfb"
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, os.getpid(), int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, "Xvfb")
+        assert result is True  # pidfile cleaned up (stale)
+        assert not Path(pidfile).exists()
+        # But our process (python) should NOT have been killed
+        assert os.getpid() > 0  # we're still alive
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestStopComponent -v`
+Expected: FAIL — `stop_component` not defined.
+
+- [ ] **Step 3: Implement stop_component**
+
+```python
+# ---------------------------------------------------------------------------
+# Process lifecycle — stop
+# ---------------------------------------------------------------------------
+
+def stop_component(pidfile_path: str, expected_comm: str) -> bool:
+    """Stop a component by reading its pidfile, validating identity, and killing.
+
+    Returns True on success (or nothing to do). False on unexpected error.
+    """
+    data = read_pidfile(pidfile_path)
+    if data is None:
+        return True  # no pidfile = nothing to stop
+
+    pid, created_epoch = data
+
+    # Validate identity before killing
+    if not validate_pid(pid, created_epoch, expected_comm):
+        # Stale pidfile — just clean up
+        try:
+            os.unlink(pidfile_path)
+        except FileNotFoundError:
+            pass
+        return True
+
+    # Kill: SIGTERM → wait → SIGKILL
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Died between validate and kill
+        try:
+            os.unlink(pidfile_path)
+        except FileNotFoundError:
+            pass
+        return True
+
+    # Poll until dead (up to 3s)
+    for _ in range(30):
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+    else:
+        # Still alive after 3s — SIGKILL
+        try:
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            pass
+
+    # Clean up pidfile
+    try:
+        os.unlink(pidfile_path)
+    except FileNotFoundError:
+        pass
+    return True
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestStopComponent -v`
+Expected: All PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl stop_component with kill escalation and PID validation"
+```
+
+---
+
+### Task 4: Tier reconciliation — start_command and stop_command core logic
+
+The declarative start / subtractive stop dispatcher. Tests use mock components to verify reconciliation logic without real binaries.
+
+**Files:**
+- Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
+
+- [ ] **Step 1: Write failing tests for tier reconciliation**
+
+```python
+# Add to tests/test_x11ctl.py
+
+class TestTierReconciliation:
+    def test_start_xpra_computes_correct_diff(self):
+        """start --xpra when vnc was running: stop vnc, start nothing new (headless+xpra exist)."""
+        old_tiers = {"headless", "xpra", "vnc"}
+        new_tiers = x11ctl.desired_tiers("xpra")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == {"vnc"}
+        assert to_start == set()
+
+    def test_start_all_from_headless(self):
+        """start --all when only headless: start xpra + vnc."""
+        old_tiers = {"headless"}
+        new_tiers = x11ctl.desired_tiers("all")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == set()
+        assert to_start == {"xpra", "vnc"}
+
+    def test_start_headless_from_all(self):
+        """start --headless when all running: stop xpra + vnc."""
+        old_tiers = {"headless", "xpra", "vnc"}
+        new_tiers = x11ctl.desired_tiers("headless")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == {"xpra", "vnc"}
+        assert to_start == set()
+
+    def test_start_from_nothing(self):
+        """start --xpra with nothing running."""
+        old_tiers = set()
+        new_tiers = x11ctl.desired_tiers("xpra")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == set()
+        assert to_start == {"headless", "xpra"}
+
+    def test_cascade_stop_headless(self):
+        """stop --headless cascades: returns all current tiers as to_stop."""
+        current = {"headless", "xpra", "vnc"}
+        to_stop = x11ctl.compute_cascade_stop("headless", current)
+        assert to_stop == {"headless", "xpra", "vnc"}
+
+    def test_cascade_stop_vnc(self):
+        """stop --vnc: only vnc stops."""
+        current = {"headless", "xpra", "vnc"}
+        to_stop = x11ctl.compute_cascade_stop("vnc", current)
+        assert to_stop == {"vnc"}
+
+    def test_cascade_stop_xpra(self):
+        """stop --xpra: only xpra stops."""
+        current = {"headless", "xpra", "vnc"}
+        to_stop = x11ctl.compute_cascade_stop("xpra", current)
+        assert to_stop == {"xpra"}
+
+    def test_tier_to_components(self):
+        """Map tier names to process component names for stop."""
+        assert x11ctl.tier_components("headless") == ["xvfb"]
+        assert x11ctl.tier_components("xpra") == ["xpra"]
+        assert set(x11ctl.tier_components("vnc")) == {"x11vnc", "websockify"}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestTierReconciliation -v`
+Expected: FAIL — `compute_tier_diff`, `compute_cascade_stop`, `tier_components` not defined.
+
+- [ ] **Step 3: Implement reconciliation functions**
+
+```python
+# ---------------------------------------------------------------------------
+# Tier reconciliation
+# ---------------------------------------------------------------------------
+
+TIER_COMPONENTS: dict[str, list[str]] = {
+    "headless": ["xvfb"],
+    "xpra": ["xpra"],
+    "vnc": ["x11vnc", "websockify"],
+}
+
+# Stop order: viewers first, then display
+STOP_ORDER = ["websockify", "x11vnc", "xpra", "xvfb"]
+
+
+def compute_tier_diff(
+    old_tiers: set[str], new_tiers: set[str]
+) -> tuple[set[str], set[str]]:
+    """Compute which tiers to stop and start for a declarative start.
+
+    Returns (to_stop, to_start).
+    """
+    return old_tiers - new_tiers, new_tiers - old_tiers
+
+
+def compute_cascade_stop(tier: str, current: set[str]) -> set[str]:
+    """Compute which tiers to stop. Headless cascades everything."""
+    if tier == "headless" or tier == "all":
+        return set(current)
+    return {tier} & current
+
+
+def tier_components(tier: str) -> list[str]:
+    """Map a tier name to its component process names."""
+    return TIER_COMPONENTS.get(tier, [])
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestTierReconciliation -v`
+Expected: All PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl tier reconciliation (declarative start, cascade stop)"
+```
+
+---
+
+### Task 5: start_headless — launch Xvfb with rollback
+
+Wire up the actual process launch for Tier 1. Integration test conditional on Xvfb being available.
+
+**Files:**
+- Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
+
+- [ ] **Step 1: Write test for stale artifact cleanup**
+
+```python
+# Add to tests/test_x11ctl.py
+
+class TestStaleCleanup:
+    def test_clean_stale_x_artifacts(self, tmp_path, monkeypatch):
+        """Stale lock and socket should be removed when no matching process."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("12345\n")
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+
+        x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert not lock.exists()
+        assert not socket_file.exists()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestStaleCleanup -v`
+Expected: FAIL — `clean_stale_x_artifacts` not defined.
+
+- [ ] **Step 3: Implement clean_stale_x_artifacts and start_headless**
+
+```python
+# ---------------------------------------------------------------------------
+# Stale artifact cleanup
+# ---------------------------------------------------------------------------
+
+def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> None:
+    """Remove stale X server lock and socket files if no matching Xvfb is running."""
+    lock_path = Path(tmp_dir) / f".X{display_num}-lock"
+    socket_path = Path(tmp_dir) / ".X11-unix" / f"X{display_num}"
+
+    for p in (lock_path, socket_path):
+        if p.exists() and not p.is_symlink():
+            p.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Start headless (Tier 1)
+# ---------------------------------------------------------------------------
+
+def start_headless(cfg: Config, started: list[str]) -> bool:
+    """Start Xvfb. On failure, returns False (caller handles rollback).
+
+    Appends 'xvfb' to `started` list on success for rollback tracking.
+    """
+    pidfile = cfg.pidfile("xvfb")
+
+    # Idempotent: check if already running
+    data = read_pidfile(pidfile)
+    if data is not None:
+        pid, epoch = data
+        if validate_pid(pid, epoch, "Xvfb"):
+            return True  # already running
+
+    # Preflight
+    missing = check_binaries(["Xvfb", "xauth", "xdpyinfo"])
+    if missing:
+        print(f"Error: missing required commands: {', '.join(missing)}", file=sys.stderr)
+        print(f"  Run: pkg install {' '.join(missing)}", file=sys.stderr)
+        return False
+
+    # Clean stale artifacts
+    clean_stale_x_artifacts(cfg.display_number)
+
+    # Create xauth
+    create_xauth_file(cfg.xauth)
+
+    # Generate xauth cookie
+    subprocess.run(
+        ["xauth", "-f", cfg.xauth, "generate", cfg.display, ".", "trusted"],
+        capture_output=True, timeout=5,
+    )
+
+    # Rotate log
+    logfile = cfg.logfile("xvfb")
+    rotate_log(logfile)
+
+    # Launch Xvfb
+    log_fd = os.open(logfile, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
+    proc = subprocess.Popen(
+        ["Xvfb", cfg.display, "-screen", "0", cfg.screen, "-auth", cfg.xauth],
+        stdout=log_fd, stderr=log_fd,
+    )
+    os.close(log_fd)
+
+    # Write pidfile
+    write_pidfile(pidfile, proc.pid, int(time.time()))
+    started.append("xvfb")
+
+    # Readiness probe
+    def check_display():
+        r = subprocess.run(
+            ["xdpyinfo", "-display", cfg.display],
+            capture_output=True, env={**os.environ, "XAUTHORITY": cfg.xauth},
+            timeout=5,
+        )
+        return r.returncode == 0
+
+    if not wait_ready(check_display, retries=10, delay=0.5):
+        print(f"Error: Xvfb failed to start. See {logfile}", file=sys.stderr)
+        return False
+
+    return True
+```
+
+- [ ] **Step 4: Run tests**
 
 Run: `uv run python -m pytest tests/test_x11ctl.py -v`
 Expected: All PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Integration test (conditional)**
+
+Run: `which Xvfb && scripts/x11ctl start --headless && scripts/x11ctl status && scripts/x11ctl stop --headless || echo "Xvfb not available, skipping"`
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl status, run, screenshot, setup subcommands"
+git commit -m "feat: x11ctl start_headless with readiness probes and rollback"
 ```
 
 ---
 
-### Task 9: self-test subcommand
+### Task 6: Wire up start_command, stop_command, status_command with full dispatch
+
+Connect tier reconciliation to actual process lifecycle. This is the integration glue.
 
 **Files:**
 - Modify: `scripts/x11ctl`
 
-- [ ] **Step 1: Implement self_test_command(args, cfg)**
+- [ ] **Step 1: Implement start_command**
 
-The self-test exercises acceptance criteria programmatically:
+The function should:
+1. Acquire exclusive lock
+2. Determine desired tiers from CLI flags
+3. If `--bind-all`, set `cfg.bind = "0.0.0.0"`
+4. Read current tiers file (or empty set if missing)
+5. Compute diff: `to_stop`, `to_start`
+6. Stop excess tiers (in STOP_ORDER)
+7. Start missing tiers (headless first, then viewers)
+8. Write new tiers file
+9. On any start failure: rollback all started-in-this-invocation components, delete tiers file
 
-- `--tier1`: start headless → xdpyinfo → screenshot → stop → verify cleanup
-- `--tier2`: start xpra → check port 10000 responds → stop
-- `--tier3`: start vnc → check port 5900 responds → stop
-- `--all`: all above + idempotency (start/stop/start) + failure paths:
-  - Stale PID recovery
-  - Partial-start rollback
-  - Xauth symlink rejection
-  - Status with partial tiers
+- [ ] **Step 2: Implement stop_command**
 
-Each test prints PASS/FAIL with description. Overall exit 0 if all pass, 1 if any fail.
+The function should:
+1. Acquire exclusive lock
+2. Read current tiers
+3. Compute cascade stop set
+4. Stop components in STOP_ORDER
+5. Update or delete tiers file
 
-- [ ] **Step 2: Manual run**
+- [ ] **Step 3: Implement status_command**
 
-Run: `scripts/x11ctl self-test --tier1`
-Expected: All checks pass (if Xvfb is installed).
+1. Acquire shared lock
+2. Read tiers file → expected components
+3. For each expected component: validate pidfile
+4. Print status table with last 5 log lines
+5. Exit 0 if all expected healthy, 1 if any expected down
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Wire main() to dispatch all subcommands**
+
+Update `main()` to call `start_command`, `stop_command`, `status_command`, `env_command` (prints `format_env`), `screenshot_command`, `run_command`, `setup_command`.
+
+- [ ] **Step 5: Integration test**
+
+Run: `scripts/x11ctl start --headless && scripts/x11ctl status && scripts/x11ctl stop --headless && scripts/x11ctl status`
+Expected: Start succeeds, status shows healthy (exit 0), stop succeeds, status shows nothing (exit 0 — no tiers file).
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/x11ctl
-git commit -m "feat: x11ctl self-test diagnostic subcommand"
+git commit -m "feat: x11ctl start/stop/status with tier reconciliation and rollback"
 ```
 
 ---
 
-### Task 10: Runbook
+### Task 7: Tier 2 — Xpra start/stop
+
+**Files:**
+- Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
+
+- [ ] **Step 1: Write test for Xpra command assembly**
+
+```python
+class TestXpraCommand:
+    def test_xpra_command_localhost(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_xpra_command(cfg)
+        assert cmd[0] == "xpra"
+        assert "shadow" in cmd
+        assert "--daemon=no" in cmd
+        assert f"--bind-tcp=127.0.0.1:{cfg.xpra_port}" in cmd
+        assert "--html=on" in cmd
+
+    def test_xpra_command_bind_all(self):
+        cfg = x11ctl.Config()
+        cfg.bind = "0.0.0.0"
+        cmd = x11ctl.build_xpra_command(cfg)
+        assert f"--bind-tcp=0.0.0.0:{cfg.xpra_port}" in cmd
+
+    def test_xpra_env_has_xauthority(self):
+        cfg = x11ctl.Config()
+        env = x11ctl.build_xpra_env(cfg)
+        assert env["XAUTHORITY"] == cfg.xauth
+```
+
+- [ ] **Step 2: Implement build_xpra_command, build_xpra_env, start_xpra**
+
+- [ ] **Step 3: Run tests, commit**
+
+```bash
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl Tier 2 Xpra start/stop"
+```
+
+---
+
+### Task 8: Tier 3 — VNC start/stop
+
+**Files:**
+- Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
+
+- [ ] **Step 1: Write test for VNC command assembly**
+
+```python
+class TestVncCommand:
+    def test_x11vnc_command(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_x11vnc_command(cfg)
+        assert "x11vnc" in cmd
+        assert "-noxdamage" in cmd
+        assert "-localhost" in cmd
+        assert f"-rfbport" in cmd
+
+    def test_websockify_command(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_websockify_command(cfg)
+        assert "websockify" in cmd
+        assert "--web=/usr/local/libexec/novnc" in cmd
+
+    def test_x11vnc_no_localhost_with_bind_all(self):
+        cfg = x11ctl.Config()
+        cfg.bind = "0.0.0.0"
+        cmd = x11ctl.build_x11vnc_command(cfg)
+        assert "-localhost" not in cmd
+```
+
+- [ ] **Step 2: Implement build_x11vnc_command, build_websockify_command, start_vnc**
+
+- [ ] **Step 3: Run tests, commit**
+
+```bash
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl Tier 3 VNC/noVNC start/stop"
+```
+
+---
+
+### Task 9: run subcommand with signal forwarding
+
+**Files:**
+- Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
+
+- [ ] **Step 1: Write test for run_command cleanup**
+
+```python
+class TestRunCommand:
+    def test_run_returns_child_exit_code(self):
+        """x11ctl run should return the child's exit code."""
+        # Test the helper that extracts the logic
+        assert x11ctl.run_exit_code(0) == 0
+        assert x11ctl.run_exit_code(42) == 42
+
+    @pytest.mark.skipif(
+        x11ctl.find_binary("Xvfb") is None,
+        reason="Xvfb not installed",
+    )
+    def test_run_creates_and_tears_down_display(self, tmp_path):
+        """run should create a temp display and tear it down after."""
+        # This is an integration test
+        cfg = x11ctl.Config()
+        cfg.display = f":{os.getpid()}"  # unique display
+        cfg.xauth = str(tmp_path / "xauth")
+        rc = x11ctl.run_with_temp_display(cfg, ["xdpyinfo"])
+        assert rc == 0
+        # After run, Xvfb should be dead
+        assert not Path(cfg.xauth).exists()
+```
+
+- [ ] **Step 2: Implement run_with_temp_display with signal forwarding**
+
+The function creates a temp Xvfb, registers SIGINT/SIGTERM handlers that forward to child and teardown, runs the user command, and returns its exit code.
+
+- [ ] **Step 3: Run tests, commit**
+
+```bash
+git add scripts/x11ctl tests/test_x11ctl.py
+git commit -m "feat: x11ctl run subcommand with signal forwarding"
+```
+
+---
+
+### Task 10: screenshot, setup, self-test subcommands
+
+**Files:**
+- Modify: `scripts/x11ctl`
+
+- [ ] **Step 1: Implement screenshot_command**
+
+Verify `import` binary exists, run `import -window root -display :N <path>`, report success/failure.
+
+- [ ] **Step 2: Implement setup_command**
+
+Check `os.geteuid() == 0`, map tier flags to package lists, run `pkg install -y`.
+
+- [ ] **Step 3: Implement self_test_command**
+
+Exercise acceptance criteria programmatically. `--tier1`: start/xdpyinfo/screenshot/stop. `--all`: adds idempotency, stale PID recovery, partial rollback, symlink rejection, partial-tier status.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/x11ctl
+git commit -m "feat: x11ctl screenshot, setup, self-test subcommands"
+```
+
+---
+
+### Task 11: Runbook
 
 **Files:**
 - Create: `docs/x11-in-freebsd-jails.md`
 
 - [ ] **Step 1: Write the runbook**
 
-Follow the structure defined in the spec (sections 1-10): Overview, Prerequisites, Simplest Path, Tier 1-3, x11ctl Reference, Recipes, Verification, Troubleshooting. Include the `xvfb_run` shell function from the spec. Include complete command examples for every recipe.
+Follow the spec's 10-section structure: Overview, Prerequisites, Simplest Path (xvfb_run shell function), Tier 1-3, x11ctl Reference, Recipes, Verification, Troubleshooting. All code blocks must be copy-pasteable and match the actual x11ctl interface.
 
-- [ ] **Step 2: Verify all code blocks are copy-pasteable**
-
-Read through every code block and verify the commands match the actual `x11ctl` interface implemented in Tasks 1-9.
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
 git add docs/x11-in-freebsd-jails.md
-git commit -m "docs: X11 in FreeBSD jails runbook with all tiers, recipes, troubleshooting"
+git commit -m "docs: X11 in FreeBSD jails runbook"
 ```
 
 ---
 
-### Task 11: Final integration and cleanup
-
-**Files:**
-- Modify: `scripts/x11ctl`
-- Modify: `tests/test_x11ctl.py`
+### Task 12: Final integration and cleanup
 
 - [ ] **Step 1: Run full test suite**
 
 Run: `uv run python -m pytest tests/test_x11ctl.py -v`
 Expected: All PASS.
 
-- [ ] **Step 2: Run self-test if in jail with packages**
+- [ ] **Step 2: Run self-test if binaries available**
 
 Run: `scripts/x11ctl self-test --all`
-Expected: All checks pass.
 
-- [ ] **Step 3: Verify script is executable and has correct shebang**
+- [ ] **Step 3: Verify executable permissions and shebang**
 
 Run: `head -1 scripts/x11ctl && ls -la scripts/x11ctl`
 Expected: `#!/usr/local/bin/python3` and `-rwxr-xr-x`
