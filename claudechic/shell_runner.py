@@ -171,8 +171,10 @@ def _run_in_pty_with_cancel(
                     if data:
                         output += data
                     else:
+                        mark_exit_detected()
                         break
                 except OSError:
+                    mark_exit_detected()
                     break
 
         os.close(master_fd)

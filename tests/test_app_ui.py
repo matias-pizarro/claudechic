@@ -680,7 +680,6 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
         def cancel(self) -> None:
             self.cancelled = True
 
-    elapsed = 0.0
     tip_delay = 0.0
     tip_callback = None
     tip_args = ()
@@ -697,30 +696,28 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
     fake_loop = MagicMock()
     fake_loop.call_later.side_effect = fake_call_later
 
-    def fake_select(_rlist, _wlist, _xlist, timeout):
-        nonlocal elapsed
-        elapsed += timeout
+    def fake_select(_rlist, _wlist, _xlist, _timeout):
+        return ([10], [], [])
+
+    handle_ref = [None]
+    proc = MagicMock()
+    proc.pid = 123
+    proc.returncode = 0
+    proc.poll.return_value = None
+
+    def fake_wait():
         handle = handle_ref[0]
         if (
             handle is not None
             and not handle.cancelled
             and not handle.fired
             and tip_callback is not None
-            and elapsed >= tip_delay
         ):
             handle.fired = True
             tip_callback(*tip_args)
-        return ([], [], [])
+        return 0
 
-    def fake_poll():
-        return 0 if elapsed >= 0.95 else None
-
-    handle_ref = [None]
-    proc = MagicMock()
-    proc.pid = 123
-    proc.returncode = 0
-    proc.poll.side_effect = fake_poll
-    proc.wait.return_value = 0
+    proc.wait.side_effect = fake_wait
 
     async with app.run_test() as pilot:
         with (
@@ -729,6 +726,7 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
             patch("claudechic.shell_runner.pty.openpty", return_value=(10, 11)),
             patch("claudechic.shell_runner.subprocess.Popen", return_value=proc),
             patch("claudechic.shell_runner.select.select", side_effect=fake_select) as mock_select,
+            patch("claudechic.shell_runner.os.read", return_value=b""),
             patch("claudechic.shell_runner.os.close"),
         ):
             app.run_shell_command(
@@ -742,8 +740,8 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
 
         fake_loop.call_later.assert_called_once()
         assert fake_loop.call_later.call_args.args[0] == 1.0
-        assert mock_select.call_count >= 2
-        assert proc.poll.call_count >= 2
+        mock_select.assert_called_once()
+        proc.wait.assert_called_once()
         assert not any(
             call.args and call.args[0] == "Tip: Use -i flag for interactive commands"
             for call in mock_notify.call_args_list
