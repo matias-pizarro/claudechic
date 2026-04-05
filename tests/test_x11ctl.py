@@ -296,6 +296,12 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="must be an integer"):
             x11ctl.Config()
 
+    def test_port_empty_string_rejected(self, monkeypatch):
+        """Empty port env var must error, not silently use default."""
+        monkeypatch.setenv("X11CTL_VNC_PORT", "")
+        with pytest.raises(ValueError, match="must be an integer"):
+            x11ctl.Config()
+
     def test_bind_invalid_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_BIND", "not-an-ip")
         with pytest.raises(ValueError, match="valid IPv4"):

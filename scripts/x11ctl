@@ -30,9 +30,12 @@ from typing import Callable, Optional
 # ---------------------------------------------------------------------------
 
 def _parse_port_env(name: str, default: int) -> int:
-    """Parse a port number from an env var with a user-friendly error."""
-    raw = os.environ.get(name, "")
-    if not raw:
+    """Parse a port number from an env var with a user-friendly error.
+
+    Distinguishes unset (returns default) from empty string (errors).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
         return default
     try:
         return int(raw)
