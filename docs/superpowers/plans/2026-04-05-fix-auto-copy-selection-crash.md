@@ -97,12 +97,11 @@ Expected: `test_check_and_copy_selection_handles_index_error` PASS (existing qui
 ### Task 2: Implement the shared helper and wire both call sites
 
 **Files:**
-- Modify: `claudechic/app.py:1453-1460` (`action_copy_selection`)
-- Modify: `claudechic/app.py:1584-1598` (`_copy_failed_notified`, `_check_and_copy_selection`)
+- Modify: `claudechic/app.py` — methods `action_copy_selection` and `_check_and_copy_selection`, attribute `_copy_failed_notified`
 
 - [ ] **Step 3: Add `_safe_get_selected_text` method**
 
-Add this method to `ChatApp` in `claudechic/app.py`, just before `_copy_failed_notified` (before line 1584):
+Add this method to `ChatApp` in `claudechic/app.py`, just before the `_copy_failed_notified` class attribute:
 
 ```python
     def _safe_get_selected_text(self) -> str | None:
@@ -116,7 +115,7 @@ Add this method to `ChatApp` in `claudechic/app.py`, just before `_copy_failed_n
 
 - [ ] **Step 4: Update `action_copy_selection` to use the helper**
 
-Replace lines 1453-1460 of `claudechic/app.py`:
+Replace the `action_copy_selection` method in `claudechic/app.py`:
 
 ```python
     def action_copy_selection(self) -> None:
@@ -131,7 +130,7 @@ Replace lines 1453-1460 of `claudechic/app.py`:
 
 - [ ] **Step 5: Update `_check_and_copy_selection` to use the helper**
 
-Replace lines 1586-1598 of `claudechic/app.py`:
+Replace the `_check_and_copy_selection` method in `claudechic/app.py`:
 
 ```python
     def _check_and_copy_selection(self) -> None:
@@ -195,9 +194,10 @@ async def test_mouse_up_debounce_cancels_previous_timer(mock_sdk):
 
         with patch.object(app, "set_timer", side_effect=lambda *a, **k: next(timers)):
             # Simulate two mouse-up events
+            # MouseUp(widget, x, y, delta_x, delta_y, button, shift, meta, ctrl, ...)
             from textual.events import MouseUp
 
-            event = MouseUp(0, 0, 0, 0, 0, False, False, False, screen_x=0, screen_y=0)
+            event = MouseUp(None, 0, 0, 0, 0, 0, False, False, False, screen_x=0, screen_y=0)
             app.on_mouse_up(event)
             assert app._copy_timer is mock_timer_1
 
@@ -207,8 +207,15 @@ async def test_mouse_up_debounce_cancels_previous_timer(mock_sdk):
 
 
 @pytest.mark.asyncio
-async def test_old_timer_callback_does_not_clobber_new_timer(mock_sdk):
-    """Old callback firing does not clear a newer _copy_timer reference."""
+async def test_check_and_copy_selection_does_not_clear_copy_timer(mock_sdk):
+    """Regression guard: _check_and_copy_selection must never clear _copy_timer.
+
+    If someone adds self._copy_timer = None to the callback, it would
+    introduce a handle-clobbering race where an old callback firing after
+    a newer timer is stored would lose the new timer reference.
+    This test passes trivially today (the callback doesn't touch _copy_timer),
+    but guards against that regression.
+    """
     app = ChatApp()
     async with app.run_test() as pilot:
         mock_new_timer = MagicMock()
@@ -228,23 +235,23 @@ async def test_old_timer_callback_does_not_clobber_new_timer(mock_sdk):
 
 Run: `.venv/bin/python -m pytest tests/test_app_ui.py::test_mouse_up_debounce_cancels_previous_timer tests/test_app_ui.py::test_old_timer_callback_does_not_clobber_new_timer -v`
 
-Expected: Both FAIL — `_copy_timer` attribute does not exist, `on_mouse_up` does not cancel previous timer.
+Expected: `test_mouse_up_debounce_cancels_previous_timer` FAIL (`_copy_timer` attribute does not exist, `on_mouse_up` does not cancel previous timer). `test_check_and_copy_selection_does_not_clear_copy_timer` PASS (regression guard — the callback already does not touch `_copy_timer`).
 
 ### Task 4: Implement timer debounce
 
 **Files:**
-- Modify: `claudechic/app.py:1500-1515` (`on_mouse_up`), `claudechic/app.py:1584` (add `_copy_timer`)
+- Modify: `claudechic/app.py` — method `on_mouse_up`, attribute area near `_copy_failed_notified`
 
 - [ ] **Step 11: Add `_copy_timer` attribute and update `on_mouse_up`**
 
-Add `_copy_timer` next to `_copy_failed_notified` in `claudechic/app.py` (around line 1584):
+Add `_copy_timer` next to `_copy_failed_notified` in `claudechic/app.py`:
 
 ```python
     _copy_failed_notified: bool = False
     _copy_timer: Timer | None = None
 ```
 
-Replace the last line of `on_mouse_up` (line 1515 — `self.set_timer(0.05, self._check_and_copy_selection)`):
+Replace the last line of `on_mouse_up` (`self.set_timer(0.05, self._check_and_copy_selection)`):
 
 ```python
         if self._copy_timer is not None:
@@ -291,7 +298,12 @@ Append to `tests/test_app_ui.py`:
 ```python
 @pytest.mark.asyncio
 async def test_check_and_copy_selection_copies_on_success(mock_sdk):
-    """Auto-copy calls copy_to_clipboard and shows 'Copied' on success."""
+    """Auto-copy calls copy_to_clipboard and shows 'Copied' on success.
+
+    Note: The "Copied" notification has timeout=1. Assertions run immediately
+    after pilot.pause(), well within the 1s window. If this test becomes flaky
+    under heavy CI load, the notification may be reaped before the assertion.
+    """
     app = ChatApp()
     async with app.run_test() as pilot:
         with (
@@ -420,7 +432,7 @@ Check against spec acceptance criteria:
 - Successful auto-copy shows "Copied" (1s): covered by test 3
 - Stale selections emit `log.debug()`: covered by test 5
 - Timer debounce cancels previous: covered by test 4
-- Timer handle not clobbered by old callback: covered by test 7
+- Timer handle not clobbered by old callback: covered by test 7 (regression guard)
 - Whitespace-only auto-copy skipped: covered by test 6
 - Whitespace-only manual copy preserved: covered by test 8
 - Clipboard failure shows warning: covered by test 9
