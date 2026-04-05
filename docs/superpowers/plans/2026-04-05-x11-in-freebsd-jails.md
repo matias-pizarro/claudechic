@@ -35,7 +35,9 @@
 
 **Self-test isolation:** `self_test_command` MUST refuse to run if tiers are already active (check tiers file first). Self-test dynamically selects an unused high display number by probing `:98`, `:97`, ... (bounded range 98→80, fail with error if all occupied) — a display is considered occupied if EITHER `/tmp/.X<N>-lock` OR `/tmp/.X11-unix/X<N>` exists. Creates a temporary `Config` with `state_prefix=".x11ctl-selftest-<N>"`. All state paths derive from `state_prefix`. The `Config` class accepts an optional `state_prefix` parameter (default: `.x11ctl`) in its factory classmethod `Config.for_self_test(display_num)`.
 
-**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack (not just delete files), (2) remove all state artifacts (pidfiles, tiers, xauth, logs). On SIGTERM interruption, the self-test SIGTERM handler MUST kill all child processes before exiting. On the next self-test run, detect stale selftest artifacts by checking for selftest pidfiles — validate PIDs via `validate_pid`, kill any surviving selftest processes, then clean artifacts before proceeding.
+**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack (not just delete files), (2) remove all state artifacts (pidfiles, tiers, xauth, logs). On SIGTERM interruption, the self-test SIGTERM handler MUST kill all child processes before exiting (exit code 128+SIGNUM). On the next self-test run, detect stale selftest artifacts by checking for selftest pidfiles — validate PIDs via `validate_pid`, kill any surviving selftest processes, then clean artifacts before proceeding. Self-test state should use a `mkdtemp`-created `0700` subdirectory under `/tmp` (e.g., `/tmp/.x11ctl-selftest-<N>-<random>/`) for pidfiles, tiers, and xauth to prevent cross-user pidfile spoofing. The directory is removed on cleanup.
+
+**Self-test tier coverage:** `self-test --tier1` exercises headless start/status/screenshot/stop. `self-test --tier2` exercises headless+xpra start/status/stop (verifies Xpra HTML5 binding). `self-test --tier3` exercises headless+vnc start/status/stop (verifies VNC+noVNC ports). `self-test --all` exercises all tiers plus idempotency, stale PID recovery, partial rollback, symlink rejection, and partial-tier status. The implementer should add tests for each tier level.
 
 **Bare start/stop behavior:** `start` with no tier flag defaults to `--headless`. `stop` with no tier flag defaults to `--all`.
 
@@ -323,7 +325,7 @@ class TestConfigValidation:
         with pytest.raises(ValueError):
             x11ctl.Config()
 
-    def test_xauth_indirect_traversal_rejected(self, monkeypatch):
+    def test_xauth_indirect_traversal_resolves_valid(self, monkeypatch):
         """/tmp/anything/../.x11ctl-safe resolves to /tmp/.x11ctl-safe — allowed."""
         monkeypatch.setenv("X11CTL_XAUTH", "/tmp/anything/../.x11ctl-safe")
         # This resolves to /tmp/.x11ctl-safe which IS valid
@@ -1970,21 +1972,35 @@ class TestSelfTest:
 
     def test_self_test_skips_occupied_display(self, tmp_path):
         """self-test should skip display :98 if occupied and try :97."""
-        # Simulate :98 being occupied (lock file exists)
-        lock_98 = Path("/tmp/.X98-lock")
-        with patch("os.path.exists", side_effect=lambda p: p == str(lock_98) or p == "/tmp/.X11-unix/X98"):
-            with patch.object(x11ctl, "read_tiers", return_value=None), \
-                 patch.object(x11ctl, "find_binary", return_value=None):
-                # Should attempt :97 instead of :98
-                result = x11ctl.self_test_command_impl(tier="tier1")
-                assert isinstance(result, int)
+        selected_displays = []
 
-    def test_self_test_fails_when_all_displays_occupied(self):
-        """self-test should fail with error when no free display in range."""
+        # :98 is occupied (lock exists), :97 is free
+        def mock_exists(p):
+            return "/tmp/.X98-lock" in p or "/tmp/.X11-unix/X98" in p
+
+        original_for_self_test = x11ctl.Config.for_self_test
+        def capture_for_self_test(display_num):
+            selected_displays.append(display_num)
+            return original_for_self_test(display_num)
+
+        with patch("os.path.exists", side_effect=mock_exists), \
+             patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl.Config, "for_self_test", side_effect=capture_for_self_test), \
+             patch.object(x11ctl, "find_binary", return_value=None):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert isinstance(result, int)
+            # Verify :97 was selected (skipped :98)
+            assert 97 in selected_displays
+
+    def test_self_test_fails_when_all_displays_occupied(self, capsys):
+        """self-test should fail with specific error when range 98→80 exhausted."""
         with patch("os.path.exists", return_value=True), \
              patch.object(x11ctl, "read_tiers", return_value=None):
             result = x11ctl.self_test_command_impl(tier="tier1")
-            assert result != 0
+            assert result == 1  # specific exit code for exhaustion
+            # Verify error message mentions display exhaustion
+            captured = capsys.readouterr()
+            assert "display" in captured.err.lower() or "occupied" in captured.err.lower()
 
     def test_self_test_uses_isolated_state(self):
         """self-test should use isolated display and state paths, not production."""
