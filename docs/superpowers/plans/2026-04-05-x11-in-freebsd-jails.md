@@ -842,13 +842,18 @@ class TestStaleCleanup:
         assert result is False  # fail closed
         assert socket_file.exists()  # not deleted
 
-    def test_clean_malformed_lock(self, tmp_path):
-        """Malformed lock file (not a PID) should be cleaned."""
+    def test_clean_malformed_lock_fails_closed(self, tmp_path):
+        """Malformed lock file should fail closed."""
         lock = tmp_path / ".X99-lock"
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
         lock.write_text("not_a_pid\n")
         result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-        assert result is True
-        assert not lock.exists()
+        assert result is False
+        assert lock.exists()
+        assert socket_file.exists()
 
     def test_clean_returns_false_on_timeout(self, tmp_path):
         """If ps times out, should fail closed (return False)."""
@@ -979,7 +984,7 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
         except FileNotFoundError:
             return False  # Lock file disappeared — owner unknown, fail closed
         except ValueError:
-            pass  # Malformed lock contents — safe to clean
+            return False  # Malformed lock contents — owner unknown, fail closed
         else:
             try:
                 # Check if this PID is still alive
