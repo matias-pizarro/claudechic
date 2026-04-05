@@ -39,9 +39,9 @@
 
 **Self-test state layout:** Self-test uses a `mkdtemp`-created `0700` subdirectory under `/tmp` (e.g., `/tmp/.x11ctl-selftest-<N>-<random>/`) for pidfiles, tiers file, and logs. The xauth file remains flat in `/tmp` as `/tmp/.x11ctl-selftest-<N>` (passes the `^/tmp/\.x11ctl-[^/]+$` validation). This split keeps xauth validation consistent while isolating other state in a private directory. The mkdtemp directory creation is NOT done in `Config.for_self_test()` (which remains a pure path-derivation factory). Instead, `self_test_command_impl` (Task 10 Step 5c) creates the mkdtemp directory and passes the path to `Config.for_self_test(display_num, state_dir=<path>)`. This keeps Task 1's Config class side-effect-free.
 
-**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack, (2) remove the xauth file, (3) remove the mkdtemp state directory (`shutil.rmtree`). On SIGTERM/SIGINT interruption, the handler MUST kill all child processes before exiting (exit code 128+SIGNUM). **Stale recovery:** Performed while holding the global lock (so no concurrent self-test can be running). Scan for stale directories matching `/tmp/.x11ctl-selftest-*-*/` (glob). For each candidate path: (1) `os.lstat()` (NOT `os.stat()` — must not follow symlinks) to check it is a real directory (not a symlink); reject and skip any symlinks; (2) verify ownership (`lstat_result.st_uid == os.getuid()`); (3) open the directory with `os.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)` to get a verified fd, then close it (this confirms it is a real directory we own); (4) read pidfiles inside, validate PIDs via `validate_pid`; for dead/invalid PIDs, clean up pidfile; for alive+valid PIDs, `stop_component` them (orphaned); (5) `shutil.rmtree` the directory; (6) `os.unlink` the corresponding flat xauth file (also checked with `os.lstat` + `not is_symlink` before unlinking). **Stale recovery error policy:** `validate_pid` returns `bool` only — it catches all internal exceptions (`subprocess.TimeoutExpired`, `FileNotFoundError`, `ValueError`) and returns `False`. During stale recovery, if `validate_pid` returns `False`, the PID is treated as dead and its pidfile is cleaned. If `validate_pid` returns `True`, the PID is alive and `stop_component` is called. If `stop_component` returns `False` (process survived SIGKILL), `clean_stale_selftest_dirs` returns structured failure data: `(False, {"pid": <pid>, "component": <name>, "pidfile": <path>, "state_dir": <dir>})`. The caller (`self_test_command_impl`) uses this to **abort** with exit code 1 and a message like: `"Error: stale self-test process <component> (PID <pid>) could not be killed. Manual fix: kill <pid> && rm -rf <state_dir> /tmp/.x11ctl-selftest-<N>"`. If `rmtree` or `unlink` fails, log warning and continue (non-fatal).
+**Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack, (2) remove the xauth file, (3) remove the mkdtemp state directory (`shutil.rmtree`). On SIGTERM/SIGINT interruption, the handler MUST kill all child processes before exiting (exit code 128+SIGNUM). **Stale recovery:** Performed while holding the global lock (so no concurrent self-test can be running). Scan for stale directories matching `/tmp/.x11ctl-selftest-*-*/` (glob). For each candidate path: (1) `os.lstat()` (NOT `os.stat()` — must not follow symlinks) to check it is a real directory (not a symlink); reject and skip any symlinks; (2) verify ownership (`lstat_result.st_uid == os.getuid()`); (3) open the directory with `os.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)` to get a verified fd, then close it (this confirms it is a real directory we own); (4) read pidfiles inside, validate PIDs via `validate_pid`; for dead/invalid PIDs, clean up pidfile; for alive+valid PIDs, `stop_component` them (orphaned); (5) `shutil.rmtree` the directory; (6) `os.unlink` the corresponding flat xauth file (also checked with `os.lstat` + `not is_symlink` before unlinking). **Stale recovery error policy:** For stale recovery, PID validation uses a dedicated `validate_pid_tristate(pid, epoch, comm)` function that returns one of three values: `"alive"`, `"dead"`, or `"unknown"`. The existing `validate_pid` (bool) is unchanged — it is used by `stop_component` and `start_headless` where fail-closed `False` is correct. `validate_pid_tristate` differs only in its error handling: `subprocess.TimeoutExpired` or `FileNotFoundError` during `ps` calls returns `"unknown"` instead of `False`. During stale recovery: `"dead"` → clean pidfile and state; `"alive"` → `stop_component`; `"unknown"` → skip this stale directory (fail closed — do not clean, do not kill, log warning). If `validate_pid` returns `True`, the PID is alive and `stop_component` is called. If `stop_component` returns `False` (process survived SIGKILL), `clean_stale_selftest_dirs` returns structured failure data: `(False, {"pid": <pid>, "component": <name>, "pidfile": <path>, "state_dir": <dir>})`. The caller (`self_test_command_impl`) uses this to **abort** with exit code 1 and a message like: `"Error: stale self-test process <component> (PID <pid>) could not be killed. Manual fix: kill <pid> && rm -rf <state_dir> /tmp/.x11ctl-selftest-<N>"`. If `rmtree` or `unlink` fails, log warning and continue (non-fatal).
 
-**Self-test port conflict behavior:** After display selection, self-test checks availability of the offset ports (`check_port_available` for `xpra_port`, `vnc_port`, `novnc_port`). If any offset port is occupied, self-test retries with the next display number (same probe loop as display selection). If all displays in the 98→80 range have either occupied displays or occupied ports, self-test aborts with exit code 1 and a message listing which ports are blocked.
+**Self-test port conflict behavior:** After display selection, self-test checks availability of only the offset ports needed for the requested tier: `--tier1` checks no ports (headless only); `--tier2` checks `xpra_port`; `--tier3` checks `vnc_port` and `novnc_port`; `--all` checks all three. If any required offset port is occupied, self-test retries with the next display number (same probe loop as display selection). If all displays in the 98→80 range have either occupied displays or occupied ports, self-test aborts with exit code 1 and a message listing which ports are blocked.
 
 **Self-test tier coverage:** `self-test --tier1` exercises headless start/status/screenshot/stop. `self-test --tier2` exercises headless+xpra start/status/stop (verifies Xpra HTML5 binding). `self-test --tier3` exercises headless+vnc start/status/stop (verifies VNC+noVNC ports). `self-test --all` exercises all tiers plus idempotency, stale PID recovery, partial rollback, symlink rejection, and partial-tier status. The implementer should add tests for each tier level.
 
@@ -589,7 +589,7 @@ git commit -m "feat: x11ctl skeleton with all pure functions and tests"
 
 ---
 
-### Task 2: PID identity validation (`validate_pid`)
+### Task 2: PID identity validation (`validate_pid` and `validate_pid_tristate`)
 
 The spec's primary defense against PID reuse. This MUST be implemented and tested before any process lifecycle code.
 
@@ -1997,7 +1997,7 @@ class TestSelfTest:
             assert "xvfb" in captured.err
 
     def test_self_test_retries_on_port_conflict(self, tmp_path):
-        """self-test should try next display when offset ports are occupied."""
+        """self-test --tier2 should try next display when xpra offset port occupied."""
         selected_displays = []
 
         def mock_exists(p):
@@ -2022,8 +2022,8 @@ class TestSelfTest:
              patch.object(x11ctl, "release_lock"), \
              patch.object(x11ctl, "clean_stale_selftest_dirs", return_value=(True, None)), \
              patch("tempfile.mkdtemp", return_value="/tmp/.x11ctl-selftest-97-fake"):
-            result = x11ctl.self_test_command_impl(tier="tier1")
-            # Should have skipped :98 (port conflict) and selected :97
+            result = x11ctl.self_test_command_impl(tier="tier2")
+            # Should have skipped :98 (xpra port conflict) and selected :97
             assert 97 in selected_displays
 
     def test_self_test_skips_occupied_display(self, tmp_path):
@@ -2124,7 +2124,7 @@ Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbse
         xauth = tmp_path / ".x11ctl-selftest-98"
         xauth.write_text("cookie")
         with patch("glob.glob", return_value=[str(stale_dir)]), \
-             patch.object(x11ctl, "validate_pid", return_value=False):
+             patch.object(x11ctl, "validate_pid_tristate", return_value="dead"):
             success, _ = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
             assert success is True
             assert not stale_dir.exists()
@@ -2136,7 +2136,7 @@ Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbse
         stale_dir.mkdir(mode=0o700)
         (stale_dir / "xvfb.pid").write_text("12345 1712345678\n")
         with patch("glob.glob", return_value=[str(stale_dir)]), \
-             patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="alive"), \
              patch.object(x11ctl, "stop_component", return_value=False):
             success, info = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
             assert success is False  # signals caller to abort
@@ -2144,15 +2144,26 @@ Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbse
             assert "xvfb" in info["component"]
             assert stale_dir.exists()  # not cleaned
 
+    def test_self_test_stale_recovery_skips_unknown_pid(self, tmp_path):
+        """validate_pid_tristate returning 'unknown' → skip dir (fail closed)."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        (stale_dir / "xvfb.pid").write_text("12345 1712345678\n")
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="unknown"):
+            success, _ = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert success is True  # continues to next dir
+            assert stale_dir.exists()  # NOT cleaned — fail closed
+
     def test_self_test_stale_recovery_cleans_dead_validated_pid(self, tmp_path):
-        """validate_pid returning False (dead PID) → clean pidfile and dir."""
+        """validate_pid_tristate returning 'dead' → clean pidfile and dir."""
         stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
         stale_dir.mkdir(mode=0o700)
         (stale_dir / "xvfb.pid").write_text("12345 1712345678\n")
         xauth = tmp_path / ".x11ctl-selftest-98"
         xauth.write_text("cookie")
         with patch("glob.glob", return_value=[str(stale_dir)]), \
-             patch.object(x11ctl, "validate_pid", return_value=False):
+             patch.object(x11ctl, "validate_pid_tristate", return_value="dead"):
             result = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
             assert result[0] is True  # success (structured return)
             assert not stale_dir.exists()  # cleaned
@@ -2205,7 +2216,7 @@ Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbse
 
 - [ ] **Step 5c: Implement self_test_command_impl — display selection and state setup**
 
-Acquire global exclusive lock. Check no tiers active. Call `clean_stale_selftest_dirs()` — returns `bool`: `True` if clean (or cleaned successfully), `False` if an unkillable stale process was found. If `False`, release lock and return 1 with manual-remediation message. Probe display 98→80 (check lock AND socket). Create mkdtemp `0700` dir. Call `Config.for_self_test(display_num, state_dir=<path>)` — which sets offset ports (`xpra_port=10000+N`, `vnc_port=5900+N`, `novnc_port=6080+N`). Create flat xauth.
+Acquire global exclusive lock. Check no tiers active. Call `clean_stale_selftest_dirs()` — returns `(bool, info)`: `(True, None)` if clean (or cleaned successfully), `(False, {"pid": ..., "component": ..., "pidfile": ..., "state_dir": ...})` if an unkillable stale process was found. If `False`, use `info` to build a manual-remediation message (`"Error: stale self-test process <component> (PID <pid>) could not be killed. Manual fix: kill <pid> && rm -rf <state_dir>"`), release lock, and return 1. Probe display 98→80 (check lock AND socket). Create mkdtemp `0700` dir. Call `Config.for_self_test(display_num, state_dir=<path>)` — which sets offset ports (`xpra_port=10000+N`, `vnc_port=5900+N`, `novnc_port=6080+N`). Create flat xauth.
 
 - [ ] **Step 5d: Implement self_test_command_impl — tier exercises**
 
