@@ -33,8 +33,6 @@ _DISPLAY_RE = re.compile(r"^:\d+\Z")
 _SCREEN_RE = re.compile(r"^\d+x\d+x\d+\Z")
 _XAUTH_RE = re.compile(r"^/tmp/\.x11ctl-[A-Za-z0-9._-]+\Z")
 
-# Component-level tiers (excludes "all" meta-tier) for file validation
-_COMPONENT_TIERS = frozenset({"headless", "xpra", "vnc"})
 
 
 @dataclass(frozen=True)
@@ -146,6 +144,11 @@ _TIER_DEPS: dict[str, set[str]] = {
     "vnc": {"headless", "vnc"},
     "all": {"headless", "xpra", "vnc"},
 }
+
+
+# Component-level tiers (derived from _TIER_DEPS, excludes "all" meta-tier).
+# Derived rather than hardcoded to prevent silent drift if tiers are added.
+_COMPONENT_TIERS = frozenset(_TIER_DEPS.keys()) - frozenset({"all"})
 
 
 def desired_tiers(tier: str) -> set[str]:
