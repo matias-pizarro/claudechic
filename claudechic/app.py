@@ -1584,7 +1584,10 @@ class ChatApp(App):
     _copy_failed_notified: bool = False
 
     def _check_and_copy_selection(self) -> None:
-        selected = self.screen.get_selected_text()
+        try:
+            selected = self.screen.get_selected_text()
+        except (IndexError, KeyError):
+            return  # Stale selection coords after widget content changed
         if selected and len(selected.strip()) > 0:
             success = self.copy_to_clipboard(selected)
             if success:
