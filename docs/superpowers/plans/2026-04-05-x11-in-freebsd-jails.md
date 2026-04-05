@@ -41,6 +41,7 @@ The test file starts with a module importer that loads the extensionless script:
 ```python
 # tests/test_x11ctl.py
 """Unit tests for x11ctl pure logic."""
+import importlib.machinery
 import importlib.util
 import os
 import sys
@@ -51,16 +52,14 @@ import pytest
 
 
 def _import_x11ctl():
-    spec = importlib.util.spec_from_file_location(
-        "x11ctl", Path(__file__).parent.parent / "scripts" / "x11ctl"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    old_argv = sys.argv
-    sys.argv = ["x11ctl"]
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.argv = old_argv
+    """Import the extensionless scripts/x11ctl as a module.
+
+    Uses SourceFileLoader directly because spec_from_file_location returns
+    None for files without a recognized Python suffix.
+    """
+    script_path = str(Path(__file__).parent.parent / "scripts" / "x11ctl")
+    loader = importlib.machinery.SourceFileLoader("x11ctl", script_path)
+    mod = loader.load_module("x11ctl")
     return mod
 
 x11ctl = _import_x11ctl()
@@ -802,9 +801,28 @@ Expected: FAIL — `clean_stale_x_artifacts` not defined.
 # ---------------------------------------------------------------------------
 
 def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> None:
-    """Remove stale X server lock and socket files if no matching Xvfb is running."""
+    """Remove stale X server lock and socket files ONLY if no matching Xvfb is running.
+
+    Reads PID from the lock file and checks if that PID is a live Xvfb process.
+    If it is, artifacts are left untouched (another Xvfb owns them).
+    """
     lock_path = Path(tmp_dir) / f".X{display_num}-lock"
     socket_path = Path(tmp_dir) / ".X11-unix" / f"X{display_num}"
+
+    # Check if a live Xvfb owns these artifacts
+    if lock_path.exists() and not lock_path.is_symlink():
+        try:
+            pid_str = lock_path.read_text().strip()
+            pid = int(pid_str)
+            # Check if this PID is alive and is actually Xvfb
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip() == "Xvfb":
+                return  # Live Xvfb owns these — don't touch
+        except (ValueError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # Can't determine owner — safe to clean
 
     for p in (lock_path, socket_path):
         if p.exists() and not p.is_symlink():
@@ -875,6 +893,24 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
 
     if not wait_ready(check_display, retries=10, delay=0.5):
         print(f"Error: Xvfb failed to start. See {logfile}", file=sys.stderr)
+        # Self-rollback: kill the Xvfb we just started, clean up state
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            os.unlink(pidfile)
+        except FileNotFoundError:
+            pass
+        try:
+            os.unlink(cfg.xauth)
+        except FileNotFoundError:
+            pass
+        started.remove("xvfb") if "xvfb" in started else None
         return False
 
     return True
@@ -904,50 +940,145 @@ Connect tier reconciliation to actual process lifecycle. This is the integration
 
 **Files:**
 - Modify: `scripts/x11ctl`
+- Modify: `tests/test_x11ctl.py`
 
-- [ ] **Step 1: Implement start_command**
+- [ ] **Step 1: Write failing tests for command wiring**
 
-The function should:
-1. Acquire exclusive lock
-2. Determine desired tiers from CLI flags
-3. If `--bind-all`, set `cfg.bind = "0.0.0.0"`
-4. Read current tiers file (or empty set if missing)
-5. Compute diff: `to_stop`, `to_start`
-6. Stop excess tiers (in STOP_ORDER)
-7. Start missing tiers (headless first, then viewers)
-8. Write new tiers file
-9. On any start failure: rollback all started-in-this-invocation components, delete tiers file
+```python
+# Add to tests/test_x11ctl.py
+from unittest.mock import patch, MagicMock
 
-- [ ] **Step 2: Implement stop_command**
+class TestStartCommand:
+    def test_start_stops_excess_before_starting_missing(self):
+        """start --headless when all running: stops xpra+vnc components."""
+        cfg = x11ctl.Config()
+        stopped = []
+        started = []
 
-The function should:
-1. Acquire exclusive lock
-2. Read current tiers
-3. Compute cascade stop set
-4. Stop components in STOP_ORDER
-5. Update or delete tiers file
+        def mock_stop(pidfile, comm):
+            stopped.append(comm)
+            return True
 
-- [ ] **Step 3: Implement status_command**
+        def mock_start_headless(c, s):
+            started.append("xvfb")
+            return True
 
-1. Acquire shared lock
-2. Read tiers file → expected components
-3. For each expected component: validate pidfile
-4. Print status table with last 5 log lines
-5. Exit 0 if all expected healthy, 1 if any expected down
+        with patch.object(x11ctl, "stop_component", side_effect=mock_stop), \
+             patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra", "vnc"}), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            # Simulate start --headless (desired = {headless}, excess = {xpra, vnc})
+            # The command should stop excess BEFORE starting
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 0
+            # Excess components stopped (in STOP_ORDER)
+            assert "websockify" in stopped or "x11vnc" in stopped or "xpra" in stopped
+
+
+class TestStopCommand:
+    def test_stop_vnc_updates_tiers_file(self):
+        """stop --vnc should update tiers file to remove vnc."""
+        cfg = x11ctl.Config()
+        written_tiers = []
+
+        with patch.object(x11ctl, "stop_component", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra", "vnc"}), \
+             patch.object(x11ctl, "write_tiers", side_effect=lambda p, t: written_tiers.append(t)), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.stop_command_impl(cfg, tier="vnc")
+            assert result == 0
+            assert written_tiers[-1] == {"headless", "xpra"}
+
+    def test_stop_all_deletes_tiers_file(self):
+        """stop --all should delete tiers file."""
+        cfg = x11ctl.Config()
+        deleted = []
+
+        with patch.object(x11ctl, "stop_component", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra", "vnc"}), \
+             patch.object(x11ctl, "delete_tiers", side_effect=lambda p: deleted.append(p)), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.stop_command_impl(cfg, tier="all")
+            assert result == 0
+            assert len(deleted) == 1
+
+
+class TestStatusCommand:
+    def test_status_healthy_returns_0(self):
+        """status with all expected components running returns 0."""
+        cfg = x11ctl.Config()
+
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=(1234, 1712345678)), \
+             patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 0
+
+    def test_status_unhealthy_returns_1(self):
+        """status with expected component down returns 1."""
+        cfg = x11ctl.Config()
+
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 1
+
+    def test_status_no_tiers_file_returns_0(self):
+        """status with no tiers file (nothing started) returns 0."""
+        cfg = x11ctl.Config()
+
+        with patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 0
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run python -m pytest tests/test_x11ctl.py::TestStartCommand tests/test_x11ctl.py::TestStopCommand tests/test_x11ctl.py::TestStatusCommand -v`
+Expected: FAIL — `start_command_impl`, `stop_command_impl`, `status_command_impl` not defined.
+
+- [ ] **Step 3: Implement start_command_impl, stop_command_impl, status_command_impl**
+
+These are the testable inner functions. The top-level `start_command(args, cfg)` is a thin wrapper that extracts flags, determines bind_all, and calls `start_command_impl`. Note: `bind_all` is passed as a parameter, NOT mutated on `cfg` (immutability rule).
+
+The functions should:
+- `start_command_impl(cfg, desired, bind_all)`: lock, read tiers, compute diff, stop excess (STOP_ORDER), start missing (headless first), write tiers, rollback on failure
+- `stop_command_impl(cfg, tier)`: lock, read tiers, compute cascade, stop components (STOP_ORDER), update/delete tiers
+- `status_command_impl(cfg)`: shared lock, read tiers, validate each expected component, return 0/1
 
 - [ ] **Step 4: Wire main() to dispatch all subcommands**
 
-Update `main()` to call `start_command`, `stop_command`, `status_command`, `env_command` (prints `format_env`), `screenshot_command`, `run_command`, `setup_command`.
+- [ ] **Step 5: Run tests**
 
-- [ ] **Step 5: Integration test**
+Run: `uv run python -m pytest tests/test_x11ctl.py -v`
+Expected: All PASS.
 
-Run: `scripts/x11ctl start --headless && scripts/x11ctl status && scripts/x11ctl stop --headless && scripts/x11ctl status`
-Expected: Start succeeds, status shows healthy (exit 0), stop succeeds, status shows nothing (exit 0 — no tiers file).
+- [ ] **Step 6: Integration test (conditional)**
 
-- [ ] **Step 6: Commit**
+Run (only if Xvfb available):
+```bash
+which Xvfb && {
+    scripts/x11ctl start --headless
+    scripts/x11ctl status
+    scripts/x11ctl stop --headless
+    scripts/x11ctl status
+} || echo "Xvfb not installed — integration test skipped (this is expected in CI without X11 packages)"
+```
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/x11ctl
+git add scripts/x11ctl tests/test_x11ctl.py
 git commit -m "feat: x11ctl start/stop/status with tier reconciliation and rollback"
 ```
 
@@ -974,14 +1105,26 @@ class TestXpraCommand:
 
     def test_xpra_command_bind_all(self):
         cfg = x11ctl.Config()
-        cfg.bind = "0.0.0.0"
-        cmd = x11ctl.build_xpra_command(cfg)
+        cmd = x11ctl.build_xpra_command(cfg, bind="0.0.0.0")
         assert f"--bind-tcp=0.0.0.0:{cfg.xpra_port}" in cmd
 
     def test_xpra_env_has_xauthority(self):
         cfg = x11ctl.Config()
         env = x11ctl.build_xpra_env(cfg)
         assert env["XAUTHORITY"] == cfg.xauth
+
+    def test_xpra_port_conflict_returns_2(self):
+        """start_xpra should return exit code 2 when port is occupied."""
+        cfg = x11ctl.Config()
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", cfg.xpra_port))
+        sock.listen(1)
+        try:
+            result = x11ctl.start_xpra(cfg, bind="127.0.0.1", started=[])
+            assert result == 2
+        finally:
+            sock.close()
 ```
 
 - [ ] **Step 2: Implement build_xpra_command, build_xpra_env, start_xpra**
@@ -1021,9 +1164,21 @@ class TestVncCommand:
 
     def test_x11vnc_no_localhost_with_bind_all(self):
         cfg = x11ctl.Config()
-        cfg.bind = "0.0.0.0"
-        cmd = x11ctl.build_x11vnc_command(cfg)
+        cmd = x11ctl.build_x11vnc_command(cfg, bind="0.0.0.0")
         assert "-localhost" not in cmd
+
+    def test_vnc_port_conflict_returns_2(self):
+        """start_vnc should return exit code 2 when VNC port is occupied."""
+        cfg = x11ctl.Config()
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", cfg.vnc_port))
+        sock.listen(1)
+        try:
+            result = x11ctl.start_vnc(cfg, bind="127.0.0.1", started=[])
+            assert result == 2
+        finally:
+            sock.close()
 ```
 
 - [ ] **Step 2: Implement build_x11vnc_command, build_websockify_command, start_vnc**
@@ -1047,11 +1202,17 @@ git commit -m "feat: x11ctl Tier 3 VNC/noVNC start/stop"
 
 ```python
 class TestRunCommand:
-    def test_run_returns_child_exit_code(self):
-        """x11ctl run should return the child's exit code."""
-        # Test the helper that extracts the logic
-        assert x11ctl.run_exit_code(0) == 0
-        assert x11ctl.run_exit_code(42) == 42
+    @pytest.mark.skipif(
+        x11ctl.find_binary("Xvfb") is None,
+        reason="Xvfb not installed",
+    )
+    def test_run_returns_child_exit_code(self, tmp_path):
+        """run should propagate the child's exit code."""
+        cfg = x11ctl.Config()
+        cfg.display = f":{os.getpid()}"
+        cfg.xauth = str(tmp_path / "xauth")
+        rc = x11ctl.run_with_temp_display(cfg, ["/bin/sh", "-c", "exit 42"])
+        assert rc == 42
 
     @pytest.mark.skipif(
         x11ctl.find_binary("Xvfb") is None,
@@ -1059,14 +1220,41 @@ class TestRunCommand:
     )
     def test_run_creates_and_tears_down_display(self, tmp_path):
         """run should create a temp display and tear it down after."""
-        # This is an integration test
         cfg = x11ctl.Config()
-        cfg.display = f":{os.getpid()}"  # unique display
+        cfg.display = f":{os.getpid()}"
         cfg.xauth = str(tmp_path / "xauth")
         rc = x11ctl.run_with_temp_display(cfg, ["xdpyinfo"])
         assert rc == 0
-        # After run, Xvfb should be dead
         assert not Path(cfg.xauth).exists()
+
+    @pytest.mark.skipif(
+        x11ctl.find_binary("Xvfb") is None,
+        reason="Xvfb not installed",
+    )
+    def test_run_signal_forwarding(self, tmp_path):
+        """SIGTERM to x11ctl run should kill child and Xvfb."""
+        cfg = x11ctl.Config()
+        cfg.display = f":{os.getpid()}"
+        cfg.xauth = str(tmp_path / "xauth")
+        # Launch run in a subprocess so we can signal it
+        proc = subprocess.Popen(
+            [sys.executable, "-c", f"""
+import sys; sys.path.insert(0, '.')
+from importlib.machinery import SourceFileLoader
+x = SourceFileLoader('x11ctl', 'scripts/x11ctl').load_module()
+cfg = x.Config()
+cfg.display = '{cfg.display}'
+cfg.xauth = '{cfg.xauth}'
+sys.exit(x.run_with_temp_display(cfg, ['sleep', '60']))
+"""],
+            cwd=str(Path(__file__).parent.parent),
+        )
+        import time as _time
+        _time.sleep(2)  # Give Xvfb time to start
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+        # Process should have exited (not hung)
+        assert proc.returncode is not None
 ```
 
 - [ ] **Step 2: Implement run_with_temp_display with signal forwarding**
