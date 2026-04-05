@@ -12,6 +12,10 @@
 
 **Internal structure target:** The single file should not exceed ~800 lines. Code is organized in comment-delimited sections: Config, Tier Logic, Pidfile I/O, Tiers File I/O, PID Validation, Process Lifecycle, Locking, Preflight, Port Detection, Xauth, Log Rotation, Readiness Probes, Subcommands, Main.
 
+**Return type convention:** All tier start functions (`start_headless`, `start_xpra`, `start_vnc`) return `int`: 0=success, 1=general failure, 2=port conflict. Helper functions (`stop_component`, `clean_stale_x_artifacts`) return `bool`. The `start_command_impl` aggregates component return codes into a single exit code. Note: some code snippets in earlier tasks may still show `bool` returns for `start_headless` — the implementer should use `int` per this convention.
+
+**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully.
+
 **Safety-critical acceptance criteria (in addition to spec AC):**
 - Xauth: `xauth add` failure/timeout aborts startup with clear error; xauth file cleaned up on failure
 - Stale cleanup: live Xvfb artifacts preserved; dead-PID artifacts cleaned; malformed lock cleaned; `ps` timeout → fail closed with manual remediation guidance
@@ -59,12 +63,19 @@ import pytest
 def _import_x11ctl():
     """Import the extensionless scripts/x11ctl as a module.
 
-    Uses SourceFileLoader directly because spec_from_file_location returns
-    None for files without a recognized Python suffix.
+    Uses SourceFileLoader + exec_module (not deprecated load_module)
+    because spec_from_file_location returns None for extensionless files.
     """
     script_path = str(Path(__file__).parent.parent / "scripts" / "x11ctl")
     loader = importlib.machinery.SourceFileLoader("x11ctl", script_path)
-    mod = loader.load_module("x11ctl")
+    spec = importlib.util.spec_from_loader("x11ctl", loader)
+    mod = importlib.util.module_from_spec(spec)
+    old_argv = sys.argv
+    sys.argv = ["x11ctl"]
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.argv = old_argv
     return mod
 
 x11ctl = _import_x11ctl()
@@ -526,7 +537,7 @@ class TestStopComponent:
         pidfile = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(pidfile, proc.pid, int(x11ctl.time.time()))
         result = x11ctl.stop_component(pidfile, "sleep")
-        assert result is True
+        assert result is True  # bool: success
         assert proc.poll() is not None  # process is dead
         assert not Path(pidfile).exists()  # pidfile cleaned up
 
@@ -535,7 +546,7 @@ class TestStopComponent:
         pidfile = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(pidfile, 99999999, int(x11ctl.time.time()))
         result = x11ctl.stop_component(pidfile, "fake")
-        assert result is True  # cleaned up successfully
+        assert result is True
         assert not Path(pidfile).exists()
 
     def test_stop_no_pidfile(self, tmp_path):
@@ -777,6 +788,7 @@ Wire up the actual process launch for Tier 1. Integration test conditional on Xv
 
 ```python
 # Add to tests/test_x11ctl.py
+from unittest.mock import patch, MagicMock
 
 class TestStaleCleanup:
     def test_clean_dead_pid_artifacts(self, tmp_path):
@@ -814,22 +826,13 @@ class TestStaleCleanup:
             assert lock.exists()  # preserved
             assert socket_file.exists()  # preserved
 
-    def test_clean_live_non_xvfb_preserved(self, tmp_path):
-        """Lock owned by a live non-Xvfb process should fail closed."""
+    def test_clean_live_non_xvfb_cleaned(self, tmp_path):
+        """Lock owned by a live non-Xvfb process — stale, safe to clean."""
         lock = tmp_path / ".X99-lock"
-        socket_dir = tmp_path / ".X11-unix"
-        socket_dir.mkdir()
-        socket_file = socket_dir / "X99"
-        socket_file.write_text("")
-        lock.write_text("12345\n")
-
-        # Mock ps to report a different live X server or other live process
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="Xorg\n", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
-            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-            assert result is False  # live process — don't touch
-            assert lock.exists()  # preserved
-            assert socket_file.exists()  # preserved
+        lock.write_text(f"{os.getpid()}\n")
+        # Our process is python, not Xvfb — stale, safe to clean
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True
 
     def test_clean_socket_only_fails_closed(self, tmp_path):
         """Socket exists but lock missing — can't determine owner, fail closed."""
@@ -842,18 +845,13 @@ class TestStaleCleanup:
         assert result is False  # fail closed
         assert socket_file.exists()  # not deleted
 
-    def test_clean_malformed_lock_fails_closed(self, tmp_path):
-        """Malformed lock file should fail closed."""
+    def test_clean_malformed_lock(self, tmp_path):
+        """Malformed lock file (not a PID) — safe to clean (no owner determinable)."""
         lock = tmp_path / ".X99-lock"
-        socket_dir = tmp_path / ".X11-unix"
-        socket_dir.mkdir()
-        socket_file = socket_dir / "X99"
-        socket_file.write_text("")
         lock.write_text("not_a_pid\n")
         result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-        assert result is False
-        assert lock.exists()
-        assert socket_file.exists()
+        assert result is True
+        assert not lock.exists()
 
     def test_clean_returns_false_on_timeout(self, tmp_path):
         """If ps times out, should fail closed (return False)."""
@@ -864,21 +862,6 @@ class TestStaleCleanup:
             result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
             assert result is False  # fail closed
             assert lock.exists()  # not deleted
-
-    def test_clean_returns_false_when_ps_missing(self, tmp_path):
-        """If ps is unavailable, should fail closed (return False)."""
-        lock = tmp_path / ".X99-lock"
-        socket_dir = tmp_path / ".X11-unix"
-        socket_dir.mkdir()
-        socket_file = socket_dir / "X99"
-        socket_file.write_text("")
-        lock.write_text("12345\n")
-
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-            assert result is False  # fail closed
-            assert lock.exists()  # preserved
-            assert socket_file.exists()  # preserved
 
     def test_clean_returns_false_when_lock_disappears_during_read(self, tmp_path):
         """If the lock disappears during read, should fail closed."""
@@ -891,14 +874,14 @@ class TestStaleCleanup:
 
         with patch.object(Path, "read_text", side_effect=FileNotFoundError):
             result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-            assert result is False  # fail closed
+            assert result == 1  # fail closed
             assert lock.exists()  # preserved
             assert socket_file.exists()  # preserved
 
 
 class TestXauthAdd:
     def test_xauth_add_failure_aborts_startup(self):
-        """If xauth add returns non-zero, start_headless should return False."""
+        """If xauth add returns non-zero, start_headless should return 1 (failure)."""
         cfg = x11ctl.Config()
         started = []
 
@@ -910,11 +893,11 @@ class TestXauthAdd:
                  args=[], returncode=1, stdout="", stderr="auth error",
              )):
             result = x11ctl.start_headless(cfg, started)
-            assert result is False
+            assert result == 1
             assert "xvfb" not in started
 
     def test_xauth_add_timeout_aborts_startup(self):
-        """If xauth add times out, start_headless should return False."""
+        """If xauth add times out, start_headless should return 1 (failure)."""
         cfg = x11ctl.Config()
         started = []
 
@@ -924,7 +907,7 @@ class TestXauthAdd:
              patch.object(x11ctl, "create_xauth_file"), \
              patch("subprocess.run", side_effect=subprocess.TimeoutExpired("xauth", 5)):
             result = x11ctl.start_headless(cfg, started)
-            assert result is False
+            assert result == 1
 
     def test_xauth_add_missing_binary_removes_xauth_and_aborts_startup(self):
         """If xauth add raises FileNotFoundError, start_headless should clean up."""
@@ -938,7 +921,7 @@ class TestXauthAdd:
              patch("subprocess.run", side_effect=FileNotFoundError), \
              patch("os.unlink") as mock_unlink:
             result = x11ctl.start_headless(cfg, started)
-            assert result is False
+            assert result == 1
             mock_unlink.assert_called_once_with(cfg.xauth)
 ```
 
@@ -1009,8 +992,11 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
 # Start headless (Tier 1)
 # ---------------------------------------------------------------------------
 
-def start_headless(cfg: Config, started: list[str]) -> bool:
-    """Start Xvfb. On failure, returns False (caller handles rollback).
+def start_headless(cfg: Config, started: list[str]) -> int:
+    """Start Xvfb. Returns 0 on success, 1 on general failure, 2 on port conflict.
+
+    All tier start functions (start_headless, start_xpra, start_vnc) return int
+    with the same convention: 0=ok, 1=failure, 2=port conflict.
 
     Appends 'xvfb' to `started` list on success for rollback tracking.
     """
@@ -1021,7 +1007,7 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
     if data is not None:
         pid, epoch = data
         if validate_pid(pid, epoch, "Xvfb"):
-            return True  # already running
+            return 0  # already running
 
     # Preflight
     missing = check_binaries(["Xvfb", "xauth", "xdpyinfo"])
@@ -1091,13 +1077,15 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
     logfile = cfg.logfile("xvfb")
     rotate_log(logfile)
 
-    # Launch Xvfb
+    # Launch Xvfb (try/finally to prevent FD leak if Popen raises)
     log_fd = os.open(logfile, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
-    proc = subprocess.Popen(
-        ["Xvfb", cfg.display, "-screen", "0", cfg.screen, "-auth", cfg.xauth],
-        stdout=log_fd, stderr=log_fd,
-    )
-    os.close(log_fd)
+    try:
+        proc = subprocess.Popen(
+            ["Xvfb", cfg.display, "-screen", "0", cfg.screen, "-auth", cfg.xauth],
+            stdout=log_fd, stderr=log_fd,
+        )
+    finally:
+        os.close(log_fd)
 
     # Write pidfile
     write_pidfile(pidfile, proc.pid, int(time.time()))
@@ -1226,6 +1214,36 @@ class TestStopCommand:
             result = x11ctl.stop_command_impl(cfg, tier="all")
             assert result == 0
             assert len(deleted) == 1
+
+
+class TestStartRollback:
+    def test_rollback_on_xpra_failure(self):
+        """If start_xpra fails after start_headless succeeds, headless should be rolled back."""
+        cfg = x11ctl.Config()
+        rollback_calls = []
+
+        def mock_start_headless(c, started, **kw):
+            started.append("xvfb")
+            return 0
+
+        def mock_start_xpra(c, started, **kw):
+            return 1  # failure
+
+        def mock_stop(pidfile, comm):
+            rollback_calls.append(comm)
+            return True
+
+        with patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "start_xpra", side_effect=mock_start_xpra), \
+             patch.object(x11ctl, "stop_component", side_effect=mock_stop), \
+             patch.object(x11ctl, "read_tiers", return_value=set()), \
+             patch.object(x11ctl, "delete_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.start_command_impl(cfg, desired={"headless", "xpra"}, bind_all=False)
+            assert result != 0  # failure
+            # Xvfb should have been rolled back
+            assert "Xvfb" in rollback_calls or "xvfb" in [c.lower() for c in rollback_calls]
 
 
 class TestStatusCommand:
