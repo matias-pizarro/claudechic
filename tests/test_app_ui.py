@@ -1,6 +1,7 @@
 """App-level UI tests without SDK dependency."""
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -787,7 +788,15 @@ async def test_shell_command_eof_before_poll_does_not_show_tip(mock_sdk):
     proc.pid = 123
     proc.returncode = 0
     proc.poll.return_value = None
-    proc.wait.return_value = 0
+    wait_started = threading.Event()
+    allow_wait = threading.Event()
+
+    def fake_wait():
+        wait_started.set()
+        allow_wait.wait(timeout=1.0)
+        return 0
+
+    proc.wait.side_effect = fake_wait
 
     async with app.run_test() as pilot:
         with (
@@ -805,6 +814,12 @@ async def test_shell_command_eof_before_poll_does_not_show_tip(mock_sdk):
                 None,
                 {},
             )
+            await asyncio.to_thread(wait_started.wait, 1.0)
+            assert tip_callback is not None
+            assert handle_ref[0] is not None
+            assert not handle_ref[0].cancelled
+            tip_callback(*tip_args)
+            allow_wait.set()
             await wait_for_workers(app)
             await pilot.pause()
 
