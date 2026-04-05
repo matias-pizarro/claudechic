@@ -715,11 +715,44 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
 Run: `uv run python -m pytest tests/test_x11ctl.py::TestValidatePid -v`
 Expected: All PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Write failing tests for validate_pid_tristate**
+
+```python
+class TestValidatePidTristate:
+    def test_alive_process(self):
+        """Living process with matching comm returns 'alive'."""
+        pid = os.getpid()
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True)
+        comm = result.stdout.strip()
+        assert x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), comm) == "alive"
+
+    def test_dead_process(self):
+        """Non-existent PID returns 'dead'."""
+        assert x11ctl.validate_pid_tristate(99999999, int(x11ctl.time.time()), "fake") == "dead"
+
+    def test_ps_timeout_returns_unknown(self):
+        """ps timeout during comm check returns 'unknown'."""
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
+
+    def test_ps_not_found_returns_unknown(self):
+        """Missing ps binary returns 'unknown'."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
+            assert result == "unknown"
+```
+
+- [ ] **Step 6: Implement validate_pid_tristate**
+
+Same logic as `validate_pid` but returns `"alive"` / `"dead"` / `"unknown"`. `ProcessLookupError` from `os.kill(pid, 0)` → `"dead"`. `subprocess.TimeoutExpired` or `FileNotFoundError` during `ps` calls → `"unknown"`. All other paths that would return `True` → `"alive"`, `False` → `"dead"`.
+
+- [ ] **Step 7: Run tests, commit**
 
 ```bash
 git add scripts/x11ctl tests/test_x11ctl.py
-git commit -m "feat: x11ctl validate_pid with 3-factor PID identity check"
+git commit -m "feat: x11ctl validate_pid + validate_pid_tristate"
 ```
 
 ---
@@ -2189,7 +2222,7 @@ Check `os.geteuid() == 0`, map tier flags to package lists (headless: xorg-vfbse
         stale_dir.mkdir(mode=0o700)
         (stale_dir / "xvfb.pid").write_text("99999999 1712345678\n")
         with patch("glob.glob", return_value=[str(stale_dir)]), \
-             patch.object(x11ctl, "validate_pid", return_value=False), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="dead"), \
              patch("shutil.rmtree", side_effect=OSError("permission denied")):
             success, _ = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
             assert success is True  # non-fatal, continues
