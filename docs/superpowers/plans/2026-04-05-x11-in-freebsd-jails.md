@@ -809,7 +809,8 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> None:
     lock_path = Path(tmp_dir) / f".X{display_num}-lock"
     socket_path = Path(tmp_dir) / ".X11-unix" / f"X{display_num}"
 
-    # Check if a live Xvfb owns these artifacts
+    # Check if a live Xvfb owns these artifacts — FAIL CLOSED
+    # Only delete if we have positive evidence the owning PID is gone or not Xvfb.
     if lock_path.exists() and not lock_path.is_symlink():
         try:
             pid_str = lock_path.read_text().strip()
@@ -819,10 +820,16 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> None:
                 ["ps", "-p", str(pid), "-o", "comm="],
                 capture_output=True, text=True, timeout=5,
             )
-            if result.stdout.strip() == "Xvfb":
+            comm = result.stdout.strip()
+            if comm == "Xvfb":
                 return  # Live Xvfb owns these — don't touch
-        except (ValueError, FileNotFoundError, subprocess.TimeoutExpired):
-            pass  # Can't determine owner — safe to clean
+            if comm:
+                pass  # PID alive but not Xvfb — stale, safe to clean
+            # If comm is empty, process is dead — stale, safe to clean
+        except (ValueError, FileNotFoundError):
+            pass  # Lock file unreadable/missing — safe to clean (no owner)
+        except subprocess.TimeoutExpired:
+            return  # Can't determine owner — fail closed, don't touch
 
     for p in (lock_path, socket_path):
         if p.exists() and not p.is_symlink():
@@ -857,12 +864,11 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
     # Clean stale artifacts
     clean_stale_x_artifacts(cfg.display_number)
 
-    # Create xauth
+    # Create xauth file and add a random cookie (display-independent — no live X server needed)
     create_xauth_file(cfg.xauth)
-
-    # Generate xauth cookie
+    cookie = os.urandom(16).hex()  # 32-char hex MIT-MAGIC-COOKIE
     subprocess.run(
-        ["xauth", "-f", cfg.xauth, "generate", cfg.display, ".", "trusted"],
+        ["xauth", "-f", cfg.xauth, "add", cfg.display, ".", cookie],
         capture_output=True, timeout=5,
     )
 
