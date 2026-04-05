@@ -14,7 +14,7 @@
 
 **Return type convention:** All tier start functions (`start_headless`, `start_xpra`, `start_vnc`) share the signature `(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> int` and return: 0=success, 1=general failure, 2=port conflict. `start_headless` ignores the `bind` parameter (Xvfb uses Unix sockets). Helper function `stop_component` returns `bool`: `True` on success or nothing-to-do, `False` when SIGKILL fails (process still running). `clean_stale_x_artifacts` returns `bool`. The `start_command_impl` aggregates component return codes into a single exit code.
 
-**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully. **Note on test vs runtime policy:** The runtime `validate_pid` gracefully degrades to 2-factor (production resilience). The *tests* for `validate_pid` and `validate_pid_tristate` that use live `ps etimes` require etimes to be available (test determinism) — they are skipped on platforms where etimes is unavailable. This is not a contradiction: runtime degrades gracefully, tests require a capable environment.
+**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully. **Note on test vs runtime policy:** The runtime `validate_pid` gracefully degrades to 2-factor (production resilience). The *tests* that use live `ps etimes` are skipped on platforms where etimes is unavailable (`pytest.skip`). A dedicated mock-based test (`test_2factor_fallback_when_etimes_empty`) verifies the fallback path works correctly without requiring a restricted platform. **2-factor tradeoff:** Dropping etimes increases the theoretical risk of accepting a reused PID with the same command name. In practice, this requires: (1) the managed process dying, (2) its PID being reassigned, (3) the new process having the same `comm` — all within the same `x11ctl` operation. On FreeBSD (sequential PID allocation, default `kern.pid_max` 99999), this probability is negligible. The 2-factor fallback is explicitly preferred over treating every pidfile as stale in restricted jails.
 
 **Atomic file writes:** Both `write_pidfile` and `write_tiers` MUST use the write-to-temp-then-rename pattern: write to a tempfile in the same directory (`/tmp`), then `os.rename()` directly over the target path. Do NOT unlink the old file first — `os.rename()` atomically replaces the destination, so readers never see a missing file and a crash between unlink and rename cannot lose the last known-good state. Before renaming, check `os.path.lexists(target) and os.path.islink(target)` — if the target is a symlink, raise `OSError` instead of renaming over it. Failure of `write_pidfile` after a successful `Popen` MUST terminate the spawned process and clean up xauth before returning failure.
 
@@ -652,6 +652,26 @@ class TestValidatePid:
         comm = result.stdout.strip()
         ancient_epoch = int(x11ctl.time.time()) - 365 * 86400  # 1 year ago
         assert x11ctl.validate_pid(pid, ancient_epoch, comm) is False
+
+    def test_2factor_fallback_when_etimes_empty(self):
+        """validate_pid should succeed on 2-factor (alive + comm) when etimes is empty."""
+        pid = os.getpid()
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True,
+        )
+        comm = result.stdout.strip()
+        # Mock ps etimes to return empty (restricted jail scenario)
+        original_run = subprocess.run
+        call_count = [0]
+        def mock_run(cmd, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 2:  # second ps call is etimes
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            return original_run(cmd, **kwargs)
+        with patch("subprocess.run", side_effect=mock_run):
+            # Should still return True via 2-factor (alive + comm)
+            assert x11ctl.validate_pid(pid, int(x11ctl.time.time()), comm) is True
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
