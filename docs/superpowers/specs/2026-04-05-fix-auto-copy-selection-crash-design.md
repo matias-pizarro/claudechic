@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-05
 **Status:** Revised after 4-agent review
-**Revision:** 5 (rev 4: handle-clobbering fix; rev 5: tighter acceptance criteria, 8 tests, log volume tradeoff)
+**Revision:** 6 (rev 5: 8 tests, log volume; rev 6: precise log-volume/goal wording, 9 tests with failure-mode distinguishability)
 
 ## Problem
 
@@ -127,7 +127,7 @@ def _safe_get_selected_text(self) -> str | None:
 Key decisions:
 - Catches **only `IndexError`** -- the single evidenced exception from `Selection.extract()` line 66.
 - Returns `None` on failure -- callers already check truthiness of the result.
-- `log.debug()` not `log.warning()` -- this is expected behavior during streaming, not an anomaly. No rate-limiting or sampling is applied: the debounce timer ensures at most one stale-selection log entry per 50ms window, which is acceptable at debug level. If log volume becomes a concern, the first mitigation would be to raise the file handler level, not to throttle this specific message.
+- `log.debug()` not `log.warning()` -- this is expected behavior during streaming, not an anomaly. No rate-limiting or sampling is applied: the debounce reduces (but does not strictly bound) log volume from auto-copy, and manual copy is not debounced. In practice, stale selections require active mouse selection during content mutation, limiting natural frequency. If log volume becomes a concern, options include targeted sampling in this code path or raising the file handler level. Both are acceptable future mitigations; neither is needed now.
 
 ### Both call sites use the helper
 
@@ -175,7 +175,7 @@ The callback does **not** clear `_copy_timer`. Doing so would introduce a handle
 
 This follows the existing timer-management pattern in the codebase (see `_review_poll_timer` at app.py:898).
 
-### Tests (8 tests in test_app_ui.py)
+### Tests (9 tests in test_app_ui.py)
 
 1. **`test_check_and_copy_selection_handles_index_error`** -- mock `screen.get_selected_text` to raise `IndexError`, assert method returns without crash, assert no "Copied" notification.
 2. **`test_action_copy_selection_handles_index_error`** -- same for the keybinding path.
@@ -185,13 +185,14 @@ This follows the existing timer-management pattern in the codebase (see `_review
 6. **`test_check_and_copy_selection_ignores_whitespace`** -- mock `screen.get_selected_text` to return `"\n  \n"`, assert `copy_to_clipboard` is NOT called.
 7. **`test_old_timer_callback_does_not_clobber_new_timer`** -- simulate an old callback firing after a newer timer is stored: set `_copy_timer` to a mock timer, call `_check_and_copy_selection`, assert `_copy_timer` still references the mock (not `None`).
 8. **`test_action_copy_selection_copies_whitespace_only`** -- mock `screen.get_selected_text` to return `"\n  \n"`, assert `copy_to_clipboard` IS called (manual copy preserves whitespace-only selections for backwards compatibility).
+9. **`test_check_and_copy_selection_clipboard_failure_shows_warning`** -- mock `screen.get_selected_text` to return text, mock `copy_to_clipboard` to return `False`, assert "Copy failed" warning notification is shown (distinguishes clipboard failure from stale selection, which produces no toast).
 
 ## Goals and Non-Goals
 
 **Goals:**
 - Contain the `IndexError` crash in all selection-copy paths (crash-containment, not root-cause fix)
-- Add observability so race frequency is measurable
-- Prevent timer accumulation on rapid mouse events
+- Add best-effort debug observability so race frequency is measurable in default dev setups (when file logging is active; if file logging is unavailable, stale selections are intentionally silent)
+- Reduce timer accumulation on rapid mouse events (best-effort debounce)
 
 **Non-goals:**
 - Fix the upstream Textual bug in `Selection.extract()` (backlog item)
@@ -222,7 +223,7 @@ This follows the existing timer-management pattern in the codebase (see `_review
 - [ ] New mouse-up events cancel the previously tracked timer when possible; stale callbacks do not crash (debounce is best-effort optimization, not a hard guarantee)
 
 **Non-functional:**
-- [ ] All 8 new tests pass
+- [ ] All 9 new tests pass
 - [ ] Pre-commit hooks pass (ruff, ruff-format, pyright)
 - [ ] No behavioral change for the success path -- identical UX when copy works
 
