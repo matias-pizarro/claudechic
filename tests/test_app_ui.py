@@ -669,7 +669,7 @@ async def test_bang_command_worker_failure_does_not_exit_app(mock_sdk):
 
 @pytest.mark.asyncio
 async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(mock_sdk):
-    """Commands that finish before the tip delay should cancel the tip callback."""
+    """Commands finishing during PTY polling should still cancel the tip callback."""
     app = ChatApp()
 
     class FakeHandle:
@@ -697,18 +697,20 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
     fake_loop = MagicMock()
     fake_loop.call_later.side_effect = fake_call_later
 
-    async def finish_quickly(*_args):
-        await asyncio.sleep(0)
-        return "", 0, False
+    proc = MagicMock()
+    proc.pid = 123
+    proc.returncode = 0
+    proc.poll.side_effect = [None, 0]
+    proc.wait.return_value = 0
 
     async with app.run_test() as pilot:
         with (
             patch.object(app, "notify") as mock_notify,
             patch("claudechic.app.asyncio.get_running_loop", return_value=fake_loop),
-            patch(
-                "claudechic.shell_runner.run_in_pty_cancellable",
-                new=AsyncMock(side_effect=finish_quickly),
-            ),
+            patch("claudechic.shell_runner.pty.openpty", return_value=(10, 11)),
+            patch("claudechic.shell_runner.subprocess.Popen", return_value=proc),
+            patch("claudechic.shell_runner.select.select", return_value=([], [], [])) as mock_select,
+            patch("claudechic.shell_runner.os.close"),
         ):
             app.run_shell_command(
                 "echo hello",
@@ -721,6 +723,8 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
 
         fake_loop.call_later.assert_called_once()
         assert fake_loop.call_later.call_args.args[0] == 1.0
+        assert mock_select.call_count >= 2
+        assert proc.poll.call_count >= 2
         assert not any(
             call.args and call.args[0] == "Tip: Use -i flag for interactive commands"
             for call in mock_notify.call_args_list
