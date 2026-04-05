@@ -50,17 +50,7 @@ def run_in_pty(
 
         output = b""
         while True:
-            r, _, _ = select.select([master_fd], [], [], PTY_POLL_INTERVAL)
-            if r:
-                try:
-                    data = os.read(master_fd, 4096)
-                    if data:
-                        output += data
-                    else:
-                        break
-                except OSError:
-                    break
-            elif proc.poll() is not None:
+            if proc.poll() is not None:
                 # Process done, drain remaining output
                 while True:
                     r, _, _ = select.select([master_fd], [], [], 0.05)
@@ -76,6 +66,17 @@ def run_in_pty(
                         break
                 break
 
+            r, _, _ = select.select([master_fd], [], [], PTY_POLL_INTERVAL)
+            if r:
+                try:
+                    data = os.read(master_fd, 4096)
+                    if data:
+                        output += data
+                    else:
+                        break
+                except OSError:
+                    break
+
         os.close(master_fd)
         proc.wait()
         return output.decode(errors="replace"), proc.returncode or 0
@@ -90,6 +91,7 @@ def _run_in_pty_with_cancel(
     cwd: str | None,
     env: dict[str, str],
     check_cancelled: Callable[[], bool],
+    on_exit_detected: Callable[[], None] | None = None,
 ) -> tuple[str, int, bool]:
     """Run command in PTY with cancellation support.
 
@@ -124,6 +126,15 @@ def _run_in_pty_with_cancel(
 
         output = b""
         was_cancelled = False
+        exit_detected = False
+
+        def mark_exit_detected() -> None:
+            nonlocal exit_detected
+            if exit_detected:
+                return
+            exit_detected = True
+            if on_exit_detected is not None:
+                on_exit_detected()
 
         while True:
             # Check for cancellation
@@ -136,17 +147,8 @@ def _run_in_pty_with_cancel(
                     pass
                 break
 
-            r, _, _ = select.select([master_fd], [], [], PTY_POLL_INTERVAL)
-            if r:
-                try:
-                    data = os.read(master_fd, 4096)
-                    if data:
-                        output += data
-                    else:
-                        break
-                except OSError:
-                    break
-            elif proc.poll() is not None:
+            if proc.poll() is not None:
+                mark_exit_detected()
                 # Process done, drain remaining output
                 while True:
                     r, _, _ = select.select([master_fd], [], [], 0.05)
@@ -161,6 +163,17 @@ def _run_in_pty_with_cancel(
                     except OSError:
                         break
                 break
+
+            r, _, _ = select.select([master_fd], [], [], PTY_POLL_INTERVAL)
+            if r:
+                try:
+                    data = os.read(master_fd, 4096)
+                    if data:
+                        output += data
+                    else:
+                        break
+                except OSError:
+                    break
 
         os.close(master_fd)
         master_fd = -1
@@ -186,6 +199,7 @@ async def run_in_pty_cancellable(
     cwd: str | None,
     env: dict[str, str],
     cancel_event: asyncio.Event,
+    on_exit_detected: Callable[[], None] | None = None,
 ) -> tuple[str, int, bool]:
     """Run command in PTY with async cancellation support.
 
@@ -208,4 +222,5 @@ async def run_in_pty_cancellable(
         cwd,
         env,
         cancel_event.is_set,
+        on_exit_detected,
     )

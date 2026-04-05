@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -1673,15 +1674,21 @@ class ChatApp(App):
 
         async def _run() -> None:
             loop = asyncio.get_running_loop()
+            process_exited = threading.Event()
             tip_handle = loop.call_later(
                 1.0,
-                lambda: self.notify(
-                    "Tip: Use -i flag for interactive commands", timeout=5
-                ),
+                lambda: None
+                if process_exited.is_set()
+                else self.notify("Tip: Use -i flag for interactive commands", timeout=5),
             )
             try:
                 output, returncode, was_cancelled = await run_in_pty_cancellable(
-                    cmd, shell, cwd, env, cancel_event
+                    cmd,
+                    shell,
+                    cwd,
+                    env,
+                    cancel_event,
+                    process_exited.set,
                 )
 
                 if was_cancelled:
@@ -1702,6 +1709,7 @@ class ChatApp(App):
                 log.exception("Shell command failed: %s", cmd)
                 self.notify(f"Command failed: {exc}", severity="error")
             finally:
+                process_exited.set()
                 tip_handle.cancel()
                 self._pending_shell_cancels.pop(id(pending_widget), None)
                 pending_widget.remove()

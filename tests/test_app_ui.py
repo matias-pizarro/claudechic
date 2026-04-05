@@ -713,7 +713,7 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
         return ([], [], [])
 
     def fake_poll():
-        return 0 if elapsed >= 0.5 else None
+        return 0 if elapsed >= 0.95 else None
 
     handle_ref = [None]
     proc = MagicMock()
