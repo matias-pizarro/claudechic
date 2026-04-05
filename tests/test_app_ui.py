@@ -675,32 +675,51 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
     class FakeHandle:
         def __init__(self) -> None:
             self.cancelled = False
-            self.task: asyncio.Task[None] | None = None
+            self.fired = False
 
         def cancel(self) -> None:
             self.cancelled = True
-            if self.task is not None:
-                self.task.cancel()
+
+    elapsed = 0.0
+    tip_delay = 0.0
+    tip_callback = None
+    tip_args = ()
 
     def fake_call_later(delay, callback, *args):
+        nonlocal tip_delay, tip_callback, tip_args
         handle = FakeHandle()
-
-        async def fire() -> None:
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            if not handle.cancelled:
-                callback(*args)
-
-        handle.task = asyncio.create_task(fire())
+        tip_delay = delay
+        tip_callback = callback
+        tip_args = args
+        handle_ref[0] = handle
         return handle
 
     fake_loop = MagicMock()
     fake_loop.call_later.side_effect = fake_call_later
 
+    def fake_select(_rlist, _wlist, _xlist, timeout):
+        nonlocal elapsed
+        elapsed += timeout
+        handle = handle_ref[0]
+        if (
+            handle is not None
+            and not handle.cancelled
+            and not handle.fired
+            and tip_callback is not None
+            and elapsed >= tip_delay
+        ):
+            handle.fired = True
+            tip_callback(*tip_args)
+        return ([], [], [])
+
+    def fake_poll():
+        return 0 if elapsed >= 0.5 else None
+
+    handle_ref = [None]
     proc = MagicMock()
     proc.pid = 123
     proc.returncode = 0
-    proc.poll.side_effect = [None, 0]
+    proc.poll.side_effect = fake_poll
     proc.wait.return_value = 0
 
     async with app.run_test() as pilot:
@@ -709,7 +728,7 @@ async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(moc
             patch("claudechic.app.asyncio.get_running_loop", return_value=fake_loop),
             patch("claudechic.shell_runner.pty.openpty", return_value=(10, 11)),
             patch("claudechic.shell_runner.subprocess.Popen", return_value=proc),
-            patch("claudechic.shell_runner.select.select", return_value=([], [], [])) as mock_select,
+            patch("claudechic.shell_runner.select.select", side_effect=fake_select) as mock_select,
             patch("claudechic.shell_runner.os.close"),
         ):
             app.run_shell_command(
