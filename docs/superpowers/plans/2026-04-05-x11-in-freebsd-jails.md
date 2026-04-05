@@ -14,7 +14,7 @@
 
 **Return type convention:** All tier start functions (`start_headless`, `start_xpra`, `start_vnc`) share the signature `(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> int` and return: 0=success, 1=general failure, 2=port conflict. `start_headless` ignores the `bind` parameter (Xvfb uses Unix sockets). Helper function `stop_component` returns `bool`: `True` on success or nothing-to-do, `False` when SIGKILL fails (process still running). `clean_stale_x_artifacts` returns `bool`. The `start_command_impl` aggregates component return codes into a single exit code.
 
-**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully. **Note on test vs runtime policy:** The runtime `validate_pid` gracefully degrades to 2-factor (production resilience). The *tests* that use live `ps etimes` are skipped on platforms where etimes is unavailable (`pytest.skip`). A dedicated mock-based test (`test_2factor_fallback_when_etimes_empty`) verifies the fallback path works correctly without requiring a restricted platform. **2-factor tradeoff:** Dropping etimes increases the theoretical risk of accepting a reused PID with the same command name. In practice, this requires: (1) the managed process dying, (2) its PID being reassigned, (3) the new process having the same `comm` — all within the same `x11ctl` operation. On FreeBSD (sequential PID allocation, default `kern.pid_max` 99999), this probability is negligible. The 2-factor fallback is explicitly preferred over treating every pidfile as stale in restricted jails.
+**`validate_pid` fallback:** If `ps -o etimes=` is unavailable inside a jail (restricted `kern.proc` visibility), `validate_pid` should fall back to PID + comm check only (2-factor instead of 3-factor) rather than treating every pidfile as stale. The implementer should handle empty `ps` output gracefully. **Note on test vs runtime policy:** The runtime `validate_pid` gracefully degrades to 2-factor (production resilience). The *tests* that use live `ps etimes` are skipped on platforms where etimes is unavailable (`pytest.skip`). A dedicated mock-based test (`test_2factor_fallback_when_etimes_empty`) verifies the fallback path works correctly without requiring a restricted platform. **2-factor tradeoff:** Dropping etimes increases the theoretical risk of accepting a reused PID with the same command name. The risk window is from process death until the next `x11ctl start`, `stop`, or `status` invocation that reads the stale pidfile. This requires: (1) the managed process dying, (2) its PID being reassigned to a new process, (3) the new process having the same `comm` (e.g., `Xvfb`, `xpra`) — all before the next `x11ctl` operation. On FreeBSD (sequential PID allocation, default `kern.pid_max` 99999), and given that the managed processes have distinctive command names, this probability is negligible. The 2-factor fallback is explicitly preferred over treating every pidfile as stale in restricted jails.
 
 **Atomic file writes:** Both `write_pidfile` and `write_tiers` MUST use the write-to-temp-then-rename pattern: write to a tempfile in the same directory (`/tmp`), then `os.rename()` directly over the target path. Do NOT unlink the old file first — `os.rename()` atomically replaces the destination, so readers never see a missing file and a crash between unlink and rename cannot lose the last known-good state. Before renaming, check `os.path.lexists(target) and os.path.islink(target)` — if the target is a symlink, raise `OSError` instead of renaming over it. Failure of `write_pidfile` after a successful `Popen` MUST terminate the spawned process and clean up xauth before returning failure.
 
@@ -41,7 +41,7 @@
 
 **Self-test cleanup:** On completion or failure, self-test MUST: (1) stop all spawned processes via `stop_component` for each component in the selftest stack, (2) remove the xauth file, (3) remove the mkdtemp state directory (`shutil.rmtree`). On SIGTERM/SIGINT interruption, the handler MUST kill all child processes before exiting (exit code 128+SIGNUM). **Stale recovery:** Performed while holding the global lock (so no concurrent self-test can be running). Scan for stale directories matching `/tmp/.x11ctl-selftest-*-*/` (glob). For each candidate path: (1) `os.lstat()` (NOT `os.stat()` — must not follow symlinks) to check it is a real directory (not a symlink); reject and skip any symlinks; (2) verify ownership (`lstat_result.st_uid == os.getuid()`); (3) open the directory with `os.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)` to get a verified fd, then close it (this confirms it is a real directory we own); (4) run the two-phase stale recovery algorithm below; (5) if successful, `shutil.rmtree` the directory; (6) `os.unlink` the corresponding flat xauth file (also checked with `os.lstat` + `not is_symlink` before unlinking).
 
-**Stale recovery error policy (two-phase algorithm per directory):**
+**Stale recovery error policy (three-phase algorithm per directory):**
 
 PID validation in stale recovery uses `validate_pid_tristate(pid, epoch, comm)` → `"alive"` / `"dead"` / `"unknown"`. (The existing `validate_pid` returning `bool` is unchanged and used only by `stop_component` / `start_headless`.) `validate_pid_tristate` differs only in error handling: `subprocess.TimeoutExpired` or `FileNotFoundError` during `ps` calls → `"unknown"`. Malformed pidfiles (can't parse PID/epoch) → `"dead"`.
 
@@ -663,11 +663,12 @@ class TestValidatePid:
         comm = result.stdout.strip()
         # Mock ps etimes to return empty (restricted jail scenario)
         original_run = subprocess.run
-        call_count = [0]
         def mock_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 2:  # second ps call is etimes
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            # Match on command args, not call order
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "etimes=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
             return original_run(cmd, **kwargs)
         with patch("subprocess.run", side_effect=mock_run):
             # Should still return True via 2-factor (alive + comm)
@@ -787,20 +788,35 @@ class TestValidatePidTristate:
 
     def test_ps_etimes_timeout_returns_unknown(self):
         """ps timeout during etimes check (after comm succeeds) returns 'unknown'."""
-        call_count = []
         def mock_run(cmd, **kwargs):
-            call_count.append(1)
-            if len(call_count) == 1:
-                # First call (comm check) succeeds
-                result = subprocess.run.__wrapped__(cmd, **kwargs) if hasattr(subprocess.run, '__wrapped__') else None
-                # Return matching comm
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="python\n", stderr="")
-            else:
-                # Second call (etimes check) times out
-                raise subprocess.TimeoutExpired("ps", 5)
+            # Match on command args, not call order
+            if "-o" in cmd:
+                idx = cmd.index("-o") + 1
+                if idx < len(cmd) and "etimes=" in cmd[idx]:
+                    raise subprocess.TimeoutExpired("ps", 5)
+                if idx < len(cmd) and "comm=" in cmd[idx]:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="python\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
         with patch("subprocess.run", side_effect=mock_run):
             result = x11ctl.validate_pid_tristate(os.getpid(), int(x11ctl.time.time()), "python")
             assert result == "unknown"
+
+    def test_2factor_fallback_when_etimes_empty(self):
+        """validate_pid_tristate should return 'alive' on 2-factor when etimes empty."""
+        pid = os.getpid()
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True)
+        comm = result.stdout.strip()
+        # Mock ps to return matching comm on first call, empty etimes on second
+        def mock_run(cmd, **kwargs):
+            if "-o" in cmd and "etimes=" in cmd[cmd.index("-o") + 1] if "-o" in cmd else False:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            if "-o" in cmd and "comm=" in cmd[cmd.index("-o") + 1] if "-o" in cmd else False:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"{comm}\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", side_effect=mock_run):
+            result = x11ctl.validate_pid_tristate(pid, int(x11ctl.time.time()), comm)
+            assert result == "alive"  # 2-factor fallback succeeds
 
     def test_ps_not_found_returns_unknown(self):
         """Missing ps binary returns 'unknown'."""
