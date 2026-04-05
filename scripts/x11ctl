@@ -29,6 +29,17 @@ from typing import Callable, Optional
 # Config
 # ---------------------------------------------------------------------------
 
+def _parse_port_env(name: str, default: int) -> int:
+    """Parse a port number from an env var with a user-friendly error."""
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer (got {raw!r})")
+
+
 _DISPLAY_RE = re.compile(r"^:\d+\Z")
 _SCREEN_RE = re.compile(r"^\d+x\d+x\d+\Z")
 _XAUTH_RE = re.compile(r"^/tmp/\.x11ctl-[A-Za-z0-9._-]+\Z")
@@ -42,9 +53,9 @@ class Config:
     display: str = field(default_factory=lambda: os.environ.get("X11CTL_DISPLAY", ":99"))
     screen: str = field(default_factory=lambda: os.environ.get("X11CTL_SCREEN", "1920x1080x24"))
     bind: str = field(default_factory=lambda: os.environ.get("X11CTL_BIND", "127.0.0.1"))
-    xpra_port: int = field(default_factory=lambda: int(os.environ.get("X11CTL_XPRA_PORT", "10000")))
-    vnc_port: int = field(default_factory=lambda: int(os.environ.get("X11CTL_VNC_PORT", "5900")))
-    novnc_port: int = field(default_factory=lambda: int(os.environ.get("X11CTL_NOVNC_PORT", "6080")))
+    xpra_port: int = field(default_factory=lambda: _parse_port_env("X11CTL_XPRA_PORT", 10000))
+    vnc_port: int = field(default_factory=lambda: _parse_port_env("X11CTL_VNC_PORT", 5900))
+    novnc_port: int = field(default_factory=lambda: _parse_port_env("X11CTL_NOVNC_PORT", 6080))
     xauth: str = field(default_factory=lambda: os.environ.get("X11CTL_XAUTH", ""))
     state_prefix: str = field(default=".x11ctl")
     state_dir: str = field(default="")
@@ -138,11 +149,11 @@ class Config:
 # Tier logic
 # ---------------------------------------------------------------------------
 
-_TIER_DEPS: dict[str, set[str]] = {
-    "headless": {"headless"},
-    "xpra": {"headless", "xpra"},
-    "vnc": {"headless", "vnc"},
-    "all": {"headless", "xpra", "vnc"},
+_TIER_DEPS: dict[str, frozenset[str]] = {
+    "headless": frozenset({"headless"}),
+    "xpra": frozenset({"headless", "xpra"}),
+    "vnc": frozenset({"headless", "vnc"}),
+    "all": frozenset({"headless", "xpra", "vnc"}),
 }
 
 
@@ -267,7 +278,10 @@ def read_pidfile(path: str) -> Optional[tuple[int, int]]:
         parts = data.split()
         if len(parts) != 2:
             return None
-        return int(parts[0]), int(parts[1])
+        pid, epoch = int(parts[0]), int(parts[1])
+        if pid < 1 or epoch < 0:
+            return None  # Reject tampered pidfiles (negative PID would kill all)
+        return pid, epoch
     except (FileNotFoundError, ValueError, OSError):
         return None
 
@@ -489,8 +503,7 @@ def main() -> None:
     """Entry point."""
     args = parse_args(sys.argv[1:])
     if args.command is None:
-        parse_args(["--help"])
-        return
+        parse_args(["--help"])  # prints help and calls sys.exit(0)
     print(f"x11ctl: command '{args.command}' not yet implemented", file=sys.stderr)
     sys.exit(1)
 

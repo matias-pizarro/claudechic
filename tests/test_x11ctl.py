@@ -3,12 +3,11 @@
 import importlib.machinery
 import importlib.util
 import os
-import signal
 import subprocess
 import sys
 import socket as _socket
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -292,6 +291,11 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="must be 1-65535"):
             x11ctl.Config()
 
+    def test_port_non_integer_rejected(self, monkeypatch):
+        monkeypatch.setenv("X11CTL_XPRA_PORT", "abc")
+        with pytest.raises(ValueError, match="must be an integer"):
+            x11ctl.Config()
+
     def test_bind_invalid_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_BIND", "not-an-ip")
         with pytest.raises(ValueError, match="valid IPv4"):
@@ -411,6 +415,17 @@ class TestPidfile:
         with pytest.raises(OSError):
             x11ctl.write_pidfile(str(link), 1, 1)
 
+    def test_read_negative_pid_returns_none(self, tmp_path):
+        """Negative PIDs must be rejected (os.kill(-1) would kill all)."""
+        path = str(tmp_path / "neg.pid")
+        Path(path).write_text("-1 1712345678\n")
+        assert x11ctl.read_pidfile(path) is None
+
+    def test_read_negative_epoch_returns_none(self, tmp_path):
+        path = str(tmp_path / "neg.pid")
+        Path(path).write_text("1234 -1\n")
+        assert x11ctl.read_pidfile(path) is None
+
     def test_read_rejects_symlink(self, tmp_path):
         """read_pidfile should also reject symlinks per spec O_NOFOLLOW."""
         target = tmp_path / "target"
@@ -447,6 +462,12 @@ class TestTiersFile:
         link.symlink_to(target)
         with pytest.raises(OSError):
             x11ctl.write_tiers(str(link), {"headless"})
+
+    def test_write_empty_set_reads_as_none(self, tmp_path):
+        """Empty tier set writes a newline; reads back as None (nothing running)."""
+        path = str(tmp_path / "tiers")
+        x11ctl.write_tiers(path, set())
+        assert x11ctl.read_tiers(path) is None
 
     def test_write_rejects_meta_tier(self, tmp_path):
         """write_tiers should reject 'all' and other non-component tier names."""
@@ -632,7 +653,6 @@ class TestXauthCreation:
     def test_creates_with_0600(self, tmp_path):
         path = str(tmp_path / "xauth")
         x11ctl.create_xauth_file(path)
-        import stat
         mode = os.stat(path).st_mode & 0o777
         assert mode == 0o600
 
