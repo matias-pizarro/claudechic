@@ -814,13 +814,22 @@ class TestStaleCleanup:
             assert lock.exists()  # preserved
             assert socket_file.exists()  # preserved
 
-    def test_clean_live_non_xvfb_cleaned(self, tmp_path):
-        """Lock owned by a live non-Xvfb process should be cleaned (stale)."""
+    def test_clean_live_non_xvfb_preserved(self, tmp_path):
+        """Lock owned by a live non-Xvfb process should fail closed."""
         lock = tmp_path / ".X99-lock"
-        lock.write_text(f"{os.getpid()}\n")
-        # Our process is python, not Xvfb — stale, safe to clean
-        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-        assert result is True
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+        lock.write_text("12345\n")
+
+        # Mock ps to report a different live X server or other live process
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="Xorg\n", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # live process — don't touch
+            assert lock.exists()  # preserved
+            assert socket_file.exists()  # preserved
 
     def test_clean_socket_only_fails_closed(self, tmp_path):
         """Socket exists but lock missing — can't determine owner, fail closed."""
@@ -881,6 +890,21 @@ class TestXauthAdd:
              patch("subprocess.run", side_effect=subprocess.TimeoutExpired("xauth", 5)):
             result = x11ctl.start_headless(cfg, started)
             assert result is False
+
+    def test_xauth_add_missing_binary_removes_xauth_and_aborts_startup(self):
+        """If xauth add raises FileNotFoundError, start_headless should clean up."""
+        cfg = x11ctl.Config()
+        started = []
+
+        with patch.object(x11ctl, "check_binaries", return_value=[]), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "clean_stale_x_artifacts", return_value=True), \
+             patch.object(x11ctl, "create_xauth_file"), \
+             patch("subprocess.run", side_effect=FileNotFoundError), \
+             patch("os.unlink") as mock_unlink:
+            result = x11ctl.start_headless(cfg, started)
+            assert result is False
+            mock_unlink.assert_called_once_with(cfg.xauth)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -916,22 +940,20 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
     if not lock_path.exists() and socket_path.exists():
         return False
 
-    # Check if a live Xvfb owns these artifacts — FAIL CLOSED
-    # Only delete if we have positive evidence the owning PID is gone or not Xvfb.
+    # Check if the lock PID is still alive — FAIL CLOSED
+    # Only delete if we have positive evidence the owning PID is gone.
     if lock_path.exists() and not lock_path.is_symlink():
         try:
             pid_str = lock_path.read_text().strip()
             pid = int(pid_str)
-            # Check if this PID is alive and is actually Xvfb
+            # Check if this PID is still alive
             result = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "comm="],
                 capture_output=True, text=True, timeout=5,
             )
             comm = result.stdout.strip()
-            if comm == "Xvfb":
-                return False  # Live Xvfb owns these — caller distinguishes via lock PID
             if comm:
-                pass  # PID alive but not Xvfb — stale, safe to clean
+                return False  # Live process owns or may have reused this PID — don't touch
             # If comm is empty, process is dead — stale, safe to clean
         except (ValueError, FileNotFoundError):
             pass  # Lock file unreadable/missing — safe to clean (no owner)
@@ -969,19 +991,19 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
         print(f"  Run: pkg install {' '.join(missing)}", file=sys.stderr)
         return False
 
-    # Clean stale artifacts (fail-closed: won't delete if a live Xvfb or unknown owner)
+    # Clean stale artifacts (fail-closed: won't delete if a live process or unknown owner)
     if not clean_stale_x_artifacts(cfg.display_number):
-        # Distinguish "live Xvfb" from "unknown owner" for operator guidance
         lock_path = Path(f"/tmp/.X{cfg.display_number}-lock")
         if lock_path.exists():
             try:
                 lock_pid = int(lock_path.read_text().strip())
                 r = subprocess.run(["ps", "-p", str(lock_pid), "-o", "comm="],
                                    capture_output=True, text=True, timeout=2)
-                if r.stdout.strip() == "Xvfb":
+                comm = r.stdout.strip()
+                if comm:
                     print(
-                        f"Error: display {cfg.display} is already owned by a live Xvfb (PID {lock_pid}).\n"
-                        f"  Stop it first: kill {lock_pid}",
+                        f"Error: display {cfg.display} appears to be owned by a live process ({comm}, PID {lock_pid}).\n"
+                        f"  Verify it is safe to stop before removing X artifacts.",
                         file=sys.stderr,
                     )
                     return False
@@ -989,8 +1011,8 @@ def start_headless(cfg: Config, started: list[str]) -> bool:
                 pass
         print(
             f"Error: stale X artifacts exist for display {cfg.display} but ownership could not be determined.\n"
-            f"  This may be due to a crashed Xvfb or a ps timeout.\n"
-            f"  Manual fix: verify no Xvfb is running on {cfg.display}, then:\n"
+            f"  This may be due to a crashed X server or a ps timeout.\n"
+            f"  Manual fix: verify no live process is using {cfg.display}, then:\n"
             f"    rm -f /tmp/.X{cfg.display_number}-lock /tmp/.X11-unix/X{cfg.display_number}",
             file=sys.stderr,
         )
