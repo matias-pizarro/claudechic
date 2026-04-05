@@ -311,7 +311,7 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
     # Check 2: process name
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="],
+            ["/bin/ps", "-p", str(pid), "-o", "comm="],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -328,7 +328,7 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
     # The 3rd factor only REJECTS — it never grants access on its own.
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "etimes="],
+            ["/bin/ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -366,7 +366,7 @@ def validate_pid_tristate(
     # Check 2: process name
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="],
+            ["/bin/ps", "-p", str(pid), "-o", "comm="],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -380,7 +380,7 @@ def validate_pid_tristate(
     # Check 3: age match
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "etimes="],
+            ["/bin/ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -394,7 +394,7 @@ def validate_pid_tristate(
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return "unknown"
     except ValueError:
-        pass  # Malformed etimes — proceed with 2-factor result
+        return "unknown"  # Malformed etimes — fail closed
 
     return "alive"
 
