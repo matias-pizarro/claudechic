@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-05
 **Status:** Revised after 4-agent review
-**Revision:** 3 (rev 2: shared helper, debounce, tests, logging; rev 3: test coverage gaps, UX clarifications, debounce framing)
+**Revision:** 4 (rev 3: test coverage, UX, debounce framing; rev 4: fix timer handle-clobbering race, accurate debounce criterion)
 
 ## Problem
 
@@ -108,6 +108,8 @@ The original implementation (a 3-line try/except in `_check_and_copy_selection` 
 
 ## Revised Implementation
 
+*Note: This implementation replaces the initial quick-fix (commit `f3516ff`) which caught `(IndexError, KeyError)` in `_check_and_copy_selection` only.*
+
 ### Shared safe helper
 
 A private method that wraps `screen.get_selected_text()` with try/except and logging:
@@ -167,16 +169,9 @@ def on_mouse_up(self, event: MouseUp) -> None:
 
 Prevents timer accumulation on rapid mouse-ups (scrolling, drag-selecting, clicking). `Timer` is already imported under `TYPE_CHECKING` in app.py (line 18); the `_copy_timer: Timer | None` annotation is safe at runtime because `from __future__ import annotations` (line 3) makes all annotations lazy strings.
 
-Clear the timer reference after the callback fires to avoid holding stale references:
+The callback does **not** clear `_copy_timer`. Doing so would introduce a handle-clobbering race: if an old callback fires after a newer timer is stored, setting `_copy_timer = None` would lose the new timer reference, preventing cancellation on the next mouse-up. Calling `stop()` on an already-fired timer is a no-op in Textual, so a stale reference is harmless.
 
-```python
-def _check_and_copy_selection(self) -> None:
-    self._copy_timer = None
-    selected = self._safe_get_selected_text()
-    ...
-```
-
-**Important framing:** `Timer.stop()` cancels future ticks but cannot interrupt a callback already enqueued on the asyncio event loop. This means two `_check_and_copy_selection` calls could briefly overlap in a narrow race. This is benign — the function is idempotent (get selection, copy, notify) and the try/except in `_safe_get_selected_text` protects both invocations. The debounce is an **optimization** to reduce redundant clipboard writes; the **correctness mechanism** is the try/except.
+**Important framing:** `Timer.stop()` cancels the timer's asyncio Task but cannot retract a callback already pushed to the message queue via `call_next`. This means two `_check_and_copy_selection` calls could briefly overlap in a narrow race. This is benign — the function is idempotent (get selection, copy, notify) and the try/except in `_safe_get_selected_text` protects both invocations. The debounce is an **optimization** to reduce redundant clipboard writes; the **correctness mechanism** is the try/except.
 
 This follows the existing timer-management pattern in the codebase (see `_review_poll_timer` at app.py:898).
 
@@ -202,7 +197,7 @@ This follows the existing timer-management pattern in the codebase (see `_review
 - Add retry or recovery logic for stale selections
 
 **Edge cases considered:**
-- Whitespace-only selections (`"\n \n"`) -- already handled by `.strip()` guard, now covered by test
+- Whitespace-only selections (`"\n \n"`) -- auto-copy skips these via `.strip()` guard (existing behavior, now covered by test). Manual copy (`action_copy_selection`) copies any truthy string including whitespace-only — this is intentional for backwards compatibility (a user who explicitly triggers copy may want whitespace)
 - Widget destroyed between selection and extraction -- `get_selected_text()` checks `widget.is_attached` upstream
 - Repeated stale selections during active streaming -- each produces a `log.debug()`, no accumulation risk due to debounce
 - Screen detached when timer fires -- Textual does not fire timer callbacks after app teardown
@@ -220,7 +215,7 @@ This follows the existing timer-management pattern in the codebase (see `_review
 - [ ] `action_copy_selection` does not crash when `screen.get_selected_text()` raises `IndexError`
 - [ ] Successful selections still copy and show the "Copied" toast
 - [ ] Stale selections produce a `log.debug()` entry (visible in `~/claudechic-dev.log` where debug logging is enabled by default)
-- [ ] Rapid mouse-up events produce at most one pending timer (no accumulation)
+- [ ] New mouse-up events cancel the previously tracked timer when possible; stale callbacks do not crash (debounce is best-effort optimization, not a hard guarantee)
 
 **Non-functional:**
 - [ ] All 6 new tests pass
