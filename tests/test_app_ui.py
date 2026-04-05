@@ -1,6 +1,6 @@
 """App-level UI tests without SDK dependency."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,7 +18,7 @@ from claudechic.messages import (
     ToolResultMessage,
 )
 from claude_agent_sdk import ToolUseBlock, ToolResultBlock
-from tests.conftest import wait_for_workers, submit_command
+from tests.conftest import wait_for_workers, submit_command, make_fake_pty
 
 
 @pytest.mark.asyncio
@@ -584,10 +584,16 @@ async def test_bang_command_inline_shell(mock_sdk):
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!echo hello"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=make_fake_pty(output="hello\r\n"),
+        ):
+            input_widget = app.query_one("#input", ChatInput)
+            input_widget.text = "!echo hello"
+            await pilot.press("enter")
+            await pilot.pause()
+            await wait_for_workers(app)
+            await pilot.pause()
 
         # Should create a ShellOutputWidget
         widgets = list(chat_view.query(ShellOutputWidget))
@@ -606,10 +612,16 @@ async def test_bang_command_captures_stderr(mock_sdk):
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!echo error >&2"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=make_fake_pty(output="error\r\n"),
+        ):
+            input_widget = app.query_one("#input", ChatInput)
+            input_widget.text = "!echo error >&2"
+            await pilot.press("enter")
+            await pilot.pause()
+            await wait_for_workers(app)
+            await pilot.pause()
 
         widgets = list(chat_view.query(ShellOutputWidget))
         assert len(widgets) == 1
@@ -627,10 +639,16 @@ async def test_bang_command_shows_exit_code(mock_sdk):
         chat_view = app._chat_view
         assert chat_view is not None
 
-        input_widget = app.query_one("#input", ChatInput)
-        input_widget.text = "!exit 42"
-        await pilot.press("enter")
-        await pilot.pause()
+        with patch(
+            "claudechic.shell_runner.run_in_pty_cancellable",
+            new=make_fake_pty(returncode=42),
+        ):
+            input_widget = app.query_one("#input", ChatInput)
+            input_widget.text = "!exit 42"
+            await pilot.press("enter")
+            await pilot.pause()
+            await wait_for_workers(app)
+            await pilot.pause()
 
         widgets = list(chat_view.query(ShellOutputWidget))
         assert len(widgets) == 1
@@ -815,7 +833,12 @@ async def test_app_width_stored(mock_sdk):
 
 
 def test_main_calls_run_with_size_when_width_provided():
-    """Test that main() calls app.run(size=) when --width is provided."""
+    """Test that main() passes width to ChatApp and calls app.run() without size.
+
+    Width is applied via CSS max-width in on_chat_screen_ready, not via
+    Textual's app.run(size=) which only works in headless/testing mode.
+    See commit 51f132b.
+    """
     import sys
     from unittest.mock import patch, MagicMock
 
@@ -825,7 +848,6 @@ def test_main_calls_run_with_size_when_width_provided():
     with (
         patch.object(sys, "argv", test_argv),
         patch("claudechic.__main__.ChatApp") as mock_app_class,
-        patch("shutil.get_terminal_size", return_value=(80, 30)),
     ):
         mock_app = MagicMock()
         mock_app_class.return_value = mock_app
@@ -839,8 +861,8 @@ def test_main_calls_run_with_size_when_width_provided():
         _, kwargs = mock_app_class.call_args
         assert kwargs.get("width") == 200
 
-        # Verify app.run was called with size=(200, 30)
-        mock_app.run.assert_called_once_with(size=(200, 30))
+        # Verify app.run was called without size= (width applied via CSS, not size param)
+        mock_app.run.assert_called_once_with()
 
 
 def test_main_calls_run_without_size_when_no_width():

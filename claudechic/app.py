@@ -1171,12 +1171,18 @@ class ChatApp(App):
             content = data.get("content", "Conversation compacted")
             self._show_system_info(content, "info", event.agent_id)
 
+        elif subtype == "init":
+            # Session ID was captured by agent layer; push to footer
+            agent = self._get_agent(event.agent_id)
+            if agent and self.agent_mgr and event.agent_id == self.agent_mgr.active_id:
+                self.status_footer.set_session_id(agent.session_id)
+
         elif level == "error":
             # Generic error handling for any error-level message
             msg = data.get("content", data.get("error", f"System error: {subtype}"))
             self._show_system_info(str(msg)[:200], "error", event.agent_id)
 
-        elif subtype not in ("stop_hook_summary", "turn_duration", "local_command"):
+        elif subtype not in ("stop_hook_summary", "turn_duration", "local_command", "init"):
             # Unknown subtype with content - might be important (like terms notification)
             content = data.get("content") or data.get("message")
             if content:
@@ -1302,7 +1308,7 @@ class ChatApp(App):
         # Height costs (lines) - based on actual CSS
         # AgentSection title: padding 1 1 1 1 = 3 lines (top + text + bottom)
         AGENT_SECTION_TITLE = 3
-        AGENT_EXPANDED = 3  # height: 3 with padding
+        AGENT_EXPANDED = 4  # height: 4 (name + context + padding + spacing)
         AGENT_COMPACT = 1  # height: 1 without padding
         # TodoPanel: border-top(1) + padding(2) + title with padding(2) = 5 lines overhead
         TODO_OVERHEAD = 5
@@ -1367,6 +1373,9 @@ class ChatApp(App):
         if event.result and agent:
             agent.session_id = event.result.session_id
             self.refresh_context()
+            # Update session ID in footer (gated to active agent)
+            if self.agent_mgr and event.agent_id == self.agent_mgr.active_id:
+                self.status_footer.set_session_id(agent.session_id)
         if chat_view:
             # End response via ChatView (hides thinking, flushes content)
             chat_view.end_response()
@@ -1424,6 +1433,9 @@ class ChatApp(App):
         try:
             await self._reconnect_agent(agent, session_id)
             agent.session_id = session_id
+            # Update footer if this agent is still active (async — user may have switched)
+            if self.agent_mgr and agent.id == self.agent_mgr.active_id:
+                self.status_footer.set_session_id(agent.session_id)
             self.post_message(ResponseComplete(None))
             self.refresh_context()
             # Check for plan file
@@ -1441,8 +1453,11 @@ class ChatApp(App):
     def action_copy_selection(self) -> None:
         selected = self.screen.get_selected_text()
         if selected:
-            self.copy_to_clipboard(selected)
-            self.notify("Copied to clipboard")
+            success = self.copy_to_clipboard(selected)
+            if success:
+                self.notify("Copied to clipboard")
+            else:
+                self.notify("Copy failed", severity="warning", timeout=2)
 
     def action_new_agent(self) -> None:
         """Create a new agent (prompts for name/path)."""
@@ -1499,11 +1514,15 @@ class ChatApp(App):
                 pass
         self.set_timer(0.05, self._check_and_copy_selection)
 
-    def copy_to_clipboard(self, text: str) -> None:
-        """Copy to both CLIPBOARD (OSC 52) and PRIMARY (xclip/xsel) on Linux."""
+    def copy_to_clipboard(self, text: str) -> bool:
+        """Copy to both CLIPBOARD (OSC 52) and PRIMARY (xclip/xsel) on Linux.
+
+        Returns True if the copy succeeded or was undetectable (OSC 52),
+        False if a clipboard tool was found but the write failed.
+        """
         super().copy_to_clipboard(text)
         if not sys.platform.startswith("linux"):
-            return
+            return True
         import shutil
         import subprocess
 
@@ -1521,15 +1540,59 @@ class ChatApp(App):
                     )
                     proc.stdin.write(text.encode())  # type: ignore[union-attr]
                     proc.stdin.close()  # type: ignore[union-attr]
+                    return proc.wait(timeout=2) == 0
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    return False
                 except Exception:
-                    pass
-                return
+                    return False
+        # No clipboard tool found on Linux — OSC 52 was sent but is
+        # unverifiable (fire-and-forget). Check for common misconfigurations
+        # that would prevent it from working.
+        return self._osc52_likely_works()
+
+    def _osc52_likely_works(self) -> bool:
+        """Heuristic check for whether OSC 52 can reach the terminal.
+
+        Returns False when we can detect that tmux has set-clipboard off
+        (which disables OSC 52 handling). Returns True otherwise, including
+        when we can't tell. Note: allow-passthrough is intentionally NOT
+        checked — with set-clipboard on, tmux handles clipboard itself
+        regardless of allow-passthrough.
+        """
+        import os
+        import shutil
+        import subprocess
+
+        if os.environ.get("TMUX"):
+            tmux_bin = shutil.which("tmux")
+            if not tmux_bin:
+                return True  # Can't check, assume OK
+            try:
+                out = subprocess.run(
+                    [tmux_bin, "show", "-gv", "set-clipboard"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if out.returncode == 0 and out.stdout.strip() == "off":
+                    return False
+            except Exception:
+                return True  # Can't reach tmux server, assume OK
+        return True
+
+    _copy_failed_notified: bool = False
 
     def _check_and_copy_selection(self) -> None:
         selected = self.screen.get_selected_text()
         if selected and len(selected.strip()) > 0:
-            self.copy_to_clipboard(selected)
-            self.notify("Copied", timeout=1)
+            success = self.copy_to_clipboard(selected)
+            if success:
+                self._copy_failed_notified = False
+                self.notify("Copied", timeout=1)
+            elif not self._copy_failed_notified:
+                self._copy_failed_notified = True
+                self.notify("Copy failed", severity="warning", timeout=2)
 
     def action_quit(self) -> None:  # type: ignore[override]
         # If history search is visible, cancel it
@@ -1826,9 +1889,13 @@ class ChatApp(App):
                 await self._load_and_display_history(
                     resume_id, cwd=new_cwd, agent=agent
                 )
+                if agent is self._agent:
+                    self.status_footer.set_session_id(agent.session_id)
                 self.notify(f"Resumed session in {new_cwd.name}")
             else:
                 agent.session_id = None
+                if agent is self._agent:
+                    self.status_footer.set_session_id(None)
                 self.notify(f"SDK reconnected in {new_cwd.name}")
         except Exception as e:
             self.show_error("SDK reconnect failed", e)
@@ -2008,6 +2075,9 @@ class ChatApp(App):
         chat_view = self._chat_view
         if chat_view:
             chat_view.clear()
+        agent.session_id = None  # Clear stale session_id before reconnect
+        if agent is self._agent:
+            self.status_footer.set_session_id(None)
         await agent.disconnect()
         options = self._make_options(
             cwd=agent.cwd, agent_name=agent.name, model=agent.model
@@ -2441,6 +2511,7 @@ class ChatApp(App):
 
         # These happen outside (async/focus)
         self.status_footer.set_cwd(str(new_agent.cwd))
+        self.status_footer.set_session_id(new_agent.session_id)
         create_safe_task(self._async_refresh_files(new_agent), name="refresh-files")
         create_safe_task(
             self.status_footer.refresh_branch(str(new_agent.cwd)), name="refresh-branch"

@@ -74,7 +74,7 @@ claudechic/
     ├── layout/        # Structural/container widgets
     │   ├── chat_view.py # ChatView - renders agent messages
     │   ├── sidebar.py # AgentSidebar, AgentItem, WorktreeItem
-    │   ├── footer.py  # StatusFooter, AutoEditLabel, ModelLabel
+    │   ├── footer.py  # StatusFooter, SessionIndicator, AutoEditLabel, ModelLabel
     │   ├── indicators.py # IndicatorWidget, CPUBar, ContextBar, ProcessIndicator
     │   └── processes.py # ProcessPanel, ProcessItem
     ├── reports/       # In-page report widgets
@@ -235,6 +235,7 @@ Agent status indicators: ○ (idle), ● gray (busy), ● orange (needs input)
 - `/resume <id>` - Resume specific session
 - `/compactish` - Compact session to reduce context (dry run with `-n`)
 - `/usage` - Show API rate limit usage
+- `/session-id` - Show and copy current session ID
 - `/clear` - Clear chat UI
 - `/shell <cmd>` - Suspend TUI and run shell command
 - `/exit` - Quit

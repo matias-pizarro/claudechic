@@ -409,8 +409,10 @@ class AgentItem(SidebarItem):
 
     DEFAULT_CSS = """
     AgentItem {
-        height: 5;
-        min-height: 5;
+        /* height = top-padding(1) + name-row(1) + context-row(1) + spacing(1) = 4 */
+        /* If restoring .agent-cwd, change back to height: 5; min-height: 5 */
+        height: 4;
+        min-height: 4;
         layout: vertical;
         padding: 1 1 0 2;
     }
@@ -454,6 +456,7 @@ class AgentItem(SidebarItem):
         height: 1;
         padding: 0 0 0 2;
         overflow: hidden;
+        display: none;  /* Hidden: CWD shown in footer only. Restore -> also set height: 5 above */
     }
     AgentItem .agent-context {
         height: 1;

@@ -23,3 +23,6 @@ uv.lock
 
 # Marimo cache
 __marimo__/
+
+# Development artifacts
+.artifacts
