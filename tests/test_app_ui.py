@@ -891,3 +891,50 @@ def test_main_calls_run_without_size_when_no_width():
 
         # Verify app.run was called without size parameter
         mock_app.run.assert_called_once_with()
+
+
+# --- Selection copy safety tests ---
+
+
+@pytest.mark.asyncio
+async def test_check_and_copy_selection_handles_index_error(mock_sdk):
+    """Auto-copy does not crash when get_selected_text raises IndexError."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with patch.object(
+            type(app.screen), "get_selected_text", side_effect=IndexError
+        ):
+            app._check_and_copy_selection()
+            await pilot.pause()
+        # No crash, no "Copied" notification
+        assert not any(n.message == "Copied" for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_action_copy_selection_handles_index_error(mock_sdk):
+    """Manual copy does not crash when get_selected_text raises IndexError."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with patch.object(
+            type(app.screen), "get_selected_text", side_effect=IndexError
+        ):
+            app.action_copy_selection()
+            await pilot.pause()
+        # No crash, no "Copied to clipboard" notification
+        assert not any(n.message == "Copied to clipboard" for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_safe_get_selected_text_logs_on_stale_selection(mock_sdk):
+    """Stale selection emits a debug log entry."""
+    app = ChatApp()
+    async with app.run_test():
+        with (
+            patch.object(type(app.screen), "get_selected_text", side_effect=IndexError),
+            patch("claudechic.app.log") as mock_log,
+        ):
+            result = app._safe_get_selected_text()
+        assert result is None
+        mock_log.debug.assert_called_once_with(
+            "Stale selection coordinates, skipping copy"
+        )
