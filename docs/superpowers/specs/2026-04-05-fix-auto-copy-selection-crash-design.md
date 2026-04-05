@@ -1,7 +1,8 @@
 # Fix Auto-Copy Selection Crash
 
 **Date:** 2026-04-05
-**Status:** Approved (Approach A implemented)
+**Status:** Revised after 4-agent review
+**Revision:** 2 (original: Approach A only; revised: shared helper, debounce, tests, logging)
 
 ## Problem
 
@@ -25,11 +26,11 @@ Race condition between widget content mutation and selection extraction:
 
 1. **User selects text** with the mouse. Textual records selection coordinates (line number + character offset) relative to the widget's rendered content at that moment.
 2. **Mouse-up fires** in `on_mouse_up` (app.py:1500). A 50ms timer calls `_check_and_copy_selection`.
-3. **During that 50ms window** (or during `get_selected_text()` itself), the widget's content changes — streaming chat messages, tool results arriving, collapsibles toggling, ThinkingIndicator animating.
+3. **During that 50ms window** (or during `get_selected_text()` itself), the widget's content changes -- streaming chat messages, tool results arriving, collapsibles toggling, ThinkingIndicator animating.
 4. **`get_selection()` re-renders the widget** (`self._render()` at widget.py:4185) to get the *current* text, but the `Selection` object still holds coordinates from the *old* text.
-5. **`Selection.extract()`** splits the *new* (shorter) text into lines, then tries to index with `start_line` from the *old* (longer) text — **`IndexError`**.
+5. **`Selection.extract()`** splits the *new* (shorter) text into lines, then tries to index with `start_line` from the *old* (longer) text -- **`IndexError`**.
 
-The bug is **not in claudechic** — it's an upstream issue in Textual's `Selection.extract()` which doesn't bounds-check `start_line` against `len(lines)`. However, claudechic triggers it more often than most Textual apps because:
+The bug is **not in claudechic** -- it's an upstream issue in Textual's `Selection.extract()` which doesn't bounds-check `start_line` against `len(lines)`. Verified against Textual 8.2.2 source: `end_line` is clamped with `min(len(lines), end_line)` but `start_line` is never clamped. However, claudechic triggers it more often than most Textual apps because:
 
 - Widgets stream content in real-time (chat messages, tool output)
 - Widgets collapse/expand (tool uses auto-collapse)
@@ -40,60 +41,36 @@ The bug is **not in claudechic** — it's an upstream issue in Textual's `Select
 
 ```
 on_mouse_up (app.py:1500)
-  └─ set_timer(0.05, _check_and_copy_selection)
-       └─ _check_and_copy_selection (app.py:1586)
-            └─ screen.get_selected_text() (screen.py:960)
-                 └─ widget.get_selection(selection) (widget.py:4176)
-                      └─ self._render()  ← re-renders widget, gets NEW text
-                      └─ selection.extract(text) (selection.py:30)
-                           └─ lines[start_line]  ← OLD coordinates, NEW text → IndexError
+  +-- set_timer(0.05, _check_and_copy_selection)
+       +-- _check_and_copy_selection (app.py:1586)
+            +-- screen.get_selected_text() (screen.py:960)
+                 +-- widget.get_selection(selection) (widget.py:4176)
+                      +-- self._render()  <- re-renders widget, gets NEW text
+                      +-- selection.extract(text) (selection.py:30)
+                           +-- lines[start_line]  <- OLD coordinates, NEW text -> IndexError
 ```
 
 ## Approaches Considered
 
-### Approach A: try/except in `_check_and_copy_selection` (CHOSEN)
+### Approach A: try/except in `_check_and_copy_selection` (CHOSEN, then revised)
 
-Wrap the `get_selected_text()` call in a `try/except (IndexError, KeyError)` and return early on failure.
-
-```python
-def _check_and_copy_selection(self) -> None:
-    try:
-        selected = self.screen.get_selected_text()
-    except (IndexError, KeyError):
-        return
-    if selected and len(selected.strip()) > 0:
-        success = self.copy_to_clipboard(selected)
-        ...
-```
+Wrap the `get_selected_text()` call in a `try/except IndexError` and return early on failure.
 
 **Pros:**
-- 3-line change, zero risk of side effects
+- Minimal change, zero risk of side effects
 - Catches the exact failure at the exact call site
-- Correct UX: stale selection that can't be resolved is not worth surfacing — user just re-selects
+- Correct UX: stale selection that can't be resolved is not worth surfacing -- user just re-selects
 
 **Cons:**
-- Swallows a symptom — if a *different* IndexError appears in the same path, it won't be visible
+- Swallows a symptom -- if a *different* IndexError appears in the same path, it won't be visible
 - Doesn't fix the underlying Textual bug
 
 ### Approach B: Override `get_selection` on streaming widgets
 
 Override `get_selection()` on `ChatMessage`, `ToolUseWidget`, and other claudechic widgets that stream content. Add bounds checks before calling `selection.extract()`.
 
-```python
-def get_selection(self, selection: Selection) -> tuple[str, str] | None:
-    visual = self._render()
-    if isinstance(visual, (Text, Content)):
-        text = str(visual)
-    else:
-        return None
-    lines = text.splitlines()
-    if selection.start and selection.start.transpose[0] >= len(lines):
-        return None
-    return selection.extract(text), "\n"
-```
-
 **Pros:**
-- More targeted — only guards the widgets that actually mutate during selection
+- More targeted -- only guards the widgets that actually mutate during selection
 - Doesn't mask unrelated errors in other code paths
 
 **Cons:**
@@ -105,36 +82,115 @@ def get_selection(self, selection: Selection) -> tuple[str, str] | None:
 
 Patch `Selection.extract` to clamp `start_line` and `end_line` to `len(lines) - 1`, fixing it globally.
 
-```python
-# In app startup
-_original_extract = Selection.extract
-
-def _safe_extract(self, text: str) -> str:
-    lines = text.splitlines()
-    if not lines:
-        return ""
-    # Clamp coordinates to actual line count
-    ...
-    return _original_extract(self, text)
-
-Selection.extract = _safe_extract
-```
-
 **Pros:**
 - Fixes the root cause at the Textual layer for the entire app
 - All widgets protected automatically, including future ones
 
 **Cons:**
-- Monkey-patching a framework is fragile — a Textual upgrade could break it or silently revert it
+- Monkey-patching a framework is fragile -- a Textual upgrade could break it or silently revert it
 - Harder to discover and debug if something goes wrong
 - Might mask real bugs in selection logic during development
 
 ## Decision
 
-**Approach A** chosen for its simplicity and correctness of semantics. The `_check_and_copy_selection` method is a convenience feature (auto-copy on select). If it can't extract text due to a race, silently doing nothing is the correct UX — the user just re-selects. No upstream dependency, no monkey-patching, no multi-file changes.
+**Approach A** chosen for its simplicity and correctness of semantics, then **revised** after a 4-agent review (code reviewer, architect, contrarian, roborev) that identified gaps in the original implementation.
 
-`KeyError` is included in the except clause because Textual's `get_selected_text` traverses widget trees by ID, and concurrent widget removal (e.g., a collapsible being replaced) could raise it.
+## 4-Agent Review Findings
 
-## Future Consideration
+The original implementation (a 3-line try/except in `_check_and_copy_selection` only) was reviewed by four independent agents. Key findings that drove the revision:
 
-If Textual ever adds bounds-checking to `Selection.extract()` upstream, the try/except becomes a harmless no-op. It can be removed at that point but does no harm if left in place.
+1. **`action_copy_selection` unprotected (HIGH):** The keybinding-triggered manual copy at app.py:1453 calls the same `screen.get_selected_text()` with no guard. Both call sites share the same vulnerability. (Roborev, Contrarian)
+2. **No regression tests (HIGH):** Zero tests for any selection-copy path. (All 4 agents)
+3. **No observability (MEDIUM):** The except block did a bare `return` with only a comment. No logging means you can't measure race frequency or distinguish harmless races from new bugs. (Contrarian, Roborev)
+4. **KeyError is speculative (MEDIUM):** The original spec claimed `KeyError` could arise because `get_selected_text` "traverses widget trees by ID." The contrarian agent read the actual code and showed it iterates `self.selections.items()` -- there is no dict-by-key lookup. `KeyError` was removed from the except clause. (Contrarian)
+5. **No acceptance criteria (MEDIUM):** The original spec never defined what "done" means. (Roborev)
+6. **Timer debounce missing (LOW):** Every `on_mouse_up` fires a new timer with no cancellation of the previous one. Rapid mouse-ups accumulate overlapping timers. Already flagged as M13 in the existing code review. (Contrarian, Roborev)
+
+## Revised Implementation
+
+### Shared safe helper
+
+A private method that wraps `screen.get_selected_text()` with try/except and logging:
+
+```python
+def _safe_get_selected_text(self) -> str | None:
+    """Get selected text, returning None if selection coords are stale."""
+    try:
+        return self.screen.get_selected_text()
+    except IndexError:
+        log.debug("Stale selection coordinates, skipping copy")
+        return None
+```
+
+Key decisions:
+- Catches **only `IndexError`** -- the single evidenced exception from `Selection.extract()` line 66.
+- Returns `None` on failure -- callers already check truthiness of the result.
+- `log.debug()` not `log.warning()` -- this is expected behavior during streaming, not an anomaly.
+
+### Both call sites use the helper
+
+```python
+def action_copy_selection(self) -> None:
+    selected = self._safe_get_selected_text()
+    if selected:
+        success = self.copy_to_clipboard(selected)
+        if success:
+            self.notify("Copied to clipboard")
+        else:
+            self.notify("Copy failed", severity="warning", timeout=2)
+
+def _check_and_copy_selection(self) -> None:
+    selected = self._safe_get_selected_text()
+    if selected and len(selected.strip()) > 0:
+        success = self.copy_to_clipboard(selected)
+        if success:
+            self._copy_failed_notified = False
+            self.notify("Copied", timeout=1)
+        elif not self._copy_failed_notified:
+            self._copy_failed_notified = True
+            self.notify("Copy failed", severity="warning", timeout=2)
+```
+
+### Timer debounce
+
+Store the timer handle and cancel the previous one before scheduling new:
+
+```python
+_copy_timer: Timer | None = None
+
+def on_mouse_up(self, event: MouseUp) -> None:
+    # ... sidebar overlay logic unchanged ...
+    if self._copy_timer is not None:
+        self._copy_timer.stop()
+    self._copy_timer = self.set_timer(0.05, self._check_and_copy_selection)
+```
+
+Prevents timer accumulation on rapid mouse-ups (scrolling, drag-selecting, clicking). `Timer` is already imported in app.py.
+
+### Tests (3 tests in test_app_ui.py)
+
+1. **`test_check_and_copy_selection_handles_index_error`** -- mock `screen.get_selected_text` to raise `IndexError`, assert method returns without crash, assert no "Copied" notification.
+2. **`test_action_copy_selection_handles_index_error`** -- same for the keybinding path.
+3. **`test_check_and_copy_selection_copies_on_success`** -- mock `screen.get_selected_text` to return text, assert `copy_to_clipboard` is called.
+
+## Design Choices
+
+**Silent failure UX:** Auto-copy is a convenience feature. A failed auto-copy producing no toast is intentional -- the "Copied" toast's *absence* is sufficient signal. Showing a "Selection lost" toast was considered and rejected: it would fire during rapid scrolling and streaming, creating noise. The user re-selects naturally.
+
+## Acceptance Criteria
+
+**Functional:**
+- [ ] `_check_and_copy_selection` does not crash when `screen.get_selected_text()` raises `IndexError`
+- [ ] `action_copy_selection` does not crash when `screen.get_selected_text()` raises `IndexError`
+- [ ] Successful selections still copy and show the "Copied" toast
+- [ ] Stale selections produce a `log.debug()` entry (visible with `--verbose` or in log files)
+- [ ] Rapid mouse-up events produce at most one pending timer (no accumulation)
+
+**Non-functional:**
+- [ ] All 3 new tests pass
+- [ ] Pre-commit hooks pass (ruff, ruff-format, pyright)
+- [ ] No behavioral change for the success path -- identical UX when copy works
+
+## Backlog
+
+- **Upstream issue:** File a Textual issue for `Selection.extract()` missing `start_line` bounds check. The root cause analysis in this spec is detailed enough to submit verbatim. If Textual adds bounds-checking upstream, the try/except becomes a harmless no-op.
