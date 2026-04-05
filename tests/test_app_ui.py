@@ -1,5 +1,9 @@
 """App-level UI tests without SDK dependency."""
 
+import asyncio
+import os
+import shlex
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -664,6 +668,28 @@ async def test_bang_command_worker_failure_does_not_exit_app(mock_sdk):
         await wait_for_workers(app)
 
         assert len(app.agents) == 2
+
+
+@pytest.mark.asyncio
+async def test_shell_command_finishing_under_tip_threshold_does_not_show_tip(mock_sdk):
+    """Quiet commands finishing just under 1 second should not show the -i tip."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        with patch.object(app, "notify") as mock_notify:
+            app.run_shell_command(
+                f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(0.95)'",
+                os.environ.get("SHELL", "/bin/bash"),
+                None,
+                os.environ.copy(),
+            )
+            await wait_for_workers(app)
+            await asyncio.sleep(0.2)
+            await pilot.pause()
+
+        assert not any(
+            call.args and call.args[0] == "Tip: Use -i flag for interactive commands"
+            for call in mock_notify.call_args_list
+        )
 
 
 @pytest.mark.asyncio

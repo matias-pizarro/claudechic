@@ -47,7 +47,7 @@ def run_in_pty(
 
         output = b""
         while True:
-            r, _, _ = select.select([master_fd], [], [], 0.1)
+            r, _, _ = select.select([master_fd], [], [], 0.01)
             if r:
                 try:
                     data = os.read(master_fd, 4096)
