@@ -627,7 +627,9 @@ class TestValidatePid:
             capture_output=True, text=True,
         )
         etimes_str = etimes_result.stdout.strip()
-        created = int(x11ctl.time.time()) - int(etimes_str) if etimes_str else int(x11ctl.time.time())
+        assert etimes_str and etimes_str.isdigit(), \
+            f"ps etimes unavailable (got {etimes_str!r}); skip on restricted platforms"
+        created = int(x11ctl.time.time()) - int(etimes_str)
         assert x11ctl.validate_pid(pid, created, actual_comm) is True
 
     def test_dead_pid_is_invalid(self):
@@ -734,7 +736,9 @@ class TestValidatePidTristate:
         etimes_result = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
                                        capture_output=True, text=True)
         etimes_str = etimes_result.stdout.strip()
-        created = int(x11ctl.time.time()) - int(etimes_str) if etimes_str else int(x11ctl.time.time())
+        assert etimes_str and etimes_str.isdigit(), \
+            f"ps etimes unavailable (got {etimes_str!r}); skip on restricted platforms"
+        created = int(x11ctl.time.time()) - int(etimes_str)
         assert x11ctl.validate_pid_tristate(pid, created, comm) == "alive"
 
     def test_dead_process(self):
