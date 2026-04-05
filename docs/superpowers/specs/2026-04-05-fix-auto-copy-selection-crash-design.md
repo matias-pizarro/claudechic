@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-05
 **Status:** Revised after 4-agent review
-**Revision:** 6 (rev 5: 8 tests, log volume; rev 6: precise log-volume/goal wording, 9 tests with failure-mode distinguishability)
+**Revision:** 7 (rev 6: 9 tests, failure-mode test; rev 7: narrow log distinguishability claim, align edge-case wording)
 
 ## Problem
 
@@ -202,14 +202,14 @@ This follows the existing timer-management pattern in the codebase (see `_review
 **Edge cases considered:**
 - Whitespace-only selections (`"\n \n"`) -- auto-copy skips these via `.strip()` guard (existing behavior, now covered by test). Manual copy (`action_copy_selection`) copies any truthy string including whitespace-only — this is intentional for backwards compatibility (a user who explicitly triggers copy may want whitespace)
 - Widget destroyed between selection and extraction -- `get_selected_text()` checks `widget.is_attached` upstream
-- Repeated stale selections during active streaming -- each produces a `log.debug()`, no accumulation risk due to debounce
+- Repeated stale selections during active streaming -- each produces a `log.debug()`; debounce reduces but does not strictly bound frequency (consistent with best-effort framing)
 - Screen detached when timer fires -- Textual does not fire timer callbacks after app teardown
 
 ## Design Choices
 
 **Silent failure UX (both auto-copy and manual copy):** Auto-copy is a convenience feature. A failed auto-copy producing no toast is intentional -- the "Copied" toast's *absence* is sufficient signal. For manual copy (`action_copy_selection`), the same logic applies: the user expects "Copied to clipboard" on success; its absence signals something went wrong. Showing a "Selection lost" toast was considered and rejected for both paths: it would fire during rapid scrolling and streaming, creating noise. The user re-selects naturally.
 
-**Distinguishing failure modes:** A stale selection (IndexError) produces a `log.debug()` entry and no user-visible output. A clipboard write failure produces a "Copy failed" warning toast. These are distinguishable both in the UI (no toast vs warning toast) and in logs (debug-level "Stale selection" vs the warning-level notification path).
+**Distinguishing failure modes:** A stale selection (IndexError) produces a `log.debug()` entry and no user-visible output. A clipboard write failure produces a "Copy failed" warning toast. These are distinguishable in the UI: no toast means stale selection, warning toast means clipboard failure. In logs, only stale selections appear (via `log.debug()`); clipboard failures are surfaced to the user via notification only, which is the existing behavior and sufficient for this convenience feature.
 
 **Method placement:** `_safe_get_selected_text` is a private method on `ChatApp` rather than a standalone function because it accesses `self.screen`, a Textual framework attribute. Extracting it would require passing the screen reference, adding coupling for no benefit. It belongs with the other clipboard methods on ChatApp.
 
