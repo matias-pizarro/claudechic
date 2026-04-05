@@ -488,18 +488,26 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
-    # Check 3: age match
+    # Check 3: age match (graceful fallback if etimes unavailable in jail)
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True, text=True, timeout=5,
         )
-        etimes = int(result.stdout.strip())
+        etimes_str = result.stdout.strip()
+        if not etimes_str:
+            # etimes unavailable (restricted jail) — fall back to 2-factor (PID + comm only)
+            return True
+        etimes = int(etimes_str)
         expected_age = int(time.time()) - created_epoch
         if abs(etimes - expected_age) > 5:
             return False
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
-        return False
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # ps unavailable — fall back to 2-factor (PID + comm passed above)
+        return True
+    except ValueError:
+        # etimes output not parseable — fall back to 2-factor
+        return True
 
     return True
 ```
@@ -874,7 +882,7 @@ class TestStaleCleanup:
 
         with patch.object(Path, "read_text", side_effect=FileNotFoundError):
             result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-            assert result == 1  # fail closed
+            assert result is False  # fail closed
             assert lock.exists()  # preserved
             assert socket_file.exists()  # preserved
 
@@ -1014,7 +1022,7 @@ def start_headless(cfg: Config, started: list[str]) -> int:
     if missing:
         print(f"Error: missing required commands: {', '.join(missing)}", file=sys.stderr)
         print(f"  Run: pkg install {' '.join(missing)}", file=sys.stderr)
-        return False
+        return 1
 
     # Clean stale artifacts (fail-closed: won't delete if a live process or unknown owner)
     if not clean_stale_x_artifacts(cfg.display_number):
@@ -1031,7 +1039,7 @@ def start_headless(cfg: Config, started: list[str]) -> int:
                         f"  Verify it is safe to stop before removing X artifacts.",
                         file=sys.stderr,
                     )
-                    return False
+                    return 1
             except Exception:
                 pass
         print(
@@ -1041,7 +1049,7 @@ def start_headless(cfg: Config, started: list[str]) -> int:
             f"    rm -f /tmp/.X{cfg.display_number}-lock /tmp/.X11-unix/X{cfg.display_number}",
             file=sys.stderr,
         )
-        return False
+        return 1
 
     # Create xauth file and add a random cookie (display-independent — no live X server needed)
     create_xauth_file(cfg.xauth)
@@ -1057,21 +1065,21 @@ def start_headless(cfg: Config, started: list[str]) -> int:
                 os.unlink(cfg.xauth)
             except FileNotFoundError:
                 pass
-            return False
+            return 1
     except subprocess.TimeoutExpired:
         print("Error: xauth add timed out after 5s", file=sys.stderr)
         try:
             os.unlink(cfg.xauth)
         except FileNotFoundError:
             pass
-        return False
+        return 1
     except FileNotFoundError:
         print("Error: xauth binary not found (should have been caught by preflight)", file=sys.stderr)
         try:
             os.unlink(cfg.xauth)
         except FileNotFoundError:
             pass
-        return False
+        return 1
 
     # Rotate log
     logfile = cfg.logfile("xvfb")
@@ -1120,9 +1128,9 @@ def start_headless(cfg: Config, started: list[str]) -> int:
         except FileNotFoundError:
             pass
         started.remove("xvfb") if "xvfb" in started else None
-        return False
+        return 1
 
-    return True
+    return 0
 ```
 
 - [ ] **Step 4: Run tests**
@@ -1480,7 +1488,11 @@ class TestRunCommand:
             [sys.executable, "-c", f"""
 import sys; sys.path.insert(0, '.')
 from importlib.machinery import SourceFileLoader
-x = SourceFileLoader('x11ctl', 'scripts/x11ctl').load_module()
+import importlib.util as _iu
+_loader = SourceFileLoader('x11ctl', 'scripts/x11ctl')
+_spec = _iu.spec_from_loader('x11ctl', _loader)
+x = _iu.module_from_spec(_spec)
+_spec.loader.exec_module(x)
 cfg = x.Config()
 cfg.display = '{cfg.display}'
 cfg.xauth = '{cfg.xauth}'
