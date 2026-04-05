@@ -54,10 +54,10 @@ class Config:
     def __post_init__(self) -> None:
         # Validate display
         if not _DISPLAY_RE.match(self.display):
-            raise ValueError(f"X11CTL_DISPLAY must match ^:\\d+$ (got {self.display!r})")
+            raise ValueError(f"X11CTL_DISPLAY must match :<digits> (got {self.display!r})")
         # Validate screen
         if not _SCREEN_RE.match(self.screen):
-            raise ValueError(f"X11CTL_SCREEN must match ^\\d+x\\d+x\\d+$ (got {self.screen!r})")
+            raise ValueError(f"X11CTL_SCREEN must match <W>x<H>x<D> (got {self.screen!r})")
         # Validate ports
         for port_name in ("xpra_port", "vnc_port", "novnc_port"):
             val = getattr(self, port_name)
@@ -269,7 +269,14 @@ def read_pidfile(path: str) -> Optional[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 
 def write_tiers(path: str, tiers: set[str]) -> None:
-    """Atomically write the active tiers set. Rejects symlinks."""
+    """Atomically write the active tiers set. Rejects symlinks.
+
+    Validates that all tier names are component-level tiers (not meta-tiers
+    like "all") to keep the read/write contract symmetric.
+    """
+    unknown = tiers - _COMPONENT_TIERS
+    if unknown:
+        raise ValueError(f"Cannot persist non-component tier names: {unknown}")
     if os.path.lexists(path) and os.path.islink(path):
         raise OSError(f"Refusing to write tiers file over symlink: {path}")
 

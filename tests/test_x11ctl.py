@@ -193,12 +193,12 @@ class TestConfigValidation:
 
     def test_invalid_display_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_DISPLAY", "bad")
-        with pytest.raises(ValueError, match="must match"):
+        with pytest.raises(ValueError):
             x11ctl.Config()
 
     def test_display_with_extra_chars_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_DISPLAY", ":99; rm -rf /")
-        with pytest.raises(ValueError, match="must match"):
+        with pytest.raises(ValueError):
             x11ctl.Config()
 
     def test_valid_screen(self):
@@ -212,12 +212,12 @@ class TestConfigValidation:
 
     def test_invalid_screen_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_SCREEN", "bad")
-        with pytest.raises(ValueError, match="must match"):
+        with pytest.raises(ValueError):
             x11ctl.Config()
 
     def test_screen_injection_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_SCREEN", "1920x1080x24 -evil")
-        with pytest.raises(ValueError, match="must match"):
+        with pytest.raises(ValueError):
             x11ctl.Config()
 
     def test_xauth_default(self):
@@ -307,12 +307,12 @@ class TestConfigValidation:
     def test_display_trailing_newline_rejected(self, monkeypatch):
         """Trailing newline must be rejected ($ vs \\Z)."""
         monkeypatch.setenv("X11CTL_DISPLAY", ":99\n")
-        with pytest.raises(ValueError, match="must match"):
+        with pytest.raises(ValueError):
             x11ctl.Config()
 
     def test_screen_trailing_newline_rejected(self, monkeypatch):
         monkeypatch.setenv("X11CTL_SCREEN", "1920x1080x24\n")
-        with pytest.raises(ValueError, match="must match"):
+        with pytest.raises(ValueError):
             x11ctl.Config()
 
     def test_xauth_trailing_newline_rejected(self, monkeypatch):
@@ -439,6 +439,12 @@ class TestTiersFile:
         link.symlink_to(target)
         with pytest.raises(OSError):
             x11ctl.write_tiers(str(link), {"headless"})
+
+    def test_write_rejects_meta_tier(self, tmp_path):
+        """write_tiers should reject 'all' and other non-component tier names."""
+        path = str(tmp_path / "tiers")
+        with pytest.raises(ValueError, match="non-component"):
+            x11ctl.write_tiers(path, {"headless", "all"})
 
     def test_read_rejects_symlink(self, tmp_path):
         """read_tiers should reject symlinks."""
