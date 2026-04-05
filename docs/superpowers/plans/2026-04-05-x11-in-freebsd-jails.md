@@ -2409,3 +2409,17 @@ Expected: `#!/usr/local/bin/python3` and `-rwxr-xr-x`
 git add -A
 git commit -m "chore: x11ctl final integration and cleanup"
 ```
+
+---
+
+## Follow-up Items
+
+These items were identified during the 19-round review cycle but are not blockers to implementation. They should be addressed after the initial implementation is complete and working.
+
+### F-1: Operator-visible signal for degraded 2-factor PID validation
+
+When `ps -o etimes=` is unavailable (restricted `kern.proc` visibility in some jail configurations), `validate_pid` silently falls back from 3-factor (alive + comm + etimes age) to 2-factor (alive + comm). The operator has no indication that the system is running with reduced PID-reuse protection. **Action:** Add a warning to stderr on first detection of empty etimes output (once per invocation, not per PID check), e.g.: `"Warning: ps etimes unavailable — using 2-factor PID validation (reduced reuse protection)"`. Optionally, include a `[degraded]` annotation in `status` output next to components validated via 2-factor only.
+
+### F-2: End-to-end validation in a restricted FreeBSD jail
+
+The 2-factor fallback path is tested via mocks (`test_2factor_fallback_when_etimes_empty` for `validate_pid`, `test_2factor_fallback_when_etimes_empty` for `validate_pid_tristate`), but there is no integration test or acceptance criterion that exercises the full `start`/`stop`/`status`/`self-test` cycle in an actual restricted jail where `ps -o etimes=` genuinely returns empty output. **Action:** After the initial implementation is deployed, run the full test suite and `self-test --all` inside a jail with restricted `kern.proc` visibility (e.g., `enforce_statfs=2` or `security.bsd.unprivileged_proc_debug=0`). Document the results and any additional issues discovered. This can be a manual verification step or a CI job on a restricted jail runner.
