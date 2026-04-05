@@ -123,6 +123,14 @@ class TestTierSets:
         with pytest.raises(ValueError, match="Unknown tier"):
             x11ctl.desired_tiers("bogus")
 
+    def test_component_tiers_cover_all_non_meta(self):
+        """_COMPONENT_TIERS + _META_TIERS == _TIER_DEPS.keys() (structural invariant)."""
+        assert x11ctl._COMPONENT_TIERS | x11ctl._META_TIERS == frozenset(x11ctl._TIER_DEPS.keys())
+
+    def test_component_and_meta_tiers_disjoint(self):
+        """No tier is both a component and a meta-tier."""
+        assert x11ctl._COMPONENT_TIERS & x11ctl._META_TIERS == frozenset()
+
     # Note: cascade stop (--headless stops everything) is a policy decision
     # tested in Task 4 with mock components, not a pure set operation.
 
