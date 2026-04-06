@@ -1296,29 +1296,39 @@ def build_websockify_command(cfg: Config, bind: str = "127.0.0.1") -> list[str]:
 
 def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> int:
     """Start x11vnc + websockify. Returns 0=ok, 1=failure, 2=port conflict."""
-    # Port checks first
-    if not check_port_available(bind, cfg.vnc_port):
-        info = identify_port_user(cfg.vnc_port) or "unknown"
-        print(f"Error: port {cfg.vnc_port} is already in use by {info}", file=sys.stderr)
-        return 2
-    if not check_port_available(bind, cfg.novnc_port):
-        info = identify_port_user(cfg.novnc_port) or "unknown"
-        print(f"Error: port {cfg.novnc_port} is already in use by {info}", file=sys.stderr)
-        return 2
-
     # Preflight
     missing = check_binaries(["x11vnc", "websockify"])
     if missing:
         print(f"Error: missing required commands: {', '.join(missing)}", file=sys.stderr)
         return 1
 
-    # --- x11vnc ---
+    # Check idempotency BEFORE port checks to avoid false conflicts
+    # when our own processes are already bound to the ports.
     x11vnc_pidfile = cfg.pidfile("x11vnc")
     x11vnc_data = read_pidfile(x11vnc_pidfile)
     x11vnc_running = x11vnc_data is not None and validate_pid(
         x11vnc_data[0], x11vnc_data[1], "x11vnc"
     )
 
+    ws_pidfile = cfg.pidfile("websockify")
+    ws_data = read_pidfile(ws_pidfile)
+    ws_running = ws_data is not None and validate_pid(
+        ws_data[0], ws_data[1], "websockify"
+    )
+
+    # Port checks only for components that need launching
+    if not x11vnc_running:
+        if not check_port_available(bind, cfg.vnc_port):
+            info = identify_port_user(cfg.vnc_port) or "unknown"
+            print(f"Error: port {cfg.vnc_port} is already in use by {info}", file=sys.stderr)
+            return 2
+    if not ws_running:
+        if not check_port_available(bind, cfg.novnc_port):
+            info = identify_port_user(cfg.novnc_port) or "unknown"
+            print(f"Error: port {cfg.novnc_port} is already in use by {info}", file=sys.stderr)
+            return 2
+
+    # --- x11vnc ---
     if not x11vnc_running:
         logfile = cfg.logfile("x11vnc")
         rotate_log(logfile)
@@ -1384,12 +1394,7 @@ def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> in
             return 1
 
     # --- websockify ---
-    ws_pidfile = cfg.pidfile("websockify")
-    ws_data = read_pidfile(ws_pidfile)
-    ws_running = ws_data is not None and validate_pid(
-        ws_data[0], ws_data[1], "websockify"
-    )
-
+    # (ws_pidfile, ws_running already checked above for port conflict avoidance)
     if not ws_running:
         logfile = cfg.logfile("websockify")
         rotate_log(logfile)
