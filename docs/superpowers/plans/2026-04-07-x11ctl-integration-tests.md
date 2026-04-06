@@ -107,7 +107,8 @@ def x11ctl_run(
     """
     env = {**os.environ, "X11CTL_ALLOW_HOST": "1"}
     if env_overrides:
-        env.update(env_overrides)
+        # Filter out non-string values (e.g., display_num int convenience key)
+        env.update({k: v for k, v in env_overrides.items() if isinstance(v, str)})
     return subprocess.run(
         [SCRIPT] + args,
         capture_output=True, text=True, timeout=timeout,
@@ -550,8 +551,12 @@ git commit -m "feat: integration tests AC1-AC7 (headless, screenshot, xpra, vnc,
         """AC11: missing dependency produces clear error listing install command."""
         env = {**display_factory}
 
-        # Override PATH to hide Xvfb
-        restricted_path = str(tmp_path)  # empty dir — no binaries
+        # Construct a PATH that has python3 but NOT Xvfb.
+        # The shebang #!/usr/bin/env python3 needs python3 on PATH.
+        import sys as _sys
+        python_dir = os.path.dirname(_sys.executable)
+        # Include python dir + basic system dirs, exclude Xvfb location
+        restricted_path = f"{python_dir}:/usr/bin:/bin"
         env["PATH"] = restricted_path
 
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
@@ -699,11 +704,11 @@ class TestSecurityAttacks:
 
         try:
             result = x11ctl_run(["start", "--headless"], env_overrides=env)
-            # Should either succeed (overwrites symlink safely) or fail gracefully
-            # The key assertion: decoy file should NOT be modified
-            if result.returncode == 0:
-                # If it succeeded, the symlink should have been replaced
-                assert not os.path.islink(pidfile_path) or not Path(pidfile_path).exists()
+            # write_pidfile rejects symlinks — start should fail
+            assert result.returncode != 0, \
+                f"Expected failure when pidfile is a symlink, got exit 0"
+            # Decoy must not have been modified (symlink was not followed)
+            assert decoy.read_text() == "attacker data"
         finally:
             # Clean up symlink
             try:
