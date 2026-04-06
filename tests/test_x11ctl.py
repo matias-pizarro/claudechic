@@ -1158,3 +1158,12 @@ class TestTierReconciliation:
         assert x11ctl.tier_components("headless") == ["xvfb"]
         assert x11ctl.tier_components("xpra") == ["xpra"]
         assert set(x11ctl.tier_components("vnc")) == {"x11vnc", "websockify"}
+
+    def test_stop_order_covers_all_components(self):
+        """STOP_ORDER must contain every component from TIER_COMPONENTS."""
+        all_components = {c for comps in x11ctl.TIER_COMPONENTS.values() for c in comps}
+        assert set(x11ctl.STOP_ORDER) == all_components
+
+    def test_tier_components_keys_match_component_tiers(self):
+        """TIER_COMPONENTS keys must match _COMPONENT_TIERS exactly."""
+        assert set(x11ctl.TIER_COMPONENTS.keys()) == x11ctl._COMPONENT_TIERS
