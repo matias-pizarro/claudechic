@@ -1033,7 +1033,7 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
     rotate_log(logfile)
 
     # Launch Xvfb (try/finally to prevent FD leak; except to clean up xauth on failure)
-    log_fd = os.open(logfile, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
+    log_fd = _safe_open_regular(logfile, os.O_CREAT | os.O_WRONLY, 0o644)
     try:
         proc = subprocess.Popen(
             ["Xvfb", cfg.display, "-screen", "0", cfg.screen, "-auth", cfg.xauth],
