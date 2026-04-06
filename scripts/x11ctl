@@ -719,8 +719,10 @@ def acquire_lock(
         if not stat.S_ISREG(st.st_mode):
             os.close(fd)
             return None
-        # Reject lock files owned by another user (local DoS prevention)
-        if st.st_size > 0 and st.st_uid != os.geteuid():
+        # Reject lock files owned by another user (local DoS prevention).
+        # Check regardless of file size — empty foreign-owned lock files
+        # can still be held via flock to block operations.
+        if st.st_uid != os.geteuid():
             os.close(fd)
             return None
     except OSError:
