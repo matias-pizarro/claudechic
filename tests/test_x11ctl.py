@@ -1597,8 +1597,11 @@ class TestVncCommand:
     def test_websockify_command(self):
         cfg = x11ctl.Config()
         cmd = x11ctl.build_websockify_command(cfg)
-        assert "websockify" in cmd
+        assert cmd[0] == "websockify"
         assert "--web=/usr/local/libexec/novnc" in cmd
+        # Source and target are positional args (not --listen)
+        assert f"127.0.0.1:{cfg.novnc_port}" in cmd
+        assert f"localhost:{cfg.vnc_port}" in cmd
 
     def test_x11vnc_no_localhost_with_bind_all(self):
         cfg = x11ctl.Config()

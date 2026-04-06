@@ -1368,12 +1368,15 @@ def build_x11vnc_command(cfg: Config, bind: str = "127.0.0.1") -> list[str]:
 
 
 def build_websockify_command(cfg: Config, bind: str = "127.0.0.1") -> list[str]:
-    """Build the websockify command line."""
+    """Build the websockify command line.
+
+    websockify uses positional args: [source_addr:]source_port target_addr:target_port
+    """
     return [
         "websockify",
-        "--listen", f"{bind}:{cfg.novnc_port}",
-        f"localhost:{cfg.vnc_port}",
         "--web=/usr/local/libexec/novnc",
+        f"{bind}:{cfg.novnc_port}",
+        f"localhost:{cfg.vnc_port}",
     ]
 
 
