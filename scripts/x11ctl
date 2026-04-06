@@ -22,7 +22,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +351,7 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
 
 def validate_pid_tristate(
     pid: int, created_epoch: int, expected_comm: str
-) -> str:
+) -> Literal["alive", "dead", "unknown"]:
     """Like validate_pid but returns 'alive' / 'dead' / 'unknown'.
 
     'unknown' is returned when the PID cannot be conclusively validated
@@ -679,18 +679,35 @@ def rotate_log(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def create_xauth_file(path: str) -> None:
-    """Create an xauth file with mode 0600. Rejects symlinks."""
-    if os.path.lexists(path) and os.path.islink(path):
-        raise OSError(f"Refusing to create xauth over symlink: {path}")
+    """Create an xauth file with mode 0600. Rejects symlinks.
 
-    # Remove existing regular file if present
-    if os.path.exists(path):
-        os.unlink(path)
-
-    # Create with O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW — prevents TOCTOU
-    # symlink replacement between the pre-check and this open.
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-    os.close(fd)
+    Uses O_CREAT|O_EXCL|O_NOFOLLOW to atomically create the file. If the
+    file already exists, verifies it is a regular file (not a symlink) and
+    removes it before retrying. The retry loop closes the TOCTOU gap between
+    unlink and O_EXCL open.
+    """
+    for attempt in range(3):
+        try:
+            fd = os.open(
+                path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+            )
+            os.close(fd)
+            return
+        except FileExistsError:
+            # File exists — check if it is a symlink (attack) or regular file
+            if os.path.islink(path):
+                raise OSError(f"Refusing to create xauth over symlink: {path}")
+            # Regular file — remove and retry
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass  # Raced with another remover — retry will succeed
+        except OSError as exc:
+            # O_NOFOLLOW on a symlink raises ELOOP/ENOENT on some systems
+            if os.path.islink(path):
+                raise OSError(f"Refusing to create xauth over symlink: {path}") from exc
+            raise
+    raise OSError(f"Failed to create xauth file after 3 attempts: {path}")
 
 
 # ---------------------------------------------------------------------------
