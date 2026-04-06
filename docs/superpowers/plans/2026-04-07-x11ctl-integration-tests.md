@@ -782,10 +782,12 @@ class TestSecurityAttacks:
         os.mkfifo(pidfile_path)
 
         try:
-            # Start should handle FIFO pidfile gracefully
+            # Start should handle FIFO pidfile gracefully — _safe_open_regular
+            # rejects non-regular files, so read_pidfile returns None and start
+            # proceeds as if no pidfile exists (starts a fresh Xvfb).
             result = x11ctl_run(["start", "--headless"], env_overrides=env, timeout=15)
-            # May succeed (treats FIFO pidfile as absent) or fail gracefully
-            assert result.returncode in (0, 1), f"Unexpected exit {result.returncode}: {result.stderr}"
+            assert result.returncode == 0, \
+                f"Expected start to succeed (FIFO pidfile treated as absent): {result.stderr}"
         finally:
             try:
                 os.unlink(pidfile_path)
