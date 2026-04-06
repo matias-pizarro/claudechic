@@ -1152,7 +1152,11 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
 # ---------------------------------------------------------------------------
 
 def build_xpra_command(cfg: Config, bind: str = "127.0.0.1") -> list[str]:
-    """Build the xpra shadow command line."""
+    """Build the xpra shadow command line.
+
+    Requires Xpra v4.x+ where --html=on + --bind-tcp enables WebSocket
+    auto-detection on the same TCP port (no separate --bind-ws needed).
+    """
     return [
         "xpra", "shadow", cfg.display,
         f"--bind-tcp={bind}:{cfg.xpra_port}",
@@ -1431,6 +1435,34 @@ def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> in
                 started.remove("x11vnc")
             return 1
         started.append("websockify")
+
+        # Readiness probe for websockify (noVNC HTTP port)
+        def check_ws() -> bool:
+            return not check_port_available(bind, cfg.novnc_port)
+
+        if not wait_ready(check_ws, retries=10, delay=0.5):
+            logfile_ws = cfg.logfile("websockify")
+            print(f"Error: websockify failed to start. See {logfile_ws}", file=sys.stderr)
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+            try:
+                os.unlink(ws_pidfile)
+            except FileNotFoundError:
+                pass
+            if "websockify" in started:
+                started.remove("websockify")
+            # Rollback x11vnc if we started it in this invocation
+            if "x11vnc" in started:
+                stop_component(x11vnc_pidfile, "x11vnc")
+                started.remove("x11vnc")
+            return 1
 
     return 0
 
