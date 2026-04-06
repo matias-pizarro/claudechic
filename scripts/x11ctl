@@ -1478,6 +1478,151 @@ def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> in
 
 
 # ---------------------------------------------------------------------------
+# Run subcommand — ephemeral display with signal forwarding
+# ---------------------------------------------------------------------------
+
+def run_with_temp_display(cfg: Config, command: list[str]) -> int:
+    """Run a command with a temporary Xvfb display.
+
+    Creates Xvfb, runs the command with DISPLAY/XAUTHORITY set,
+    and tears down Xvfb after the command exits. Installs signal
+    handlers for SIGINT/SIGTERM that forward to the child process
+    and tear down Xvfb before exiting.
+
+    Returns the child command's exit code.
+    """
+    # Preflight
+    missing = check_binaries(["Xvfb", "xauth"])
+    if missing:
+        print(f"Error: missing required commands: {', '.join(missing)}", file=sys.stderr)
+        return 1
+
+    # Clean stale artifacts
+    if not clean_stale_x_artifacts(cfg.display_number):
+        print(f"Error: cannot clean stale artifacts for display {cfg.display}", file=sys.stderr)
+        return 1
+
+    # Create xauth
+    try:
+        create_xauth_file(cfg.xauth)
+    except OSError as exc:
+        print(f"Error: failed to create xauth: {exc}", file=sys.stderr)
+        return 1
+
+    cookie = os.urandom(16).hex()
+    try:
+        result = subprocess.run(
+            ["xauth", "-f", cfg.xauth, "add", cfg.display, ".", cookie],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            print(f"Error: xauth add failed: {result.stderr.strip()}", file=sys.stderr)
+            try:
+                os.unlink(cfg.xauth)
+            except FileNotFoundError:
+                pass
+            return 1
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        print(f"Error: xauth failed: {exc}", file=sys.stderr)
+        try:
+            os.unlink(cfg.xauth)
+        except FileNotFoundError:
+            pass
+        return 1
+
+    # Launch Xvfb
+    xvfb_proc: Optional[subprocess.Popen] = None
+    child_proc: Optional[subprocess.Popen] = None
+
+    def cleanup() -> None:
+        """Kill Xvfb and clean up state."""
+        nonlocal xvfb_proc
+        if xvfb_proc is not None:
+            try:
+                xvfb_proc.terminate()
+                xvfb_proc.wait(timeout=3)
+            except Exception:
+                try:
+                    xvfb_proc.kill()
+                    xvfb_proc.wait(timeout=1)
+                except Exception:
+                    pass
+        try:
+            os.unlink(cfg.xauth)
+        except FileNotFoundError:
+            pass
+        clean_stale_x_artifacts(cfg.display_number)
+
+    def signal_handler(signum: int, frame: object) -> None:
+        """Forward signal to child, then clean up."""
+        if child_proc is not None and child_proc.poll() is None:
+            try:
+                child_proc.send_signal(signum)
+            except ProcessLookupError:
+                pass
+        cleanup()
+        sys.exit(128 + signum)
+
+    try:
+        logfile = cfg.logfile("xvfb")
+        rotate_log(logfile)
+        try:
+            log_fd = _safe_open_regular(
+                logfile, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644
+            )
+        except OSError:
+            cleanup()
+            return 1
+
+        try:
+            xvfb_proc = subprocess.Popen(
+                ["Xvfb", cfg.display, "-screen", "0", cfg.screen, "-auth", cfg.xauth],
+                stdout=log_fd, stderr=log_fd,
+            )
+        except Exception as exc:
+            os.close(log_fd)
+            print(f"Error: failed to launch Xvfb: {exc}", file=sys.stderr)
+            cleanup()
+            return 1
+        else:
+            os.close(log_fd)
+
+        # Readiness probe
+        def check_display() -> bool:
+            try:
+                r = subprocess.run(
+                    ["xdpyinfo", "-display", cfg.display],
+                    capture_output=True,
+                    env={**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth},
+                    timeout=5,
+                )
+                return r.returncode == 0
+            except Exception:
+                return False
+
+        if not wait_ready(check_display, retries=10, delay=0.5):
+            print(f"Error: Xvfb failed to start. See {logfile}", file=sys.stderr)
+            cleanup()
+            return 1
+
+        # Install signal handlers AFTER Xvfb is ready
+        old_sigterm = signal.signal(signal.SIGTERM, signal_handler)
+        old_sigint = signal.signal(signal.SIGINT, signal_handler)
+
+        try:
+            # Run the user command
+            child_env = {**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth}
+            child_proc = subprocess.Popen(command, env=child_env)
+            child_proc.wait()
+            return child_proc.returncode
+        finally:
+            signal.signal(signal.SIGTERM, old_sigterm)
+            signal.signal(signal.SIGINT, old_sigint)
+    finally:
+        cleanup()
+
+
+# ---------------------------------------------------------------------------
 # Command implementations
 # ---------------------------------------------------------------------------
 
@@ -1741,6 +1886,12 @@ def main() -> None:
         sys.exit(status_command_impl(cfg))
     elif args.command == "env":
         print(format_env(cfg), end="")
+    elif args.command == "run":
+        run_cmd = getattr(args, "run_command", [])
+        if not run_cmd:
+            print("Error: no command specified for run", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(run_with_temp_display(cfg, run_cmd))
     else:
         print(f"x11ctl: command '{args.command}' not yet implemented", file=sys.stderr)
         sys.exit(1)

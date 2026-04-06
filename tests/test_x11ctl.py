@@ -1630,3 +1630,32 @@ class TestVncCommand:
             assert result == 2
         finally:
             sock.close()
+
+
+# --- run subcommand (Task 9) ---
+
+class TestRunCommand:
+    @pytest.mark.skipif(
+        x11ctl.find_binary("Xvfb") is None,
+        reason="Xvfb not installed",
+    )
+    def test_run_returns_child_exit_code(self, tmp_path, monkeypatch):
+        """run should propagate the child's exit code."""
+        monkeypatch.setenv("X11CTL_DISPLAY", f":{os.getpid()}")
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-test-xauth")
+        cfg = x11ctl.Config()
+        rc = x11ctl.run_with_temp_display(cfg, ["/bin/sh", "-c", "exit 42"])
+        assert rc == 42
+
+    @pytest.mark.skipif(
+        x11ctl.find_binary("Xvfb") is None,
+        reason="Xvfb not installed",
+    )
+    def test_run_creates_and_tears_down_display(self, tmp_path, monkeypatch):
+        """run should create a temp display and tear it down after."""
+        monkeypatch.setenv("X11CTL_DISPLAY", f":{os.getpid()}")
+        monkeypatch.setenv("X11CTL_XAUTH", "/tmp/.x11ctl-test-xauth")
+        cfg = x11ctl.Config()
+        rc = x11ctl.run_with_temp_display(cfg, ["xdpyinfo"])
+        assert rc == 0
+        assert not Path("/tmp/.x11ctl-test-xauth").exists()
