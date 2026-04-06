@@ -120,6 +120,147 @@ CI can run `pytest -m "not integration"` for fast feedback or `pytest` for the f
 | Concurrent stop | Two `x11ctl stop` simultaneously | Both succeed, no errors |
 | Signal during run | SIGTERM to `x11ctl run sleep 60` | Child killed, Xvfb cleaned, exit 128+15 |
 
+## Human Operator Smoke Tests
+
+Manual tests that a human operator runs to validate the tool works in a real jail environment. These are **not automated** — they exercise the full operator experience including visual output, interactive feedback, and cross-machine access.
+
+### Quick Smoke (5 minutes)
+
+Run in the target FreeBSD jail as the intended operator user:
+
+```bash
+# 1. Setup
+scripts/x11ctl setup --all
+
+# 2. Headless lifecycle
+scripts/x11ctl start --headless
+scripts/x11ctl status                    # Expect: xvfb UP with PID
+scripts/x11ctl env                       # Expect: export DISPLAY/XAUTHORITY lines
+eval $(scripts/x11ctl env)
+xdpyinfo                                 # Expect: display info output
+scripts/x11ctl screenshot /tmp/smoke.png
+file /tmp/smoke.png                       # Expect: "PNG image data"
+scripts/x11ctl stop
+scripts/x11ctl status                    # Expect: "no active tiers"
+```
+
+### Full Stack Smoke (10 minutes)
+
+```bash
+# 3. All tiers
+scripts/x11ctl start --all
+scripts/x11ctl status                    # Expect: xvfb, xpra, x11vnc, websockify all UP
+
+# 4. Xpra HTML5 — open in browser
+curl -sI http://127.0.0.1:10000/ | head -3   # Expect: HTTP 200 or 301
+# If jail is network-accessible: open http://<jail-ip>:10000 in browser
+# Expect: Xpra HTML5 client loads, shows empty desktop
+
+# 5. noVNC — open in browser
+curl -sI http://127.0.0.1:6080/ | head -3    # Expect: HTTP 200
+# If jail is network-accessible: open http://<jail-ip>:6080 in browser
+# Expect: noVNC client loads, shows same desktop as Xpra
+
+# 6. Run a visible app
+eval $(scripts/x11ctl env)
+xterm &                                   # Or: xeyes, xclock, xlogo
+# Refresh browser — expect to see the app in the remote viewer
+
+# 7. Screenshot with content
+scripts/x11ctl screenshot /tmp/with-app.png
+file /tmp/with-app.png                    # Expect: PNG with non-zero dimensions
+# Optionally: open the PNG and verify the app is visible
+
+# 8. Clean stop
+kill %1 2>/dev/null                       # Kill xterm
+scripts/x11ctl stop
+ps aux | grep -E "Xvfb|xpra|x11vnc|websockify" | grep -v grep
+# Expect: no matching processes
+```
+
+### Realistic Scenario Tests (15-20 minutes)
+
+These simulate real operator workflows:
+
+**Scenario A: CI pipeline headless testing**
+```bash
+# Simulate a CI job that runs browser tests
+scripts/x11ctl run playwright test        # Or any GUI test command
+echo "Exit code: $?"                      # Expect: test suite exit code
+# Verify: no Xvfb or xauth left behind after run completes
+ps aux | grep Xvfb | grep -v grep        # Expect: nothing
+ls /tmp/.x11ctl-xauth 2>/dev/null        # Expect: not found
+```
+
+**Scenario B: Long-running development display**
+```bash
+# Developer starts a persistent display for a work session
+scripts/x11ctl start --xpra
+eval $(scripts/x11ctl env)
+# Launch IDE or GUI app
+firefox &
+# ... work for a while ...
+# Disconnect laptop, reconnect later:
+xpra attach tcp://127.0.0.1:10000        # Expect: session restored
+# End of day:
+scripts/x11ctl stop
+```
+
+**Scenario C: Crash recovery**
+```bash
+scripts/x11ctl start --headless
+scripts/x11ctl status                    # UP
+# Simulate crash:
+kill -9 $(cat /tmp/.x11ctl-xvfb.pid | awk '{print $1}')
+scripts/x11ctl status                    # Expect: DOWN or stale
+scripts/x11ctl start --headless          # Expect: cleans stale, starts fresh
+scripts/x11ctl status                    # Expect: UP with new PID
+scripts/x11ctl stop
+```
+
+**Scenario D: Tier upgrade/downgrade**
+```bash
+scripts/x11ctl start --headless          # Tier 1 only
+scripts/x11ctl status                    # xvfb UP
+scripts/x11ctl start --all               # Upgrade to all tiers
+scripts/x11ctl status                    # xvfb, xpra, x11vnc, websockify all UP
+scripts/x11ctl start --headless          # Downgrade — stops xpra+vnc
+scripts/x11ctl status                    # xvfb UP, others gone
+scripts/x11ctl stop
+```
+
+**Scenario E: Port conflict diagnosis**
+```bash
+# Occupy the Xpra port
+python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',10000)); s.listen(); input()" &
+PID=$!
+scripts/x11ctl start --xpra              # Expect: exit 2, error names conflicting process
+echo "Exit code: $?"                      # Expect: 2
+kill $PID
+scripts/x11ctl start --xpra              # Expect: succeeds now
+scripts/x11ctl stop
+```
+
+**Scenario F: Multi-invocation safety**
+```bash
+# Two terminals, same jail:
+# Terminal 1:
+scripts/x11ctl start --all
+# Terminal 2 (while T1 is still starting):
+scripts/x11ctl status                    # Expect: waits for lock, then reports
+# Terminal 2:
+scripts/x11ctl stop                      # Expect: clean stop, no race
+```
+
+### Operator Checklist
+
+After running all scenarios, verify:
+
+- [ ] No orphaned processes: `ps aux | grep -E "Xvfb|xpra|x11vnc|websockify" | grep -v grep` returns nothing
+- [ ] No stale state files: `ls /tmp/.x11ctl-* 2>/dev/null` returns nothing
+- [ ] No stale X artifacts: `ls /tmp/.X*-lock /tmp/.X11-unix/X* 2>/dev/null` returns nothing (for test display numbers)
+- [ ] Log files exist and contain useful diagnostic info: `cat /tmp/.x11ctl-*.log.prev`
+
 ## Relationship to Existing Tests
 
 The 203 existing unit tests in `tests/test_x11ctl.py` are **unchanged**. They test pure logic, mocked I/O, and isolated components. The integration tests complement them by verifying the full CLI path with real processes.
