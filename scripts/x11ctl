@@ -1203,11 +1203,19 @@ def start_command_impl(
         current = read_tiers(cfg.tiers_file) or set()
         to_stop, to_start = compute_tier_diff(current, desired)
 
-        # Stop excess components (in STOP_ORDER)
+        # Stop excess components (in STOP_ORDER). Abort if any fail.
+        excess_stop_failed = False
         for comp in STOP_ORDER:
             for tier in to_stop:
                 if comp in tier_components(tier):
-                    stop_component(cfg.pidfile(comp), _COMPONENT_COMM.get(comp, comp))
+                    ok = stop_component(cfg.pidfile(comp), _COMPONENT_COMM.get(comp, comp))
+                    if not ok:
+                        excess_stop_failed = True
+
+        if excess_stop_failed:
+            print("Error: failed to stop excess components during reconciliation", file=sys.stderr)
+            # Preserve current tiers file (don't overwrite with desired)
+            return 1
 
         # Start missing tiers (headless first — dependency order)
         bind = "0.0.0.0" if bind_all else cfg.bind
