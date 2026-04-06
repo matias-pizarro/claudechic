@@ -1098,3 +1098,63 @@ class TestStopComponent:
         # read_pidfile rejects symlinks → returns None → nothing to stop
         result = x11ctl.stop_component(str(link), "Xvfb")
         assert result is True
+
+
+# --- Tier reconciliation ---
+
+class TestTierReconciliation:
+    def test_start_xpra_computes_correct_diff(self):
+        """start --xpra when vnc was running: stop vnc, start nothing new (headless+xpra exist)."""
+        old_tiers = {"headless", "xpra", "vnc"}
+        new_tiers = x11ctl.desired_tiers("xpra")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == {"vnc"}
+        assert to_start == set()
+
+    def test_start_all_from_headless(self):
+        """start --all when only headless: start xpra + vnc."""
+        old_tiers = {"headless"}
+        new_tiers = x11ctl.desired_tiers("all")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == set()
+        assert to_start == {"xpra", "vnc"}
+
+    def test_start_headless_from_all(self):
+        """start --headless when all running: stop xpra + vnc."""
+        old_tiers = {"headless", "xpra", "vnc"}
+        new_tiers = x11ctl.desired_tiers("headless")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == {"xpra", "vnc"}
+        assert to_start == set()
+
+    def test_start_from_nothing(self):
+        """start --xpra with nothing running."""
+        old_tiers = set()
+        new_tiers = x11ctl.desired_tiers("xpra")
+        to_stop, to_start = x11ctl.compute_tier_diff(old_tiers, new_tiers)
+        assert to_stop == set()
+        assert to_start == {"headless", "xpra"}
+
+    def test_cascade_stop_headless(self):
+        """stop --headless cascades: returns all current tiers as to_stop."""
+        current = {"headless", "xpra", "vnc"}
+        to_stop = x11ctl.compute_cascade_stop("headless", current)
+        assert to_stop == {"headless", "xpra", "vnc"}
+
+    def test_cascade_stop_vnc(self):
+        """stop --vnc: only vnc stops."""
+        current = {"headless", "xpra", "vnc"}
+        to_stop = x11ctl.compute_cascade_stop("vnc", current)
+        assert to_stop == {"vnc"}
+
+    def test_cascade_stop_xpra(self):
+        """stop --xpra: only xpra stops."""
+        current = {"headless", "xpra", "vnc"}
+        to_stop = x11ctl.compute_cascade_stop("xpra", current)
+        assert to_stop == {"xpra"}
+
+    def test_tier_to_components(self):
+        """Map tier names to process component names for stop."""
+        assert x11ctl.tier_components("headless") == ["xvfb"]
+        assert x11ctl.tier_components("xpra") == ["xpra"]
+        assert set(x11ctl.tier_components("vnc")) == {"x11vnc", "websockify"}

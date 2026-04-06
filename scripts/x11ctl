@@ -567,6 +567,42 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Tier reconciliation
+# ---------------------------------------------------------------------------
+
+TIER_COMPONENTS: dict[str, list[str]] = {
+    "headless": ["xvfb"],
+    "xpra": ["xpra"],
+    "vnc": ["x11vnc", "websockify"],
+}
+
+# Stop order: viewers first, then display
+STOP_ORDER: list[str] = ["websockify", "x11vnc", "xpra", "xvfb"]
+
+
+def compute_tier_diff(
+    old_tiers: set[str], new_tiers: set[str]
+) -> tuple[set[str], set[str]]:
+    """Compute which tiers to stop and start for a declarative start.
+
+    Returns (to_stop, to_start).
+    """
+    return old_tiers - new_tiers, new_tiers - old_tiers
+
+
+def compute_cascade_stop(tier: str, current: set[str]) -> set[str]:
+    """Compute which tiers to stop. Headless cascades everything."""
+    if tier == "headless" or tier == "all":
+        return set(current)
+    return {tier} & current
+
+
+def tier_components(tier: str) -> list[str]:
+    """Map a tier name to its component process names."""
+    return TIER_COMPONENTS.get(tier, [])
+
+
+# ---------------------------------------------------------------------------
 # Tiers file I/O
 # ---------------------------------------------------------------------------
 
