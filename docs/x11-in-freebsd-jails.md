@@ -8,7 +8,7 @@ This runbook covers running X11 applications inside FreeBSD jails for headless t
 
 - FreeBSD 15+ jail with Python 3.10+
 - `pkg` package manager available
-- For headless only: `xorg-vfbserver`, `xauth`, `xdpyinfo`
+- For headless only: `xorg-vfbserver`, `xauth`, `xdpyinfo`, `ImageMagick7` (not `-nox11` — needs X11 delegate for screenshots)
 - For remote viewing: additionally `xpra`, `xpra-html5` (Tier 2) or `x11vnc`, `novnc` (Tier 3)
 
 Install all dependencies:

@@ -1894,7 +1894,11 @@ def screenshot_command_impl(cfg: Config, path: str) -> int:
 
     import_bin = find_binary("import")
     if import_bin is None:
-        print("Error: 'import' binary not found (install ImageMagick7-nox11)", file=sys.stderr)
+        print(
+            "Error: 'import' binary not found.\n"
+            "  Run: pkg install ImageMagick7",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -1904,7 +1908,17 @@ def screenshot_command_impl(cfg: Config, path: str) -> int:
             env={**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth},
         )
         if result.returncode != 0:
-            print(f"Error: screenshot failed: {result.stderr.strip()}", file=sys.stderr)
+            stderr = result.stderr.strip()
+            # Detect nox11 variant: import exists but lacks X11 delegate
+            if "delegate" in stderr and "X11" in stderr:
+                print(
+                    f"Error: screenshot failed — ImageMagick was built without X11 support.\n"
+                    f"  The 'nox11' variant cannot capture X displays.\n"
+                    f"  Fix: pkg remove ImageMagick7-nox11 && pkg install ImageMagick7",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Error: screenshot failed: {stderr}", file=sys.stderr)
             return 1
         return 0
     except subprocess.TimeoutExpired:
@@ -1920,7 +1934,7 @@ def screenshot_command_impl(cfg: Config, path: str) -> int:
 # ---------------------------------------------------------------------------
 
 _SETUP_PACKAGES: dict[str, list[str]] = {
-    "headless": ["xorg-vfbserver", "xauth", "xdpyinfo", "xdotool", "ImageMagick7-nox11"],
+    "headless": ["xorg-vfbserver", "xauth", "xdpyinfo", "xdotool", "ImageMagick7"],
     "xpra": ["xpra", "xpra-html5"],
     "vnc": ["x11vnc", "novnc"],
 }
