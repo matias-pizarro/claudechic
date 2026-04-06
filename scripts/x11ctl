@@ -987,8 +987,8 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
                         file=sys.stderr,
                     )
                     return 1
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"  (diagnostic: {exc})", file=sys.stderr)
         print(
             f"Error: stale X artifacts exist for display {cfg.display} but ownership could not be determined.\n"
             f"  This may be due to a crashed X server or a ps timeout.\n"
@@ -1077,7 +1077,8 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
         try:
             r = subprocess.run(
                 ["xdpyinfo", "-display", cfg.display],
-                capture_output=True, env={**os.environ, "XAUTHORITY": cfg.xauth},
+                capture_output=True,
+                env={**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth},
                 timeout=5,
             )
             return r.returncode == 0
@@ -1104,6 +1105,10 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
             os.unlink(cfg.xauth)
         except FileNotFoundError:
             pass
+        # Clean up X artifacts that Xvfb created (lock + socket) now that
+        # the process is dead. This prevents the next start_headless call
+        # from hitting stale artifacts during rapid retry.
+        clean_stale_x_artifacts(cfg.display_number)
         started.remove("xvfb") if "xvfb" in started else None
         return 1
 
