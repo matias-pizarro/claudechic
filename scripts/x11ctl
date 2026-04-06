@@ -30,14 +30,20 @@ from typing import Callable, Literal, Optional
 # Safe file I/O helpers
 # ---------------------------------------------------------------------------
 
-def _safe_open_regular(path: str, flags: int, mode: int = 0) -> int:
+def _safe_open_regular(
+    path: str, flags: int, mode: int = 0, *, check_owner: bool = False
+) -> int:
     """Open a file with O_NOFOLLOW | O_NONBLOCK, then verify it is a regular file.
 
     Prevents FIFO-based DoS (O_NONBLOCK prevents blocking on FIFO open)
     and symlink attacks (O_NOFOLLOW). After open, fstat verifies the fd
     points to a regular file before any I/O.
 
-    Raises OSError if the path is not a regular file (symlink, FIFO, etc.).
+    If check_owner=True, also verifies st_uid matches os.geteuid() to
+    prevent local state poisoning from other users in the same jail.
+
+    Raises OSError if the path is not a regular file (symlink, FIFO, etc.)
+    or if ownership check fails.
     """
     fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode)
     try:
@@ -45,6 +51,11 @@ def _safe_open_regular(path: str, flags: int, mode: int = 0) -> int:
         if not stat.S_ISREG(st.st_mode):
             os.close(fd)
             raise OSError(f"Not a regular file: {path} (mode={oct(st.st_mode)})")
+        if check_owner and st.st_uid != os.geteuid():
+            os.close(fd)
+            raise OSError(
+                f"File owned by uid {st.st_uid}, expected {os.geteuid()}: {path}"
+            )
         # Clear O_NONBLOCK for subsequent I/O (read/write should block normally)
         fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
         return fd
@@ -304,7 +315,7 @@ def read_pidfile(path: str) -> Optional[tuple[int, int]]:
     if os.path.islink(path):
         return None
     try:
-        fd = _safe_open_regular(path, os.O_RDONLY)
+        fd = _safe_open_regular(path, os.O_RDONLY, check_owner=True)
         try:
             data = os.read(fd, 256).decode().strip()
         finally:
@@ -652,7 +663,7 @@ def read_tiers(path: str) -> Optional[set[str]]:
     if os.path.islink(path):
         return None
     try:
-        fd = _safe_open_regular(path, os.O_RDONLY)
+        fd = _safe_open_regular(path, os.O_RDONLY, check_owner=True)
         try:
             data = os.read(fd, 256).decode().strip()
         finally:
