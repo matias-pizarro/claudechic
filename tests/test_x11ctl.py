@@ -1201,6 +1201,15 @@ class TestTierReconciliation:
         """TIER_COMPONENTS keys must match _COMPONENT_TIERS exactly."""
         assert set(x11ctl.TIER_COMPONENTS.keys()) == x11ctl._COMPONENT_TIERS
 
+    def test_tier_start_fn_keys_match_component_tiers(self):
+        """_TIER_START_FN must have a start function for every component tier."""
+        assert set(x11ctl._TIER_START_FN.keys()) == x11ctl._COMPONENT_TIERS
+
+    def test_component_comm_covers_all_components(self):
+        """_COMPONENT_COMM must map every component from TIER_COMPONENTS."""
+        all_components = {c for comps in x11ctl.TIER_COMPONENTS.values() for c in comps}
+        assert set(x11ctl._COMPONENT_COMM.keys()) == all_components
+
 
 # --- Stale X artifact cleanup ---
 

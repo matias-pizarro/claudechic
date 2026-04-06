@@ -1161,12 +1161,16 @@ def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> in
 # Command implementations
 # ---------------------------------------------------------------------------
 
-# Maps tier names to their start functions
-_TIER_START_FN: dict[str, Callable] = {
-    "headless": start_headless,
-    "xpra": start_xpra,
-    "vnc": start_vnc,
+# Maps tier names to their start function NAMES (resolved via globals()
+# at call time to respect mocking in tests).
+_TIER_START_FN_NAMES: dict[str, str] = {
+    "headless": "start_headless",
+    "xpra": "start_xpra",
+    "vnc": "start_vnc",
 }
+
+# For structural invariant tests — expose keys like _TIER_START_FN would
+_TIER_START_FN = _TIER_START_FN_NAMES
 
 # Maps component names to their expected process comm names for stop
 _COMPONENT_COMM: dict[str, str] = {
@@ -1206,16 +1210,25 @@ def start_command_impl(
 
         for tier in start_order:
             if tier in to_start:
-                fn = _TIER_START_FN.get(tier)
+                fn_name = _TIER_START_FN_NAMES.get(tier)
+                fn = globals().get(fn_name) if fn_name else None
                 if fn is None:
                     continue
                 rc = fn(cfg, started, bind=bind)
                 if rc != 0:
-                    # Rollback: stop everything we started in this invocation
+                    # Rollback: stop everything we started in this invocation.
+                    # Contract: start_* functions append component names (not tier
+                    # names) matching _COMPONENT_COMM keys and cfg.pidfile keys.
                     for rollback_comp in reversed(started):
+                        if rollback_comp not in _COMPONENT_COMM:
+                            print(
+                                f"Warning: unknown component in rollback: {rollback_comp}",
+                                file=sys.stderr,
+                            )
+                            continue
                         stop_component(
                             cfg.pidfile(rollback_comp),
-                            _COMPONENT_COMM.get(rollback_comp, rollback_comp),
+                            _COMPONENT_COMM[rollback_comp],
                         )
                     # Clean up tiers file if nothing was running before
                     if not current:
@@ -1248,9 +1261,9 @@ def stop_command_impl(cfg: Config, tier: str) -> int:
         if not to_stop:
             return 0
 
-        # Stop components in STOP_ORDER, track successes/failures
+        # Stop components in STOP_ORDER, track per-component success
         all_ok = True
-        stopped_tiers: set[str] = set()
+        stopped_components: set[str] = set()
         for comp in STOP_ORDER:
             for t in to_stop:
                 if comp in tier_components(t):
@@ -1258,9 +1271,16 @@ def stop_command_impl(cfg: Config, tier: str) -> int:
                         cfg.pidfile(comp), _COMPONENT_COMM.get(comp, comp)
                     )
                     if ok:
-                        stopped_tiers.add(t)
+                        stopped_components.add(comp)
                     else:
                         all_ok = False
+
+        # A tier is fully stopped only when ALL its components stopped
+        stopped_tiers: set[str] = set()
+        for t in to_stop:
+            comps = tier_components(t)
+            if all(c in stopped_components for c in comps):
+                stopped_tiers.add(t)
 
         remaining = current - stopped_tiers
 
