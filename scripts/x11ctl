@@ -1835,6 +1835,86 @@ def status_command_impl(cfg: Config) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Screenshot command
+# ---------------------------------------------------------------------------
+
+def screenshot_command_impl(cfg: Config, path: str) -> int:
+    """Capture the display to a PNG file using ImageMagick import."""
+    # Reject paths starting with - (argument injection prevention)
+    if path.startswith("-"):
+        print("Error: output path must not start with '-'", file=sys.stderr)
+        return 1
+
+    import_bin = find_binary("import")
+    if import_bin is None:
+        print("Error: 'import' binary not found (install ImageMagick7-nox11)", file=sys.stderr)
+        return 1
+
+    try:
+        result = subprocess.run(
+            [import_bin, "-window", "root", "-display", cfg.display, "--", path],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth},
+        )
+        if result.returncode != 0:
+            print(f"Error: screenshot failed: {result.stderr.strip()}", file=sys.stderr)
+            return 1
+        return 0
+    except subprocess.TimeoutExpired:
+        print("Error: screenshot timed out", file=sys.stderr)
+        return 1
+    except (FileNotFoundError, PermissionError) as exc:
+        print(f"Error: screenshot failed: {exc}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Setup command
+# ---------------------------------------------------------------------------
+
+_SETUP_PACKAGES: dict[str, list[str]] = {
+    "headless": ["xorg-vfbserver", "xauth", "xdpyinfo", "xdotool", "ImageMagick7-nox11"],
+    "xpra": ["xpra", "xpra-html5"],
+    "vnc": ["x11vnc", "novnc"],
+}
+
+
+def setup_command_impl(tier: str) -> int:
+    """Install packages for the specified tier. Must run as root."""
+    if os.geteuid() != 0:
+        print("Error: setup must run as root", file=sys.stderr)
+        return 1
+
+    # Determine packages
+    if tier == "all":
+        packages = []
+        for pkgs in _SETUP_PACKAGES.values():
+            packages.extend(pkgs)
+    elif tier in _SETUP_PACKAGES:
+        packages = list(_SETUP_PACKAGES[tier])
+    else:
+        print(f"Error: unknown tier: {tier}", file=sys.stderr)
+        return 1
+
+    # Install via absolute pkg path (prevent PATH hijacking)
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/pkg", "install", "-y"] + packages,
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"Error: pkg install failed: {result.stderr.strip()}", file=sys.stderr)
+            return 1
+        return 0
+    except subprocess.TimeoutExpired:
+        print("Error: pkg install timed out", file=sys.stderr)
+        return 1
+    except (FileNotFoundError, PermissionError) as exc:
+        print(f"Error: pkg not found: {exc}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -1901,6 +1981,14 @@ def main() -> None:
             print("Error: no command specified for run", file=sys.stderr)
             sys.exit(1)
         sys.exit(run_with_temp_display(cfg, run_cmd))
+    elif args.command == "screenshot":
+        sys.exit(screenshot_command_impl(cfg, args.path))
+    elif args.command == "setup":
+        tier = "all" if getattr(args, "all", False) else \
+               "headless" if getattr(args, "tier1", False) else \
+               "xpra" if getattr(args, "tier2", False) else \
+               "vnc" if getattr(args, "tier3", False) else "headless"
+        sys.exit(setup_command_impl(tier))
     else:
         print(f"x11ctl: command '{args.command}' not yet implemented", file=sys.stderr)
         sys.exit(1)

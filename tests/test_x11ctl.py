@@ -1695,3 +1695,94 @@ sys.exit(x.run_with_temp_display(cfg, ['sleep', '60']))
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=10)
         assert proc.returncode is not None
+
+
+# --- screenshot command (Task 10) ---
+
+class TestScreenshotCommand:
+    def test_screenshot_missing_import_binary(self):
+        """screenshot should fail with clear error when import binary missing."""
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "find_binary", return_value=None):
+            result = x11ctl.screenshot_command_impl(cfg, "/tmp/out.png")
+            assert result != 0
+
+    def test_screenshot_builds_correct_command(self):
+        """screenshot should invoke import with correct display and path."""
+        cfg = x11ctl.Config()
+        called_with = []
+
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch.object(x11ctl, "find_binary", return_value="/usr/local/bin/import"), \
+             patch("subprocess.run", side_effect=mock_run):
+            result = x11ctl.screenshot_command_impl(cfg, "/tmp/out.png")
+            assert result == 0
+            assert "import" in called_with[0][0]
+            assert "-window" in called_with[0]
+            assert "--" in called_with[0]
+            idx_sep = called_with[0].index("--")
+            assert called_with[0][idx_sep + 1] == "/tmp/out.png"
+
+    def test_screenshot_rejects_dash_path(self):
+        """screenshot should reject output paths starting with -."""
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "find_binary", return_value="/usr/local/bin/import"):
+            result = x11ctl.screenshot_command_impl(cfg, "-evil")
+            assert result != 0
+
+
+# --- setup command (Task 10) ---
+
+class TestSetupCommand:
+    def test_setup_rejects_non_root(self):
+        """setup should fail when not running as root."""
+        with patch("os.geteuid", return_value=1000):
+            result = x11ctl.setup_command_impl(tier="headless")
+            assert result != 0
+
+    def test_setup_accepts_root(self):
+        """setup should proceed when running as root."""
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=0)):
+            result = x11ctl.setup_command_impl(tier="headless")
+            assert result == 0
+
+    def test_setup_uses_absolute_pkg_path(self):
+        """setup should invoke pkg via /usr/sbin/pkg, not PATH search."""
+        called_with = []
+
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", side_effect=mock_run):
+            x11ctl.setup_command_impl(tier="headless")
+            assert called_with[0][0] == "/usr/sbin/pkg"
+
+    def test_setup_headless_package_list(self):
+        """setup --headless should install xorg-vfbserver and xauth."""
+        called_with = []
+
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", side_effect=mock_run):
+            x11ctl.setup_command_impl(tier="headless")
+            pkg_cmd = called_with[0]
+            assert "xorg-vfbserver" in pkg_cmd
+            assert "xauth" in pkg_cmd
+
+    def test_setup_pkg_failure(self):
+        """setup should return non-zero when pkg install fails."""
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=1, stderr="pkg error")):
+            result = x11ctl.setup_command_impl(tier="headless")
+            assert result != 0
