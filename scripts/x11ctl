@@ -1142,16 +1142,244 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
 
 
 # ---------------------------------------------------------------------------
-# Subcommands (stubs — implemented in later tasks)
+# Start Tier 2 / Tier 3 (stubs — implemented in Tasks 7/8)
 # ---------------------------------------------------------------------------
+
+def start_xpra(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> int:
+    """Start Xpra shadow. Returns 0/1/2. Stub — implemented in Task 7."""
+    print("Error: start_xpra not yet implemented", file=sys.stderr)
+    return 1
+
+
+def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> int:
+    """Start x11vnc + websockify. Returns 0/1/2. Stub — implemented in Task 8."""
+    print("Error: start_vnc not yet implemented", file=sys.stderr)
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Command implementations
+# ---------------------------------------------------------------------------
+
+# Maps tier names to their start functions
+_TIER_START_FN: dict[str, Callable] = {
+    "headless": start_headless,
+    "xpra": start_xpra,
+    "vnc": start_vnc,
+}
+
+# Maps component names to their expected process comm names for stop
+_COMPONENT_COMM: dict[str, str] = {
+    "xvfb": "Xvfb",
+    "xpra": "xpra",
+    "x11vnc": "x11vnc",
+    "websockify": "websockify",
+}
+
+
+def start_command_impl(
+    cfg: Config, desired: set[str], bind_all: bool
+) -> int:
+    """Declarative start: reconcile current tiers to desired state.
+
+    Acquires exclusive lock, reads current tiers, computes diff, stops
+    excess tiers, starts missing tiers. Rolls back on failure.
+    """
+    lock_fd = acquire_lock(cfg.lock_file, exclusive=True)
+    if lock_fd is None:
+        print("Error: another x11ctl operation is in progress", file=sys.stderr)
+        return 1
+    try:
+        current = read_tiers(cfg.tiers_file) or set()
+        to_stop, to_start = compute_tier_diff(current, desired)
+
+        # Stop excess components (in STOP_ORDER)
+        for comp in STOP_ORDER:
+            for tier in to_stop:
+                if comp in tier_components(tier):
+                    stop_component(cfg.pidfile(comp), _COMPONENT_COMM.get(comp, comp))
+
+        # Start missing tiers (headless first — dependency order)
+        bind = "0.0.0.0" if bind_all else cfg.bind
+        started: list[str] = []
+        start_order = ["headless", "xpra", "vnc"]  # dependency order
+
+        for tier in start_order:
+            if tier in to_start:
+                fn = _TIER_START_FN.get(tier)
+                if fn is None:
+                    continue
+                rc = fn(cfg, started, bind=bind)
+                if rc != 0:
+                    # Rollback: stop everything we started in this invocation
+                    for rollback_comp in reversed(started):
+                        stop_component(
+                            cfg.pidfile(rollback_comp),
+                            _COMPONENT_COMM.get(rollback_comp, rollback_comp),
+                        )
+                    # Clean up tiers file if nothing was running before
+                    if not current:
+                        delete_tiers(cfg.tiers_file)
+                    return rc
+
+        # Write new tiers state
+        write_tiers(cfg.tiers_file, desired)
+        return 0
+    finally:
+        release_lock(lock_fd)
+
+
+def stop_command_impl(cfg: Config, tier: str) -> int:
+    """Subtractive stop: remove specified tiers from running state.
+
+    Acquires exclusive lock, reads current tiers, computes cascade,
+    stops components. Only cleans xauth when headless is stopped.
+    """
+    lock_fd = acquire_lock(cfg.lock_file, exclusive=True)
+    if lock_fd is None:
+        print("Error: another x11ctl operation is in progress", file=sys.stderr)
+        return 1
+    try:
+        current = read_tiers(cfg.tiers_file) or set()
+        if not current:
+            return 0  # nothing to stop
+
+        to_stop = compute_cascade_stop(tier, current)
+        if not to_stop:
+            return 0
+
+        # Stop components in STOP_ORDER, track successes/failures
+        all_ok = True
+        stopped_tiers: set[str] = set()
+        for comp in STOP_ORDER:
+            for t in to_stop:
+                if comp in tier_components(t):
+                    ok = stop_component(
+                        cfg.pidfile(comp), _COMPONENT_COMM.get(comp, comp)
+                    )
+                    if ok:
+                        stopped_tiers.add(t)
+                    else:
+                        all_ok = False
+
+        remaining = current - stopped_tiers
+
+        if all_ok and not remaining:
+            # Everything stopped — delete tiers file and clean xauth
+            delete_tiers(cfg.tiers_file)
+            if "headless" in stopped_tiers:
+                try:
+                    os.unlink(cfg.xauth)
+                except FileNotFoundError:
+                    pass
+            return 0
+
+        if remaining:
+            # Some tiers still running — update tiers file
+            write_tiers(cfg.tiers_file, remaining)
+        else:
+            # All tiers stopped but some components failed — preserve
+            # surviving tiers (the ones whose stop returned False)
+            failed_tiers = to_stop - stopped_tiers
+            if failed_tiers:
+                write_tiers(cfg.tiers_file, failed_tiers)
+
+        if all_ok and "headless" in stopped_tiers:
+            try:
+                os.unlink(cfg.xauth)
+            except FileNotFoundError:
+                pass
+
+        return 0 if all_ok else 1
+    finally:
+        release_lock(lock_fd)
+
+
+def status_command_impl(cfg: Config) -> int:
+    """Report running status of all expected components. Returns 0 if healthy, 1 if degraded."""
+    lock_fd = acquire_lock(cfg.lock_file, exclusive=False)
+    if lock_fd is None:
+        print("Error: another x11ctl operation is in progress", file=sys.stderr)
+        return 1
+    try:
+        current = read_tiers(cfg.tiers_file)
+        if current is None:
+            print("x11ctl: no active tiers", file=sys.stderr)
+            return 0
+
+        healthy = True
+        for tier in sorted(current):
+            for comp in tier_components(tier):
+                data = read_pidfile(cfg.pidfile(comp))
+                if data is None:
+                    print(f"  {comp}: DOWN (no pidfile)", file=sys.stderr)
+                    healthy = False
+                    continue
+                pid, epoch = data
+                if validate_pid(pid, epoch, _COMPONENT_COMM.get(comp, comp)):
+                    print(f"  {comp}: UP (PID {pid})", file=sys.stderr)
+                else:
+                    print(f"  {comp}: DOWN (stale PID {pid})", file=sys.stderr)
+                    healthy = False
+
+        return 0 if healthy else 1
+    finally:
+        release_lock(lock_fd)
+
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+def _determine_desired_tiers(args: argparse.Namespace) -> set[str]:
+    """Determine desired tiers from CLI flags. Defaults to headless if none set."""
+    if getattr(args, "all", False):
+        return desired_tiers("all")
+    if getattr(args, "xpra", False) and getattr(args, "vnc", False):
+        return desired_tiers("all")
+    if getattr(args, "xpra", False):
+        return desired_tiers("xpra")
+    if getattr(args, "vnc", False):
+        return desired_tiers("vnc")
+    if getattr(args, "headless", False):
+        return desired_tiers("headless")
+    return desired_tiers("headless")  # default
+
+
+def _determine_stop_tier(args: argparse.Namespace) -> str:
+    """Determine which tier to stop. Defaults to 'all' if none set."""
+    if getattr(args, "headless", False):
+        return "headless"
+    if getattr(args, "xpra", False):
+        return "xpra"
+    if getattr(args, "vnc", False):
+        return "vnc"
+    return "all"  # default: stop everything
+
 
 def main() -> None:
     """Entry point."""
     args = parse_args(sys.argv[1:])
     if args.command is None:
-        parse_args(["--help"])  # prints help and calls sys.exit(0)
-    print(f"x11ctl: command '{args.command}' not yet implemented", file=sys.stderr)
-    sys.exit(1)
+        parse_args(["--help"])
+        return
+
+    cfg = Config()
+
+    if args.command == "start":
+        desired = _determine_desired_tiers(args)
+        bind_all = getattr(args, "bind_all", False)
+        sys.exit(start_command_impl(cfg, desired, bind_all))
+    elif args.command == "stop":
+        tier = _determine_stop_tier(args)
+        sys.exit(stop_command_impl(cfg, tier))
+    elif args.command == "status":
+        sys.exit(status_command_impl(cfg))
+    elif args.command == "env":
+        print(format_env(cfg), end="")
+    else:
+        print(f"x11ctl: command '{args.command}' not yet implemented", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

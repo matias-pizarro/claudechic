@@ -1349,3 +1349,190 @@ class TestXauthAdd:
             result = x11ctl.start_headless(cfg, started)
             assert result == 1
             mock_unlink.assert_called_once_with(cfg.xauth)
+
+
+# --- Command dispatch ---
+
+class TestStartCommand:
+    def test_start_stops_excess_before_starting_missing(self):
+        """start --headless when all running: stops xpra+vnc components."""
+        cfg = x11ctl.Config()
+        stopped = []
+        started = []
+
+        def mock_stop(pidfile, comm):
+            stopped.append(comm)
+            return True
+
+        def mock_start_headless(c, s, **kwargs):
+            started.append("xvfb")
+            return 0
+
+        with patch.object(x11ctl, "stop_component", side_effect=mock_stop), \
+             patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra", "vnc"}), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 0
+            assert "websockify" in stopped or "x11vnc" in stopped or "xpra" in stopped
+
+
+class TestStopCommand:
+    def test_stop_vnc_updates_tiers_file(self):
+        """stop --vnc should update tiers file to remove vnc."""
+        cfg = x11ctl.Config()
+        written_tiers = []
+
+        with patch.object(x11ctl, "stop_component", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra", "vnc"}), \
+             patch.object(x11ctl, "write_tiers", side_effect=lambda p, t: written_tiers.append(t)), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.stop_command_impl(cfg, tier="vnc")
+            assert result == 0
+            assert written_tiers[-1] == {"headless", "xpra"}
+
+    def test_stop_all_deletes_tiers_file(self):
+        """stop --all should delete tiers file."""
+        cfg = x11ctl.Config()
+        deleted = []
+
+        with patch.object(x11ctl, "stop_component", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra", "vnc"}), \
+             patch.object(x11ctl, "delete_tiers", side_effect=lambda p: deleted.append(p)), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink") as mock_unlink:
+            result = x11ctl.stop_command_impl(cfg, tier="all")
+            assert result == 0
+            assert len(deleted) == 1
+            mock_unlink.assert_any_call(cfg.xauth)
+
+    def test_stop_headless_cleans_xauth(self):
+        """stop --headless should cascade all and clean up xauth file."""
+        cfg = x11ctl.Config()
+
+        with patch.object(x11ctl, "stop_component", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "xpra"}), \
+             patch.object(x11ctl, "delete_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink") as mock_unlink:
+            result = x11ctl.stop_command_impl(cfg, tier="headless")
+            assert result == 0
+            mock_unlink.assert_any_call(cfg.xauth)
+
+    def test_stop_vnc_does_not_clean_xauth(self):
+        """stop --vnc should NOT clean up xauth (headless still running)."""
+        cfg = x11ctl.Config()
+
+        with patch.object(x11ctl, "stop_component", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless", "vnc"}), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink") as mock_unlink:
+            result = x11ctl.stop_command_impl(cfg, tier="vnc")
+            assert result == 0
+            for call in mock_unlink.call_args_list:
+                assert call.args[0] != cfg.xauth
+
+    def test_stop_reports_failure_when_sigkill_fails(self):
+        """stop should return non-zero exit when a component can't be killed."""
+        cfg = x11ctl.Config()
+        written_tiers = []
+
+        with patch.object(x11ctl, "stop_component", return_value=False), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "write_tiers", side_effect=lambda p, t: written_tiers.append(t)), \
+             patch.object(x11ctl, "delete_tiers") as mock_delete, \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink") as mock_unlink:
+            result = x11ctl.stop_command_impl(cfg, tier="all")
+            assert result != 0
+            for call in mock_unlink.call_args_list:
+                assert call.args[0] != cfg.xauth
+            mock_delete.assert_not_called()
+            assert len(written_tiers) >= 1
+            assert "headless" in written_tiers[-1]
+
+
+class TestLockTimeout:
+    def test_start_returns_1_on_lock_timeout(self):
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "acquire_lock", return_value=None):
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 1
+
+    def test_stop_returns_1_on_lock_timeout(self):
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "acquire_lock", return_value=None):
+            result = x11ctl.stop_command_impl(cfg, tier="all")
+            assert result == 1
+
+    def test_status_returns_1_on_lock_timeout(self):
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "acquire_lock", return_value=None):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 1
+
+
+class TestStartRollback:
+    def test_rollback_on_xpra_failure(self):
+        """If start_xpra fails after start_headless succeeds, headless should be rolled back."""
+        cfg = x11ctl.Config()
+        rollback_calls = []
+
+        def mock_start_headless(c, started, **kwargs):
+            started.append("xvfb")
+            return 0
+
+        def mock_start_xpra(c, started, **kw):
+            return 1  # failure
+
+        def mock_stop(pidfile, comm):
+            rollback_calls.append(comm)
+            return True
+
+        with patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "start_xpra", side_effect=mock_start_xpra), \
+             patch.object(x11ctl, "stop_component", side_effect=mock_stop), \
+             patch.object(x11ctl, "read_tiers", return_value=set()), \
+             patch.object(x11ctl, "delete_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.start_command_impl(cfg, desired={"headless", "xpra"}, bind_all=False)
+            assert result != 0
+            assert "Xvfb" in rollback_calls or "xvfb" in [c.lower() for c in rollback_calls]
+
+
+class TestStatusCommand:
+    def test_status_healthy_returns_0(self):
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=(1234, 1712345678)), \
+             patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 0
+
+    def test_status_unhealthy_returns_1(self):
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 1
+
+    def test_status_no_tiers_file_returns_0(self):
+        cfg = x11ctl.Config()
+        with patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.status_command_impl(cfg)
+            assert result == 0
