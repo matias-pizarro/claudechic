@@ -171,6 +171,96 @@ Each component keeps one generation of `.log.prev`:
 cat /tmp/.x11ctl-xvfb.log.prev  # Previous Xvfb log (crash evidence)
 ```
 
+### Chromium / Playwright on FreeBSD jails
+
+Playwright installs **Linux** Chromium binaries (`chrome-linux/chrome`) which require FreeBSD's Linuxulator (Linux binary compatibility layer). If Chromium crashes immediately with `SIGTRAP` or `SIGABRT`, the issue is the Linux compat environment, not the X11 display.
+
+**Verify the display works first** (rules out x11ctl issues):
+
+```sh
+x11ctl run xdpyinfo         # Should succeed
+x11ctl run xdotool getdisplaygeometry  # Should print "1920 1080"
+```
+
+**Required jail host-side configuration** (`jail.conf`):
+
+```
+# Linux binary compat
+allow.mount;
+allow.mount.linprocfs;
+allow.mount.linsysfs;
+allow.mount.tmpfs;
+enforce_statfs = 1;          # Allow jail to see mounted filesystems
+```
+
+**Required mounts inside the jail:**
+
+```sh
+# As root inside the jail:
+mount -t linprocfs linproc /compat/linux/proc
+mount -t linsysfs linsys /compat/linux/sys
+mount -t tmpfs tmpfs /dev/shm
+mount -t fdescfs fdesc /dev/fd
+```
+
+Or in `/etc/fstab` for persistence:
+
+```
+linproc    /compat/linux/proc  linprocfs  rw  0  0
+linsys     /compat/linux/sys   linsysfs   rw  0  0
+tmpfs      /dev/shm            tmpfs      rw,mode=1777  0  0
+fdesc      /dev/fd             fdescfs    rw  0  0
+```
+
+**Verify Linux compat is working:**
+
+```sh
+# Check Linuxulator is loaded (host-side)
+kldstat | grep linux           # Should show linux.ko, linux64.ko
+
+# Check inside the jail
+sysctl kern.features.linux     # Should print 1
+ls /compat/linux/proc/self/    # Should show Linux procfs entries
+ls /dev/shm/                   # Should be an empty tmpfs mount
+```
+
+**Common Chromium crash causes and fixes:**
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `SIGTRAP` immediately | Missing `/compat/linux/proc` | Mount linprocfs |
+| `SIGABRT` / sandbox error | Missing `/dev/shm` | Mount tmpfs on `/dev/shm` |
+| `error while loading shared libraries` | Missing Linux libs | `pkg install linux_base-c7` or `linux-c7-gtk3` |
+| `NSS_Init failed` | Missing NSS certs | `pkg install linux-c7-nss` |
+| GPU errors / `--no-sandbox` needed | No GPU in jail | Playwright already passes `--no-sandbox` |
+
+**Test Playwright with verbose output:**
+
+```sh
+# Set display
+eval $(x11ctl env)
+
+# Debug Chromium launch
+DEBUG=pw:browser* playwright open https://example.com
+
+# Or run with explicit flags
+PLAYWRIGHT_CHROMIUM_SANDBOX=0 playwright test
+```
+
+**If all else fails — use Playwright's built-in headless mode:**
+
+Playwright doesn't actually need a real X11 display for most tests. The headless mode (default) uses its own virtual display. `x11ctl` is needed only when:
+- You want to **see** the browser (remote viewing via Xpra/VNC)
+- You're running tests that explicitly require `headless: false`
+- You're doing visual regression testing against a real rendered display
+
+For headless-only CI:
+
+```sh
+# No x11ctl needed — Playwright handles it internally
+playwright test
+```
+
 ## Jail Configuration
 
 ### Host-side: jail.conf
