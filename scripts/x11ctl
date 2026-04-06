@@ -1,4 +1,4 @@
-#!/usr/local/bin/python3
+#!/usr/bin/env python3
 """x11ctl — Manage X11 inside FreeBSD jails.
 
 Single-file script (stdlib only, Python >=3.10) managing a 3-tier X11 stack:
@@ -24,6 +24,49 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Optional
+
+
+# ---------------------------------------------------------------------------
+# Jail detection
+# ---------------------------------------------------------------------------
+
+def is_inside_jail() -> bool:
+    """Detect if running inside a FreeBSD jail.
+
+    Uses sysctl security.jail.jailed (returns 1 inside a jail, 0 on host).
+    Falls back to checking /var/run/jail_name or JAIL_NAME env var.
+    """
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "security.jail.jailed"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip() == "1"
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    # Fallback: check common jail indicators
+    if os.environ.get("JAIL_NAME"):
+        return True
+    if os.path.exists("/var/run/jail_name"):
+        return True
+    return False
+
+
+def require_jail(*, allow_override: bool = True) -> None:
+    """Abort if not running inside a FreeBSD jail.
+
+    Set X11CTL_ALLOW_HOST=1 to override (for development/testing only).
+    """
+    if allow_override and os.environ.get("X11CTL_ALLOW_HOST") == "1":
+        return
+    if not is_inside_jail():
+        print(
+            "Error: x11ctl is designed to run inside a FreeBSD jail, not on the host.\n"
+            "  Running X11 management on the host can interfere with the host's display.\n"
+            "  Set X11CTL_ALLOW_HOST=1 to override (development/testing only).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1962,6 +2005,9 @@ def main() -> None:
     if args.command is None:
         parse_args(["--help"])
         return
+
+    # Safety: refuse to run on the host (only in jails)
+    require_jail()
 
     cfg = Config()
 

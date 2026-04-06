@@ -124,6 +124,18 @@ CI can run `pytest -m "not integration"` for fast feedback or `pytest` for the f
 
 Manual tests that a human operator runs to validate the tool works in a real jail environment. These are **not automated** — they exercise the full operator experience including visual output, interactive feedback, and cross-machine access.
 
+### Pre-flight: Verify You Are in a Jail
+
+**Never run these smoke tests on the host.** `x11ctl` includes a jail-detection guard that refuses to run on the host by default.
+
+```bash
+# Verify you are inside a jail:
+sysctl -n security.jail.jailed    # Must print "1"
+
+# If you need to test on the host (development only):
+export X11CTL_ALLOW_HOST=1        # Override jail check
+```
+
 ### Quick Smoke (5 minutes)
 
 Run in the target FreeBSD jail as the intended operator user:
