@@ -1330,10 +1330,12 @@ def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> in
             print(f"Error: failed to open log file {logfile}: {exc}", file=sys.stderr)
             return 1
 
+        vnc_env = {**os.environ, "XAUTHORITY": cfg.xauth, "DISPLAY": cfg.display}
         try:
             proc = subprocess.Popen(
                 build_x11vnc_command(cfg, bind=bind),
                 stdout=log_fd, stderr=log_fd,
+                env=vnc_env,
             )
         except Exception as exc:
             os.close(log_fd)
