@@ -439,12 +439,26 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
         except FileNotFoundError:
             pass
         return True
+    except PermissionError:
+        # PID reused by another user between validate and kill (TOCTOU).
+        # We must not kill it — just clean up our stale pidfile.
+        try:
+            os.unlink(pidfile_path)
+        except FileNotFoundError:
+            pass
+        return True
 
     # Poll until dead (up to 3s)
     for _ in range(30):
         # Best-effort zombie reap — if this PID is our child process,
         # it may be a zombie after SIGTERM. Reaping makes os.kill(pid, 0)
         # correctly report it as dead. No-op for non-children.
+        # NOTE: The spec says "os.waitpid() is NOT used" for the
+        # "different invocation" case, but stop_component is also called
+        # during same-invocation rollback (e.g., start_command_impl).
+        # Without waitpid, zombie children appear alive to os.kill(pid, 0),
+        # causing false SIGKILL escalation. The broad exception handling
+        # makes this a safe no-op when the process is not our child.
         try:
             os.waitpid(pid, os.WNOHANG)
         except (ChildProcessError, ProcessLookupError, PermissionError, OSError):
@@ -452,14 +466,16 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
         try:
             os.kill(pid, 0)
             time.sleep(0.1)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # ProcessLookupError: dead. PermissionError: PID reused by
+            # another user during polling — treat as "not ours anymore".
             break
     else:
         # Still alive after 3s — SIGKILL
         try:
             os.kill(pid, signal.SIGKILL)
             time.sleep(0.1)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         # Best-effort zombie reap after SIGKILL
         try:
@@ -472,8 +488,8 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
             # Still alive after SIGKILL — log warning and return False
             print(f"Warning: PID {pid} ({expected_comm}) survived SIGKILL", file=sys.stderr)
             return False
-        except ProcessLookupError:
-            pass  # Dead — proceed to cleanup
+        except (ProcessLookupError, PermissionError):
+            pass  # Dead or reused by another user — proceed to cleanup
 
     # Clean up pidfile
     try:

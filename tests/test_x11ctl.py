@@ -908,3 +908,84 @@ class TestStopComponent:
         assert not Path(pidfile).exists()
         # But our process (python) should NOT have been killed
         assert os.getpid() > 0  # we're still alive
+
+    def test_stop_sigkill_escalation(self, tmp_path):
+        """Process that traps SIGTERM should be killed via SIGKILL."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"]
+        )
+        # Get actual comm name from ps to ensure validate_pid matches
+        ps_result = subprocess.run(
+            ["ps", "-p", str(proc.pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=5,
+        )
+        comm = ps_result.stdout.strip()
+        if not comm:
+            proc.kill()
+            proc.wait()
+            pytest.skip("Could not determine comm name via ps")
+
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, proc.pid, int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, comm)
+        assert result is True
+        # Verify process is dead (may already be reaped by stop_component)
+        try:
+            os.kill(proc.pid, 0)
+            assert False, "process should be dead after SIGKILL"
+        except (ProcessLookupError, PermissionError):
+            pass  # confirmed dead or not ours
+        assert not Path(pidfile).exists()  # pidfile cleaned up
+        # Reap zombie to avoid resource leak in test
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+
+    def test_stop_returns_false_when_unkillable(self, tmp_path):
+        """stop_component returns False when even SIGKILL cannot stop process."""
+        pidfile = str(tmp_path / "test.pid")
+        fake_pid = 12345
+        x11ctl.write_pidfile(pidfile, fake_pid, int(x11ctl.time.time()))
+
+        # Mock validate_pid to return True, then os.kill to always succeed
+        # (process appears alive even after SIGKILL)
+        with patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch("os.kill"), \
+             patch("os.waitpid", side_effect=ChildProcessError), \
+             patch("time.sleep"):
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            assert result is False  # unkillable
+
+    def test_stop_race_dies_between_validate_and_kill(self, tmp_path):
+        """Process dies between validate_pid and os.kill(SIGTERM)."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
+
+        with patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch("os.kill", side_effect=ProcessLookupError):
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            assert result is True
+            assert not Path(pidfile).exists()
+
+    def test_stop_permission_error_on_sigterm(self, tmp_path):
+        """PermissionError on SIGTERM (PID reused by another user) cleans up pidfile."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
+
+        with patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch("os.kill", side_effect=PermissionError):
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            assert result is True  # treated as stale
+            assert not Path(pidfile).exists()
+
+    def test_stop_symlinked_pidfile(self, tmp_path):
+        """stop_component with a symlinked pidfile returns True without signaling."""
+        target = tmp_path / "target.pid"
+        target.write_text("1234 1712345678\n")
+        link = tmp_path / "link.pid"
+        link.symlink_to(target)
+        # read_pidfile rejects symlinks → returns None → nothing to stop
+        result = x11ctl.stop_component(str(link), "Xvfb")
+        assert result is True
