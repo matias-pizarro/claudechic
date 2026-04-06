@@ -951,6 +951,10 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False  # Can't determine owner — fail closed, don't touch
 
+    # Reject symlinked socket path — attacker could point it at arbitrary socket
+    if socket_path.is_symlink():
+        return False
+
     for p in (lock_path, socket_path):
         if os.path.lexists(str(p)) and not p.is_symlink():
             p.unlink(missing_ok=True)
