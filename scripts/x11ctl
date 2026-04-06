@@ -309,7 +309,15 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return False  # Process exists but not ours; treat as invalid
+        # Process exists but belongs to another user. Treat as invalid
+        # (stale pidfile — the managed process is gone and PID was reused).
+        # This is consistent with stop_component's behavior: clean up the
+        # pidfile but do not attempt to signal a process we don't own.
+        # Note: validate_pid_tristate returns "unknown" for PermissionError
+        # because stale recovery needs fail-closed semantics (don't clean
+        # up what you can't verify). The different return values reflect
+        # different caller requirements, not a logic inconsistency.
+        return False
 
     # Check 2: process name
     try:

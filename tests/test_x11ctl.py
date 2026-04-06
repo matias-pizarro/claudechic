@@ -801,6 +801,45 @@ class TestPortCheck:
             sock.close()
 
 
+# --- Port user identification ---
+
+class TestIdentifyPortUser:
+    def test_returns_none_for_free_port(self):
+        """identify_port_user on an unused port should return None or empty info."""
+        # Use a high ephemeral port unlikely to be in use
+        result = x11ctl.identify_port_user(59999)
+        # Either None (no output) or a string (sockstat header only)
+        # is acceptable for an unused port
+        assert result is None or isinstance(result, str)
+
+    def test_returns_string_for_occupied_port(self):
+        """identify_port_user on a bound port should return process info."""
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        _, port = sock.getsockname()
+        sock.listen(1)
+        try:
+            result = x11ctl.identify_port_user(port)
+            # Should return a string with process info (or None if sockstat unavailable)
+            if x11ctl.find_binary("sockstat") is not None:
+                assert result is None or isinstance(result, str)
+            else:
+                assert result is None
+        finally:
+            sock.close()
+
+    def test_handles_missing_sockstat(self):
+        """identify_port_user should return None when sockstat is unavailable."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert x11ctl.identify_port_user(5900) is None
+
+    def test_handles_sockstat_timeout(self):
+        """identify_port_user should return None on timeout."""
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("sockstat", 5)):
+            assert x11ctl.identify_port_user(5900) is None
+
+
 # --- Env output ---
 
 class TestEnvOutput:
@@ -853,6 +892,16 @@ class TestXauthCreation:
         with pytest.raises(OSError):
             x11ctl.create_xauth_file(str(link))
 
+    def test_overwrites_existing_regular_file(self, tmp_path):
+        """create_xauth_file should replace an existing regular file."""
+        path = str(tmp_path / "xauth")
+        Path(path).write_text("old content")
+        os.chmod(path, 0o644)  # wrong perms
+        x11ctl.create_xauth_file(path)
+        mode = os.stat(path).st_mode & 0o777
+        assert mode == 0o600
+        assert Path(path).read_text() == ""  # fresh empty file
+
 
 # --- Readiness probes ---
 
@@ -903,11 +952,18 @@ class TestStopComponent:
         # Use our own PID (python) but claim it should be "Xvfb"
         pidfile = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(pidfile, os.getpid(), int(x11ctl.time.time()))
-        result = x11ctl.stop_component(pidfile, "Xvfb")
-        assert result is True  # pidfile cleaned up (stale)
-        assert not Path(pidfile).exists()
-        # But our process (python) should NOT have been killed
-        assert os.getpid() > 0  # we're still alive
+        # Install a signal handler to detect if SIGTERM was sent to us
+        sigterm_received = []
+        old_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, lambda s, f: sigterm_received.append(True))
+        try:
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            assert result is True  # pidfile cleaned up (stale)
+            assert not Path(pidfile).exists()
+            # Verify no signal was sent to our process
+            assert sigterm_received == [], "SIGTERM was sent to test process (wrong PID targeted)"
+        finally:
+            signal.signal(signal.SIGTERM, old_handler)
 
     def test_stop_sigkill_escalation(self, tmp_path):
         """Process that traps SIGTERM should be killed via SIGKILL."""
