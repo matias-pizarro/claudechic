@@ -696,6 +696,12 @@ class TestTiersFile:
         Path(path).write_text("headless all\n")
         assert x11ctl.read_tiers(path) is None
 
+    def test_read_invalid_utf8_returns_none(self, tmp_path):
+        """read_tiers should return None for files with invalid UTF-8."""
+        path = str(tmp_path / "tiers")
+        Path(path).write_bytes(b"\xff\xfe invalid utf8")
+        assert x11ctl.read_tiers(path) is None
+
 
 # --- Locking ---
 
@@ -1018,9 +1024,9 @@ class TestStopComponent:
         fake_pid = 12345
         x11ctl.write_pidfile(pidfile, fake_pid, int(x11ctl.time.time()))
 
-        # Mock validate_pid to return True, then os.kill to always succeed
-        # (process appears alive even after SIGKILL)
-        with patch.object(x11ctl, "validate_pid", return_value=True), \
+        # Mock validate_pid_tristate to return "alive" (always), then os.kill
+        # to always succeed (process appears alive even after SIGKILL)
+        with patch.object(x11ctl, "validate_pid_tristate", return_value="alive"), \
              patch("os.kill"), \
              patch("os.waitpid", side_effect=ChildProcessError), \
              patch("time.sleep"):
@@ -1028,11 +1034,11 @@ class TestStopComponent:
             assert result is False  # unkillable
 
     def test_stop_race_dies_between_validate_and_kill(self, tmp_path):
-        """Process dies between validate_pid and os.kill(SIGTERM)."""
+        """Process dies between validate_pid_tristate and os.kill(SIGTERM)."""
         pidfile = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
 
-        with patch.object(x11ctl, "validate_pid", return_value=True), \
+        with patch.object(x11ctl, "validate_pid_tristate", return_value="alive"), \
              patch("os.kill", side_effect=ProcessLookupError):
             result = x11ctl.stop_component(pidfile, "Xvfb")
             assert result is True
@@ -1043,10 +1049,44 @@ class TestStopComponent:
         pidfile = str(tmp_path / "test.pid")
         x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
 
-        with patch.object(x11ctl, "validate_pid", return_value=True), \
+        with patch.object(x11ctl, "validate_pid_tristate", return_value="alive"), \
              patch("os.kill", side_effect=PermissionError):
             result = x11ctl.stop_component(pidfile, "Xvfb")
             assert result is True  # treated as stale
+            assert not Path(pidfile).exists()
+
+    def test_stop_unknown_state_preserves_pidfile(self, tmp_path):
+        """stop_component preserves pidfile when PID state is 'unknown' (fail-closed)."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
+
+        with patch.object(x11ctl, "validate_pid_tristate", return_value="unknown"):
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            assert result is True
+            # Pidfile should be PRESERVED (fail-closed — can't verify)
+            assert Path(pidfile).exists()
+
+    def test_stop_revalidates_before_sigkill(self, tmp_path):
+        """stop_component revalidates PID identity before escalating to SIGKILL."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
+
+        call_count = [0]
+        def tristate_side_effect(pid, epoch, comm):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "alive"  # Initial check
+            return "dead"  # Revalidation before SIGKILL
+
+        with patch.object(x11ctl, "validate_pid_tristate", side_effect=tristate_side_effect), \
+             patch("os.kill"), \
+             patch("os.waitpid", side_effect=ChildProcessError), \
+             patch("time.sleep"):
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            assert result is True
+            # Should have been called at least twice (initial + revalidation)
+            assert call_count[0] >= 2
+            # Pidfile cleaned up because revalidation returned "dead"
             assert not Path(pidfile).exists()
 
     def test_stop_symlinked_pidfile(self, tmp_path):

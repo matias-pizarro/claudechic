@@ -452,6 +452,9 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
     Returns False only when SIGKILL also fails (process truly unstoppable).
     Partial-stop failure does not block stopping other components — the caller
     should continue stopping remaining components and report failure in exit code.
+
+    Uses validate_pid_tristate for fail-closed behavior: "unknown" PID state
+    is preserved (pidfile not cleaned up) rather than aggressively deleted.
     """
     data = read_pidfile(pidfile_path)
     if data is None:
@@ -459,14 +462,27 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
 
     pid, created_epoch = data
 
-    # Validate identity before killing
-    if not validate_pid(pid, created_epoch, expected_comm):
-        # Stale pidfile — just clean up
+    # Validate identity before killing — use tristate for fail-closed.
+    # "dead" → stale pidfile, clean up. "unknown" → can't verify, preserve.
+    # "alive" → proceed to kill.
+    state = validate_pid_tristate(pid, created_epoch, expected_comm)
+    if state == "dead":
+        # Confirmed stale — safe to clean up
         try:
             os.unlink(pidfile_path)
         except FileNotFoundError:
             pass
         return True
+    if state == "unknown":
+        # Can't determine if process is ours — fail closed, don't touch.
+        print(
+            f"Warning: cannot verify PID {pid} ({expected_comm}) — "
+            f"pidfile preserved: {pidfile_path}",
+            file=sys.stderr,
+        )
+        return True
+
+    # state == "alive" — proceed to kill
 
     # Kill: SIGTERM → wait → SIGKILL
     try:
@@ -510,7 +526,19 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
             # another user during polling — treat as "not ours anymore".
             break
     else:
-        # Still alive after 3s — SIGKILL
+        # Still alive after 3s — revalidate identity before SIGKILL to
+        # protect against PID reuse during the grace period.
+        recheck = validate_pid_tristate(pid, created_epoch, expected_comm)
+        if recheck != "alive":
+            # Process died or PID was reused — do not send SIGKILL.
+            if recheck == "dead":
+                try:
+                    os.unlink(pidfile_path)
+                except FileNotFoundError:
+                    pass
+            # "unknown" → preserve pidfile (fail closed)
+            return True
+
         try:
             os.kill(pid, signal.SIGKILL)
             time.sleep(0.1)
@@ -593,7 +621,7 @@ def read_tiers(path: str) -> Optional[set[str]]:
         if unknown:
             return None  # Treat corrupted tiers file as missing
         return tiers
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
         return None
 
 
