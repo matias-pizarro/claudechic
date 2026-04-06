@@ -1375,6 +1375,7 @@ def build_websockify_command(cfg: Config, bind: str = "127.0.0.1") -> list[str]:
     return [
         "websockify",
         "--web=/usr/local/libexec/novnc",
+        "--file-only",
         f"{bind}:{cfg.novnc_port}",
         f"localhost:{cfg.vnc_port}",
     ]

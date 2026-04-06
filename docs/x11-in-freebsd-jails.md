@@ -87,7 +87,7 @@ x11ctl stop --xpra             # Stop Xpra (keeps Xvfb)
 ```sh
 x11ctl start --vnc             # Start Xvfb + x11vnc + noVNC
 # VNC: connect to 127.0.0.1:5900
-# noVNC: http://127.0.0.1:6080
+# noVNC: http://127.0.0.1:6080/vnc.html
 x11ctl stop --vnc              # Stop VNC (keeps Xvfb)
 ```
 

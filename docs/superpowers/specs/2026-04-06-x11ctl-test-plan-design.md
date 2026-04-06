@@ -169,8 +169,8 @@ curl -sI http://127.0.0.1:10000/ | head -3   # Expect: HTTP 200 or 301
 # Expect: Xpra HTML5 client loads, shows empty desktop
 
 # 5. noVNC — open in browser
-curl -sI http://127.0.0.1:6080/ | head -3    # Expect: HTTP 200
-# If jail is network-accessible: open http://<jail-ip>:6080 in browser
+curl -sI http://127.0.0.1:6080/vnc.html | head -3    # Expect: HTTP 200
+# If jail is network-accessible: open http://<jail-ip>:6080/vnc.html in browser
 # Expect: noVNC client loads, shows same desktop as Xpra
 
 # 6. Run a visible app
