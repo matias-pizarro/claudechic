@@ -1558,13 +1558,15 @@ def run_with_temp_display(cfg: Config, command: list[str]) -> int:
         clean_stale_x_artifacts(cfg.display_number)
 
     def signal_handler(signum: int, frame: object) -> None:
-        """Forward signal to child, then clean up."""
+        """Forward signal to child and exit. Cleanup is handled by the
+        outer try/finally block — the sys.exit raises SystemExit which
+        triggers finally. This avoids calling async-signal-unsafe functions
+        (subprocess.run, os.waitpid) from inside the signal handler."""
         if child_proc is not None and child_proc.poll() is None:
             try:
                 child_proc.send_signal(signum)
             except ProcessLookupError:
                 pass
-        cleanup()
         sys.exit(128 + signum)
 
     try:
@@ -1892,6 +1894,9 @@ def main() -> None:
         print(format_env(cfg), end="")
     elif args.command == "run":
         run_cmd = getattr(args, "run_command", [])
+        # argparse.REMAINDER may include a leading '--' separator
+        if run_cmd and run_cmd[0] == "--":
+            run_cmd = run_cmd[1:]
         if not run_cmd:
             print("Error: no command specified for run", file=sys.stderr)
             sys.exit(1)

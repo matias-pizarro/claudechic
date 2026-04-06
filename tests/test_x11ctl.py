@@ -1659,3 +1659,39 @@ class TestRunCommand:
         rc = x11ctl.run_with_temp_display(cfg, ["xdpyinfo"])
         assert rc == 0
         assert not Path("/tmp/.x11ctl-test-xauth").exists()
+
+    @pytest.mark.skipif(
+        x11ctl.find_binary("Xvfb") is None,
+        reason="Xvfb not installed",
+    )
+    def test_run_signal_forwarding(self, tmp_path, monkeypatch):
+        """SIGTERM to x11ctl run should kill child and Xvfb."""
+        import time as _time
+        display = f":{os.getpid()}"
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", f"""
+import os, sys
+os.environ["X11CTL_DISPLAY"] = "{display}"
+os.environ["X11CTL_XAUTH"] = "/tmp/.x11ctl-test-signal-xauth"
+sys.path.insert(0, '.')
+from importlib.machinery import SourceFileLoader
+import importlib.util as _iu
+_loader = SourceFileLoader('x11ctl', 'scripts/x11ctl')
+_spec = _iu.spec_from_loader('x11ctl', _loader)
+x = _iu.module_from_spec(_spec)
+_spec.loader.exec_module(x)
+cfg = x.Config()
+sys.exit(x.run_with_temp_display(cfg, ['sleep', '60']))
+"""],
+            cwd=repo_root,
+        )
+        display_num = display.lstrip(":")
+        socket_path = f"/tmp/.X11-unix/X{display_num}"
+        for _ in range(20):
+            _time.sleep(0.5)
+            if os.path.exists(socket_path) or proc.poll() is not None:
+                break
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+        assert proc.returncode is not None
