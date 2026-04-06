@@ -1200,3 +1200,152 @@ class TestTierReconciliation:
     def test_tier_components_keys_match_component_tiers(self):
         """TIER_COMPONENTS keys must match _COMPONENT_TIERS exactly."""
         assert set(x11ctl.TIER_COMPONENTS.keys()) == x11ctl._COMPONENT_TIERS
+
+
+# --- Stale X artifact cleanup ---
+
+class TestStaleCleanup:
+    def test_clean_dead_pid_artifacts(self, tmp_path):
+        """Stale lock with dead PID should be removed."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("99999999\n")  # PID that doesn't exist
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True
+        assert not lock.exists()
+        assert not socket_file.exists()
+
+    def test_clean_no_artifacts(self, tmp_path):
+        """No artifacts = returns True (nothing to do)."""
+        assert x11ctl.clean_stale_x_artifacts(99, str(tmp_path)) is True
+
+    def test_clean_live_xvfb_preserved(self, tmp_path):
+        """Lock owned by a live Xvfb should NOT be deleted."""
+        lock = tmp_path / ".X99-lock"
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+        lock.write_text("12345\n")
+
+        # Mock ps to report this PID is a live Xvfb
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="Xvfb\n", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # live Xvfb — don't touch
+            assert lock.exists()  # preserved
+            assert socket_file.exists()  # preserved
+
+    def test_clean_live_non_xvfb_cleaned(self, tmp_path):
+        """Lock owned by a live non-Xvfb process — stale, safe to clean."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text(f"{os.getpid()}\n")
+        # Our process is python, not Xvfb — stale, safe to clean
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True
+
+    def test_clean_socket_only_fails_closed(self, tmp_path):
+        """Socket exists but lock missing — can't determine owner, fail closed."""
+        socket_dir = tmp_path / ".X11-unix"
+        socket_dir.mkdir()
+        socket_file = socket_dir / "X99"
+        socket_file.write_text("")
+        # No lock file
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is False  # fail closed
+        assert socket_file.exists()  # not deleted
+
+    def test_clean_malformed_lock(self, tmp_path):
+        """Malformed lock file (not a PID) — safe to clean (no owner determinable)."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("not_a_pid\n")
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is True
+        assert not lock.exists()
+
+    def test_clean_returns_false_on_timeout(self, tmp_path):
+        """If ps times out, should fail closed (return False)."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("1\n")  # PID 1 (init) — will exist
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # fail closed
+            assert lock.exists()  # not deleted
+
+    def test_clean_lock_read_race_via_os_open_failure(self, tmp_path):
+        """If os.open() fails with OSError during lock read, should fail closed."""
+        lock = tmp_path / ".X99-lock"
+        lock.write_text("12345\n")
+        # Simulate OSError during atomic O_NOFOLLOW open
+        with patch("os.open", side_effect=OSError("simulated race")):
+            result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+            assert result is False  # fail closed on any OSError
+
+    def test_clean_symlinked_lock_fails_closed(self, tmp_path):
+        """Valid symlinked lock file should fail closed."""
+        target = tmp_path / "target"
+        target.write_text("12345\n")
+        lock = tmp_path / ".X99-lock"
+        lock.symlink_to(target)
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is False  # symlink = suspicious, fail closed
+
+    def test_clean_broken_symlinked_lock_fails_closed(self, tmp_path):
+        """Broken symlinked lock file should also fail closed."""
+        lock = tmp_path / ".X99-lock"
+        lock.symlink_to(tmp_path / "nonexistent_target")
+        result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
+        assert result is False  # broken symlink = suspicious, fail closed
+
+
+# --- Xauth add in start_headless ---
+
+class TestXauthAdd:
+    def test_xauth_add_failure_aborts_startup(self):
+        """If xauth add returns non-zero, start_headless should return 1 (failure)."""
+        cfg = x11ctl.Config()
+        started = []
+
+        with patch.object(x11ctl, "check_binaries", return_value=[]), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "clean_stale_x_artifacts", return_value=True), \
+             patch.object(x11ctl, "create_xauth_file"), \
+             patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=1, stdout="", stderr="auth error",
+             )):
+            result = x11ctl.start_headless(cfg, started)
+            assert result == 1
+            assert "xvfb" not in started
+
+    def test_xauth_add_timeout_aborts_startup(self):
+        """If xauth add times out, start_headless should return 1 (failure)."""
+        cfg = x11ctl.Config()
+        started = []
+
+        with patch.object(x11ctl, "check_binaries", return_value=[]), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "clean_stale_x_artifacts", return_value=True), \
+             patch.object(x11ctl, "create_xauth_file"), \
+             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("xauth", 5)):
+            result = x11ctl.start_headless(cfg, started)
+            assert result == 1
+
+    def test_xauth_add_missing_binary_removes_xauth_and_aborts_startup(self):
+        """If xauth add raises FileNotFoundError, start_headless should clean up."""
+        cfg = x11ctl.Config()
+        started = []
+
+        with patch.object(x11ctl, "check_binaries", return_value=[]), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "clean_stale_x_artifacts", return_value=True), \
+             patch.object(x11ctl, "create_xauth_file"), \
+             patch("subprocess.run", side_effect=FileNotFoundError), \
+             patch("os.unlink") as mock_unlink:
+            result = x11ctl.start_headless(cfg, started)
+            assert result == 1
+            mock_unlink.assert_called_once_with(cfg.xauth)
