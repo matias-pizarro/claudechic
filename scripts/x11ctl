@@ -1375,14 +1375,22 @@ def _determine_desired_tiers(args: argparse.Namespace) -> set[str]:
 
 
 def _determine_stop_tier(args: argparse.Namespace) -> str:
-    """Determine which tier to stop. Defaults to 'all' if none set."""
+    """Determine which tier to stop. Defaults to 'all' if none set.
+
+    Multiple flags (--xpra --vnc) or headless all cascade to 'all'.
+    """
+    flags = []
     if getattr(args, "headless", False):
-        return "headless"
+        flags.append("headless")
     if getattr(args, "xpra", False):
-        return "xpra"
+        flags.append("xpra")
     if getattr(args, "vnc", False):
-        return "vnc"
-    return "all"  # default: stop everything
+        flags.append("vnc")
+    if getattr(args, "all", False) or not flags:
+        return "all"
+    if len(flags) > 1 or "headless" in flags:
+        return "headless"  # headless cascades everything; multiple flags = stop all
+    return flags[0]
 
 
 def main() -> None:
