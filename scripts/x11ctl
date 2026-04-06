@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,33 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Optional
+
+
+# ---------------------------------------------------------------------------
+# Safe file I/O helpers
+# ---------------------------------------------------------------------------
+
+def _safe_open_regular(path: str, flags: int, mode: int = 0) -> int:
+    """Open a file with O_NOFOLLOW | O_NONBLOCK, then verify it is a regular file.
+
+    Prevents FIFO-based DoS (O_NONBLOCK prevents blocking on FIFO open)
+    and symlink attacks (O_NOFOLLOW). After open, fstat verifies the fd
+    points to a regular file before any I/O.
+
+    Raises OSError if the path is not a regular file (symlink, FIFO, etc.).
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise OSError(f"Not a regular file: {path} (mode={oct(st.st_mode)})")
+        # Clear O_NONBLOCK for subsequent I/O (read/write should block normally)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +296,15 @@ def write_pidfile(path: str, pid: int, epoch: int) -> None:
 
 
 def read_pidfile(path: str) -> Optional[tuple[int, int]]:
-    """Read a pidfile. Returns (pid, epoch) or None. Rejects symlinks."""
-    # Reject symlinks
+    """Read a pidfile. Returns (pid, epoch) or None.
+
+    Rejects symlinks (O_NOFOLLOW) and non-regular files like FIFOs
+    (fstat check via _safe_open_regular) to prevent DoS.
+    """
     if os.path.islink(path):
         return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = _safe_open_regular(path, os.O_RDONLY)
         try:
             data = os.read(fd, 256).decode().strip()
         finally:
@@ -541,11 +572,14 @@ def write_tiers(path: str, tiers: set[str]) -> None:
 
 
 def read_tiers(path: str) -> Optional[set[str]]:
-    """Read the active tiers from file. Returns None if missing."""
+    """Read the active tiers from file. Returns None if missing.
+
+    Rejects symlinks and non-regular files (FIFOs) to prevent DoS.
+    """
     if os.path.islink(path):
         return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = _safe_open_regular(path, os.O_RDONLY)
         try:
             data = os.read(fd, 256).decode().strip()
         finally:
@@ -578,10 +612,28 @@ def delete_tiers(path: str) -> None:
 def acquire_lock(
     path: str, *, exclusive: bool = True, timeout: float = 30.0
 ) -> Optional[int]:
-    """Acquire a file lock. Returns fd on success, None on timeout."""
+    """Acquire a file lock. Returns fd on success, None on timeout.
+
+    Opens with O_NOFOLLOW | O_NONBLOCK and verifies the fd is a regular
+    file via fstat to prevent FIFO-based DoS and symlink attacks.
+    """
     try:
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
+        fd = os.open(
+            path,
+            os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o644,
+        )
     except OSError:
+        return None
+
+    # Verify this is a regular file (reject FIFOs, devices, etc.)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
         return None
 
     lock_type = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
@@ -640,10 +692,13 @@ def check_port_available(host: str, port: int) -> bool:
 
 
 def identify_port_user(port: int) -> Optional[str]:
-    """Use sockstat to identify what process is using a port."""
+    """Use sockstat to identify what process is using a port.
+
+    Uses absolute path /usr/bin/sockstat to prevent PATH hijacking.
+    """
     try:
         result = subprocess.run(
-            ["sockstat", "-l", "-p", str(port)],
+            ["/usr/bin/sockstat", "-l", "-p", str(port)],
             capture_output=True, text=True, timeout=5,
         )
         lines = result.stdout.strip().split("\n")

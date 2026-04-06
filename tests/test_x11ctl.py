@@ -441,6 +441,12 @@ class TestPidfile:
         link.symlink_to(target)
         assert x11ctl.read_pidfile(str(link)) is None
 
+    def test_read_rejects_fifo(self, tmp_path):
+        """read_pidfile should reject FIFOs (prevents FIFO-based DoS)."""
+        fifo = str(tmp_path / "fifo.pid")
+        os.mkfifo(fifo)
+        assert x11ctl.read_pidfile(fifo) is None
+
 
 # --- PID identity validation ---
 
@@ -731,6 +737,13 @@ os.close(fd)
         lock_fd = x11ctl.acquire_lock(str(link), exclusive=True, timeout=1.0)
         assert lock_fd is None  # Should fail due to O_NOFOLLOW
 
+    def test_lock_rejects_fifo(self, tmp_path):
+        """acquire_lock should reject FIFOs (prevents FIFO-based DoS)."""
+        fifo = str(tmp_path / "fifo.lock")
+        os.mkfifo(fifo)
+        lock_fd = x11ctl.acquire_lock(fifo, exclusive=True, timeout=1.0)
+        assert lock_fd is None
+
     def test_shared_lock(self, tmp_path):
         """Shared locks should be compatible with each other."""
         lock_path = str(tmp_path / "test.lock")
@@ -822,7 +835,7 @@ class TestIdentifyPortUser:
         try:
             result = x11ctl.identify_port_user(port)
             # Should return a string with process info (or None if sockstat unavailable)
-            if x11ctl.find_binary("sockstat") is not None:
+            if os.path.exists("/usr/bin/sockstat"):
                 assert result is None or isinstance(result, str)
             else:
                 assert result is None
