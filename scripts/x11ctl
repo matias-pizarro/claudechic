@@ -1166,9 +1166,10 @@ def build_xpra_command(cfg: Config, bind: str = "127.0.0.1") -> list[str]:
 
 
 def build_xpra_env(cfg: Config) -> dict[str, str]:
-    """Build environment for xpra (needs XAUTHORITY)."""
+    """Build environment for xpra (needs XAUTHORITY and DISPLAY)."""
     env = dict(os.environ)
     env["XAUTHORITY"] = cfg.xauth
+    env["DISPLAY"] = cfg.display  # Defense-in-depth: display also passed as positional arg
     return env
 
 

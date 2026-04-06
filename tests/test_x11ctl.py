@@ -1617,3 +1617,16 @@ class TestVncCommand:
             assert result == 2
         finally:
             sock.close()
+
+    def test_novnc_port_conflict_returns_2(self):
+        """start_vnc should return exit code 2 when noVNC port is occupied."""
+        cfg = x11ctl.Config()
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", cfg.novnc_port))
+        sock.listen(1)
+        try:
+            result = x11ctl.start_vnc(cfg, [], bind="127.0.0.1")
+            assert result == 2
+        finally:
+            sock.close()
