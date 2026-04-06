@@ -1708,7 +1708,7 @@ class TestScreenshotCommand:
             assert result != 0
 
     def test_screenshot_builds_correct_command(self):
-        """screenshot should invoke import with correct display and path."""
+        """screenshot should invoke import with correct display, +adjoin, and path."""
         cfg = x11ctl.Config()
         called_with = []
 
@@ -1722,9 +1722,9 @@ class TestScreenshotCommand:
             assert result == 0
             assert "import" in called_with[0][0]
             assert "-window" in called_with[0]
-            assert "--" in called_with[0]
-            idx_sep = called_with[0].index("--")
-            assert called_with[0][idx_sep + 1] == "/tmp/out.png"
+            assert "+adjoin" in called_with[0]
+            # Path is the last argument (no -- separator, breaks +adjoin in IM7)
+            assert called_with[0][-1] == "/tmp/out.png"
 
     def test_screenshot_rejects_dash_path(self):
         """screenshot should reject output paths starting with -."""
