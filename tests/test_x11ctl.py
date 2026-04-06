@@ -1240,13 +1240,13 @@ class TestStaleCleanup:
             assert lock.exists()  # preserved
             assert socket_file.exists()  # preserved
 
-    def test_clean_live_non_xvfb_cleaned(self, tmp_path):
-        """Lock owned by a live non-Xvfb process — stale, safe to clean."""
+    def test_clean_live_non_xvfb_preserved(self, tmp_path):
+        """Lock owned by a live non-Xvfb process — fail closed (any live owner)."""
         lock = tmp_path / ".X99-lock"
         lock.write_text(f"{os.getpid()}\n")
-        # Our process is python, not Xvfb — stale, safe to clean
+        # Our process is python, not Xvfb — but still a live owner, fail closed
         result = x11ctl.clean_stale_x_artifacts(99, str(tmp_path))
-        assert result is True
+        assert result is False  # fail closed on any live process
 
     def test_clean_socket_only_fails_closed(self, tmp_path):
         """Socket exists but lock missing — can't determine owner, fail closed."""
