@@ -193,24 +193,36 @@ allow.mount.tmpfs;
 enforce_statfs = 1;          # Allow jail to see mounted filesystems
 ```
 
-**Required mounts inside the jail:**
+**Required mounts — configured on the HOST, not inside the jail:**
+
+`/dev/shm` lives on devfs which is managed by the host. The jail cannot create directories in `/dev`. These mounts must be configured by the jail operator on the host.
+
+In `jail.conf` (host-side):
+
+```
+exec.start += "mkdir -p /dev/shm";
+exec.start += "mount -t tmpfs tmpfs /dev/shm";
+exec.start += "mkdir -p /compat/linux/proc";
+exec.start += "mount -t linprocfs linproc /compat/linux/proc";
+exec.start += "mkdir -p /compat/linux/sys";
+exec.start += "mount -t linsysfs linsys /compat/linux/sys";
+
+exec.stop += "umount /dev/shm 2>/dev/null || true";
+exec.stop += "umount /compat/linux/proc 2>/dev/null || true";
+exec.stop += "umount /compat/linux/sys 2>/dev/null || true";
+```
+
+Or the host operator can mount them directly:
 
 ```sh
-# As root inside the jail:
-mount -t linprocfs linproc /compat/linux/proc
-mount -t linsysfs linsys /compat/linux/sys
-mount -t tmpfs tmpfs /dev/shm
-mount -t fdescfs fdesc /dev/fd
+# On the HOST (not inside the jail):
+jexec <jailname> mkdir -p /dev/shm
+jexec <jailname> mount -t tmpfs tmpfs /dev/shm
+jexec <jailname> mkdir -p /compat/linux/proc
+jexec <jailname> mount -t linprocfs linproc /compat/linux/proc
 ```
 
-Or in `/etc/fstab` for persistence:
-
-```
-linproc    /compat/linux/proc  linprocfs  rw  0  0
-linsys     /compat/linux/sys   linsysfs   rw  0  0
-tmpfs      /dev/shm            tmpfs      rw,mode=1777  0  0
-fdesc      /dev/fd             fdescfs    rw  0  0
-```
+**Note:** If `mkdir /dev/shm` fails with "Operation not supported" inside the jail, this confirms the mount must be done from the host side.
 
 **Verify Linux compat is working:**
 
