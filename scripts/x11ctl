@@ -1233,6 +1233,14 @@ def start_command_impl(
                     # Clean up tiers file if nothing was running before
                     if not current:
                         delete_tiers(cfg.tiers_file)
+                    # Clean up xauth if headless was started (and wasn't
+                    # previously running) — matches start_headless internal
+                    # rollback which also cleans xauth on failure.
+                    if "xvfb" in started and "headless" not in current:
+                        try:
+                            os.unlink(cfg.xauth)
+                        except FileNotFoundError:
+                            pass
                     return rc
 
         # Write new tiers state
