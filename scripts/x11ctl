@@ -529,15 +529,24 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
         # Still alive after 3s — revalidate identity before SIGKILL to
         # protect against PID reuse during the grace period.
         recheck = validate_pid_tristate(pid, created_epoch, expected_comm)
-        if recheck != "alive":
-            # Process died or PID was reused — do not send SIGKILL.
-            if recheck == "dead":
-                try:
-                    os.unlink(pidfile_path)
-                except FileNotFoundError:
-                    pass
-            # "unknown" → preserve pidfile (fail closed)
+        if recheck == "dead":
+            # Process died during grace period — clean up pidfile.
+            try:
+                os.unlink(pidfile_path)
+            except FileNotFoundError:
+                pass
             return True
+        # For "alive" AND "unknown": proceed with SIGKILL.
+        # "alive" = confirmed ours, needs killing.
+        # "unknown" = can't verify identity (ps timeout etc.), but process
+        # was confirmed alive 3s ago and ignored SIGTERM. Failing to kill
+        # it would leave an unresponsive managed process running. This is
+        # fail-closed for *process termination* (kill if in doubt) rather
+        # than fail-closed for *identity* (don't kill if unsure). The
+        # tradeoff is justified because: (1) the initial validation passed,
+        # (2) PID reuse in 3s with same comm is astronomically unlikely,
+        # (3) leaving a SIGTERM-resistant process alive is worse than the
+        # theoretical risk of killing a reused PID.
 
         try:
             os.kill(pid, signal.SIGKILL)

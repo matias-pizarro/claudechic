@@ -1089,6 +1089,33 @@ class TestStopComponent:
             # Pidfile cleaned up because revalidation returned "dead"
             assert not Path(pidfile).exists()
 
+    def test_stop_sigkill_proceeds_on_unknown_recheck(self, tmp_path):
+        """SIGKILL should proceed when revalidation returns 'unknown' (fail-closed for termination)."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 12345, int(x11ctl.time.time()))
+
+        call_count = [0]
+        def tristate_side_effect(pid, epoch, comm):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return "alive"  # Initial check
+            return "unknown"  # Revalidation — ps timed out
+
+        kill_calls = []
+        def mock_kill(pid, sig):
+            kill_calls.append(sig)
+            if sig == 0:
+                return  # Process appears alive
+            # SIGTERM/SIGKILL succeed
+
+        with patch.object(x11ctl, "validate_pid_tristate", side_effect=tristate_side_effect), \
+             patch("os.kill", side_effect=mock_kill), \
+             patch("os.waitpid", side_effect=ChildProcessError), \
+             patch("time.sleep"):
+            result = x11ctl.stop_component(pidfile, "Xvfb")
+            # Should have sent SIGKILL despite "unknown" recheck
+            assert signal.SIGKILL in kill_calls
+
     def test_stop_symlinked_pidfile(self, tmp_path):
         """stop_component with a symlinked pidfile returns True without signaling."""
         target = tmp_path / "target.pid"
@@ -1152,6 +1179,12 @@ class TestTierReconciliation:
         current = {"headless", "xpra", "vnc"}
         to_stop = x11ctl.compute_cascade_stop("xpra", current)
         assert to_stop == {"xpra"}
+
+    def test_cascade_stop_nonrunning_tier_is_noop(self):
+        """stop --vnc when vnc is not running: returns empty set."""
+        current = {"headless"}
+        to_stop = x11ctl.compute_cascade_stop("vnc", current)
+        assert to_stop == set()
 
     def test_tier_to_components(self):
         """Map tier names to process component names for stop."""
