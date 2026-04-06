@@ -149,7 +149,14 @@ def assert_port_free(host: str, port: int, timeout: float = 5.0) -> None:
 
 
 def read_state_file(path: str) -> str | None:
-    """Read a /tmp/.x11ctl-* file directly. Returns content or None."""
+    """Read a /tmp/.x11ctl-* state file directly. Returns content or None.
+
+    This is a deliberate side-channel observation — it reads state files
+    without x11ctl's safety checks (O_NOFOLLOW, fstat, ownership).
+    
+    Assumed pidfile format: "{pid} {epoch}\\n" (two space-separated ints).
+    If x11ctl changes this format, this helper and callers must be updated.
+    """
     try:
         return Path(path).read_text().strip()
     except (FileNotFoundError, OSError):
