@@ -912,8 +912,13 @@ def clean_stale_x_artifacts(display_num: int, tmp_dir: str = "/tmp") -> bool:
     # Read lock file atomically with O_NOFOLLOW to prevent TOCTOU symlink race
     # (attacker could swap file for symlink between is_symlink() and read)
     try:
-        fd = os.open(str(lock_path), os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(str(lock_path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
+            # Verify regular file (rejects FIFOs that would block)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                os.close(fd)
+                return False  # Not a regular file — fail closed
             pid_str = os.read(fd, 64).decode().strip()
         finally:
             os.close(fd)
@@ -978,7 +983,7 @@ def start_headless(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") 
         lock_path_str = f"/tmp/.X{cfg.display_number}-lock"
         if os.path.exists(lock_path_str) and not os.path.islink(lock_path_str):
             try:
-                fd = os.open(lock_path_str, os.O_RDONLY | os.O_NOFOLLOW)
+                fd = os.open(lock_path_str, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
                     lock_pid = int(os.read(fd, 64).decode().strip())
                 finally:
