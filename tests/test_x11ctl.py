@@ -1737,19 +1737,34 @@ class TestScreenshotCommand:
 # --- setup command (Task 10) ---
 
 class TestSetupCommand:
-    def test_setup_rejects_non_root(self):
-        """setup should fail when not running as root."""
-        with patch("os.geteuid", return_value=1000):
-            result = x11ctl.setup_command_impl(tier="headless")
-            assert result != 0
+    def test_setup_uses_sudo_when_not_root(self):
+        """setup should prepend sudo when not running as root."""
+        called_with = []
 
-    def test_setup_accepts_root(self):
-        """setup should proceed when running as root."""
-        with patch("os.geteuid", return_value=0), \
-             patch("subprocess.run", return_value=subprocess.CompletedProcess(
-                 args=[], returncode=0)):
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("os.geteuid", return_value=1000), \
+             patch("subprocess.run", side_effect=mock_run):
             result = x11ctl.setup_command_impl(tier="headless")
             assert result == 0
+            assert called_with[0][0] == "sudo"
+            assert called_with[0][1] == "/usr/sbin/pkg"
+
+    def test_setup_no_sudo_when_root(self):
+        """setup should not use sudo when already root."""
+        called_with = []
+
+        def mock_run(cmd, **kwargs):
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch("os.geteuid", return_value=0), \
+             patch("subprocess.run", side_effect=mock_run):
+            result = x11ctl.setup_command_impl(tier="headless")
+            assert result == 0
+            assert called_with[0][0] == "/usr/sbin/pkg"
 
     def test_setup_uses_absolute_pkg_path(self):
         """setup should invoke pkg via /usr/sbin/pkg, not PATH search."""

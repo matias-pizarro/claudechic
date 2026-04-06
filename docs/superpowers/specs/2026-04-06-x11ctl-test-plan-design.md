@@ -142,7 +142,7 @@ Run in the target FreeBSD jail as the intended operator user:
 
 ```bash
 # 1. Setup
-scripts/x11ctl setup --all
+sudo scripts/x11ctl setup --all
 
 # 2. Headless lifecycle
 scripts/x11ctl start --headless

@@ -1941,11 +1941,7 @@ _SETUP_PACKAGES: dict[str, list[str]] = {
 
 
 def setup_command_impl(tier: str) -> int:
-    """Install packages for the specified tier. Must run as root."""
-    if os.geteuid() != 0:
-        print("Error: setup must run as root", file=sys.stderr)
-        return 1
-
+    """Install packages for the specified tier. Uses sudo if not root."""
     # Determine packages
     if tier == "all":
         packages = []
@@ -1957,10 +1953,17 @@ def setup_command_impl(tier: str) -> int:
         print(f"Error: unknown tier: {tier}", file=sys.stderr)
         return 1
 
+    # Use sudo if not already root
+    pkg_cmd = ["/usr/sbin/pkg", "install", "-y"] + packages
+    if os.geteuid() != 0:
+        pkg_cmd = ["sudo"] + pkg_cmd
+
+    print(f"Installing: {' '.join(packages)}", file=sys.stderr)
+
     # Install via absolute pkg path (prevent PATH hijacking)
     try:
         result = subprocess.run(
-            ["/usr/sbin/pkg", "install", "-y"] + packages,
+            pkg_cmd,
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
