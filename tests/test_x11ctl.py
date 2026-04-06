@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
 import socket as _socket
@@ -868,3 +869,42 @@ class TestReadinessProbe:
 
     def test_timeout(self):
         assert x11ctl.wait_ready(lambda: False, retries=3, delay=0.01) is False
+
+
+# --- stop_component ---
+
+class TestStopComponent:
+    def test_stop_running_process(self, tmp_path):
+        """Start a sleep process, write its pidfile, then stop it."""
+        proc = subprocess.Popen(["sleep", "60"])
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, proc.pid, int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, "sleep")
+        assert result is True  # bool: success
+        assert proc.poll() is not None  # process is dead
+        assert not Path(pidfile).exists()  # pidfile cleaned up
+
+    def test_stop_already_dead(self, tmp_path):
+        """Stop with pidfile pointing to dead process: just clean up."""
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, 99999999, int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, "fake")
+        assert result is True
+        assert not Path(pidfile).exists()
+
+    def test_stop_no_pidfile(self, tmp_path):
+        """Stop when no pidfile exists: nothing to do."""
+        pidfile = str(tmp_path / "missing.pid")
+        result = x11ctl.stop_component(pidfile, "fake")
+        assert result is True
+
+    def test_stop_stale_pid_different_process(self, tmp_path):
+        """Pidfile points to a PID that's alive but is a different process."""
+        # Use our own PID (python) but claim it should be "Xvfb"
+        pidfile = str(tmp_path / "test.pid")
+        x11ctl.write_pidfile(pidfile, os.getpid(), int(x11ctl.time.time()))
+        result = x11ctl.stop_component(pidfile, "Xvfb")
+        assert result is True  # pidfile cleaned up (stale)
+        assert not Path(pidfile).exists()
+        # But our process (python) should NOT have been killed
+        assert os.getpid() > 0  # we're still alive
