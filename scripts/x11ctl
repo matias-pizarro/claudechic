@@ -1566,17 +1566,52 @@ def start_vnc(cfg: Config, started: list[str], *, bind: str = "127.0.0.1") -> in
 # Run subcommand — ephemeral display with signal forwarding
 # ---------------------------------------------------------------------------
 
-def run_with_temp_display(cfg: Config, command: list[str]) -> int:
-    """Run a command with a temporary Xvfb display.
+def _run_with_existing_display(cfg: Config, command: list[str]) -> int:
+    """Run a command using the already-running display.
 
-    Creates Xvfb, runs the command with DISPLAY/XAUTHORITY set,
-    and tears down Xvfb after the command exits. Installs signal
+    Simply sets DISPLAY/XAUTHORITY and executes the command.
+    No Xvfb lifecycle management.
+    """
+    child_env = {**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth}
+    try:
+        proc = subprocess.Popen(command, env=child_env)
+        proc.wait()
+        return proc.returncode
+    except FileNotFoundError:
+        print(f"Error: command not found: {command[0]}", file=sys.stderr)
+        return 127
+    except KeyboardInterrupt:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        return 130
+
+
+def run_with_temp_display(cfg: Config, command: list[str]) -> int:
+    """Run a command with a display. Uses existing display if running, otherwise
+    creates a temporary Xvfb.
+
+    When a display is already running (tiers active), sets DISPLAY/XAUTHORITY
+    and runs the command directly. When no display is running, creates an
+    ephemeral Xvfb, runs the command, and tears down after. Installs signal
     handlers for SIGINT/SIGTERM that forward to the child process
     and tear down Xvfb before exiting.
 
     Returns the child command's exit code.
     """
-    # Preflight
+    # If a display is already running, use it directly (no ephemeral Xvfb).
+    # This handles the common case: `x11ctl start --all` then `x11ctl run <cmd>`.
+    existing_pidfile = read_pidfile(cfg.pidfile("xvfb"))
+    if existing_pidfile is not None:
+        pid, epoch = existing_pidfile
+        if validate_pid(pid, epoch, "Xvfb") and os.path.exists(cfg.xauth):
+            print(f"Using existing display {cfg.display}", file=sys.stderr)
+            return _run_with_existing_display(cfg, command)
+
+    # Preflight for ephemeral display
     missing = check_binaries(["Xvfb", "xauth", "xdpyinfo"])
     if missing:
         print(f"Error: missing required commands: {', '.join(missing)}", file=sys.stderr)
