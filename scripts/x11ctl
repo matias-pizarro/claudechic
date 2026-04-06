@@ -49,10 +49,8 @@ def _safe_open_regular(
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            os.close(fd)
             raise OSError(f"Not a regular file: {path} (mode={oct(st.st_mode)})")
         if check_owner and st.st_uid != os.geteuid():
-            os.close(fd)
             raise OSError(
                 f"File owned by uid {st.st_uid}, expected {os.geteuid()}: {path}"
             )
@@ -486,6 +484,11 @@ def stop_component(pidfile_path: str, expected_comm: str) -> bool:
         return True
     if state == "unknown":
         # Can't determine if process is ours — fail closed, don't touch.
+        # Returns True (not False) because False means "SIGKILL failed,
+        # process is confirmed alive and unstoppable". An "unknown" state
+        # means we can't even verify the process — the right action for
+        # callers is to preserve tier state and warn, not to treat it as
+        # a hard failure that blocks stopping other components.
         print(
             f"Warning: cannot verify PID {pid} ({expected_comm}) — "
             f"pidfile preserved: {pidfile_path}",
