@@ -402,7 +402,7 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
         # different caller requirements, not a logic inconsistency.
         return False
 
-    # Check 2: process name
+    # Check 2: process name (comm or args for Python scripts)
     try:
         result = subprocess.run(
             ["/bin/ps", "-p", str(pid), "-o", "comm="],
@@ -411,8 +411,27 @@ def validate_pid(pid: int, created_epoch: int, expected_comm: str) -> bool:
         if result.returncode != 0:
             return False  # ps failed — process likely dead
         actual_comm = result.stdout.strip()
-        if not actual_comm or actual_comm != expected_comm:
+        if not actual_comm:
             return False
+        if actual_comm != expected_comm:
+            # For Python scripts (xpra, websockify), comm is the interpreter
+            # (e.g., "python3.11"), not the script name. Fall back to checking
+            # the full command args for the expected name.
+            if not actual_comm.startswith("python"):
+                return False
+            try:
+                args_result = subprocess.run(
+                    ["/bin/ps", "-p", str(pid), "-o", "args="],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if args_result.returncode != 0:
+                    return False
+                args_str = args_result.stdout.strip()
+                # Check if expected_comm appears in the args (e.g., "/usr/local/bin/xpra")
+                if expected_comm not in args_str:
+                    return False
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return False
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
@@ -466,8 +485,23 @@ def validate_pid_tristate(
         if result.returncode != 0:
             return "dead"  # ps failed — process likely dead
         actual_comm = result.stdout.strip()
-        if not actual_comm or actual_comm != expected_comm:
+        if not actual_comm:
             return "dead"
+        if actual_comm != expected_comm:
+            # For Python scripts, comm is the interpreter. Check args.
+            if not actual_comm.startswith("python"):
+                return "dead"
+            try:
+                args_result = subprocess.run(
+                    ["/bin/ps", "-p", str(pid), "-o", "args="],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if args_result.returncode != 0:
+                    return "dead"
+                if expected_comm not in args_result.stdout.strip():
+                    return "dead"
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return "unknown"
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return "unknown"
 
