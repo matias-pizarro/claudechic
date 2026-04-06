@@ -21,7 +21,7 @@
 | Create: `tests/integration/__init__.py` | Package marker |
 | Create: `tests/integration/conftest.py` | Shared fixtures: `x11ctl_run`, `display_factory`, `session_cleanup`, assertion helpers |
 | Create: `tests/integration/test_x11ctl_integration.py` | 11 ACs + 5 lifecycle scenarios (16 tests) |
-| Create: `tests/integration/test_x11ctl_security.py` | 6 security attack tests |
+| Create: `tests/integration/test_x11ctl_security.py` | 5 security attack tests |
 | Create: `tests/integration/test_x11ctl_concurrency.py` | 4 concurrency/race tests |
 | Modify: `pyproject.toml` | Add `integration` marker registration |
 
@@ -53,7 +53,13 @@ testpaths = ["tests"]
 markers = [
     "integration: integration tests requiring X11 binaries (Xvfb, xpra, etc.)",
 ]
+# Integration tests excluded by default (run with: pytest -m integration)
+# This prevents accidental parallel runs with pytest-xdist
+addopts = "-m 'not integration'"
 ```
+
+Note: To run integration tests explicitly: `uv run python -m pytest -m integration tests/integration/`
+To run everything: `uv run python -m pytest -m '' tests/`
 
 - [ ] **Step 3: Create conftest.py with all helpers and fixtures**
 
@@ -123,15 +129,22 @@ def assert_port_listening(host: str, port: int, timeout: float = 5.0) -> None:
     raise AssertionError(f"Port {host}:{port} not listening after {timeout}s")
 
 
-def assert_port_free(host: str, port: int) -> None:
-    """Assert that a TCP port is NOT bound."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        result = sock.connect_ex((host, port))
-        if result == 0:
-            raise AssertionError(f"Port {host}:{port} is still listening")
-    finally:
-        sock.close()
+def assert_port_free(host: str, port: int, timeout: float = 5.0) -> None:
+    """Assert that a TCP port is NOT bound, polling until confirmed free.
+
+    Polls for up to `timeout` seconds to handle TIME_WAIT and process
+    teardown delays.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if sock.connect_ex((host, port)) != 0:
+                return  # Port is free
+        finally:
+            sock.close()
+        time.sleep(0.3)
+    raise AssertionError(f"Port {host}:{port} still listening after {timeout}s")
 
 
 def read_state_file(path: str) -> str | None:
@@ -147,59 +160,83 @@ def read_state_file(path: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def display_factory():
-    """Allocate a unique display number and return env overrides dict.
+def display_factory(tmp_path):
+    """Allocate a unique display number with fully isolated state directory.
 
-    Yields a dict like:
+    Each test gets its own:
+    - Display number (:80-:98, unique via atomic counter)
+    - State directory (pytest tmp_path — isolated pidfiles, tiers, lock)
+    - Xauth file (in /tmp with unique name — passes xauth regex validation)
+    - Offset ports (derived from display number)
+
+    Yields a dict with env overrides and convenience fields:
         {
             "X11CTL_DISPLAY": ":82",
+            "X11CTL_STATE_DIR": "/tmp/pytest-.../test_foo0/",
+            "X11CTL_STATE_PREFIX": ".x11ctl-test-82",
             "X11CTL_XAUTH": "/tmp/.x11ctl-test-82",
             "X11CTL_XPRA_PORT": "10082",
             "X11CTL_VNC_PORT": "5982",
             "X11CTL_NOVNC_PORT": "6162",
-            "display_num": 82,        # convenience for assertions
+            "display_num": 82,
+            "state_dir": "/tmp/pytest-.../test_foo0/",
         }
 
     Registers a finalizer that stops the display and cleans up.
     """
     global _next_display
-    with _display_counter:
-        display_num = _next_display
-        _next_display += 1
-        if _next_display > 98:
-            _next_display = 80
+    # Atomic counter — sequential execution only (no pytest-xdist support).
+    # For parallel execution, would need file-based allocation.
+    _next_display_local = _next_display
+    _next_display += 1
+    if _next_display > 98:
+        _next_display = 80
+    display_num = _next_display_local
+
+    state_dir = str(tmp_path)
+    state_prefix = f".x11ctl-test-{display_num}"
 
     env = {
         "X11CTL_DISPLAY": f":{display_num}",
+        "X11CTL_STATE_DIR": state_dir,
+        "X11CTL_STATE_PREFIX": state_prefix,
         "X11CTL_XAUTH": f"/tmp/.x11ctl-test-{display_num}",
         "X11CTL_XPRA_PORT": str(10000 + display_num),
         "X11CTL_VNC_PORT": str(5900 + display_num),
         "X11CTL_NOVNC_PORT": str(6080 + display_num),
     }
 
-    yield {**env, "display_num": display_num}
+    yield {
+        **env,
+        "display_num": display_num,
+        "state_dir": state_dir,
+    }
 
     # Finalizer: stop everything and clean up
     try:
         x11ctl_run(["stop"], env_overrides=env, timeout=15)
     except (subprocess.TimeoutExpired, Exception):
-        pass
-    # Brute-force cleanup of state files
-    for pattern in [
-        f"/tmp/.x11ctl-test-{display_num}*",
-        f"/tmp/.X{display_num}-lock",
-    ]:
-        import glob
-        for f in glob.glob(pattern):
+        # Fallback: read pidfiles from state_dir and kill directly
+        import glob as _glob
+        for pidfile in _glob.glob(os.path.join(state_dir, "*.pid")):
             try:
-                os.unlink(f)
-            except OSError:
+                content = Path(pidfile).read_text().strip()
+                pid = int(content.split()[0])
+                os.kill(pid, signal.SIGKILL)
+            except (ValueError, ProcessLookupError, PermissionError, OSError):
                 pass
-    socket_path = f"/tmp/.X11-unix/X{display_num}"
+    # Clean up xauth (flat in /tmp, not in state_dir)
     try:
-        os.unlink(socket_path)
-    except OSError:
+        os.unlink(f"/tmp/.x11ctl-test-{display_num}")
+    except FileNotFoundError:
         pass
+    # Clean up X artifacts
+    for path in [f"/tmp/.X{display_num}-lock", f"/tmp/.X11-unix/X{display_num}"]:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    # state_dir is cleaned by pytest's tmp_path fixture automatically
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -230,19 +267,22 @@ def session_cleanup():
     # Brute-force: find and kill any remaining Xvfb on test displays
     try:
         result = subprocess.run(
-            ["ps", "aux"], capture_output=True, text=True, timeout=5
+            ["/bin/ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=5
         )
-        for line in result.stdout.splitlines():
+        for line in result.stdout.splitlines()[1:]:  # skip header
+            line = line.strip()
+            if not line:
+                continue
             for display_num in DISPLAY_RANGE:
-                if f":{display_num}" in line and any(
+                # Match display number as an argument (e.g., ":82" in "Xvfb :82 ...")
+                if f" :{display_num} " in f" {line} " and any(
                     name in line for name in ["Xvfb", "xpra", "x11vnc", "websockify"]
                 ):
-                    parts = line.split()
-                    if len(parts) > 1:
-                        try:
-                            os.kill(int(parts[1]), signal.SIGKILL)
-                        except (ProcessLookupError, PermissionError, ValueError):
-                            pass
+                    try:
+                        pid = int(line.split()[0])
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, ValueError):
+                        pass
     except Exception:
         pass
 
@@ -389,7 +429,7 @@ class TestAcceptanceCriteria:
         r1 = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert r1.returncode == 0
 
-        pid1 = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pid1 = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
         assert pid1 is not None
 
         # Stop
@@ -397,13 +437,13 @@ class TestAcceptanceCriteria:
         assert r2.returncode == 0
 
         # Verify stopped
-        assert read_state_file(f"/tmp/.x11ctl-xvfb.pid") is None
+        assert read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid")) is None
 
         # Second start
         r3 = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert r3.returncode == 0
 
-        pid2 = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pid2 = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
         assert pid2 is not None
         # Different PID after restart
         assert pid1.split()[0] != pid2.split()[0]
@@ -419,7 +459,7 @@ class TestAcceptanceCriteria:
         assert r1.returncode == 0
 
         # Kill Xvfb
-        pidfile_content = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pidfile_content = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
         assert pidfile_content is not None
         xvfb_pid = int(pidfile_content.split()[0])
         os.kill(xvfb_pid, signal.SIGKILL)
@@ -435,7 +475,7 @@ class TestAcceptanceCriteria:
 Run: `uv run python -m pytest tests/integration/test_x11ctl_integration.py -v`
 Expected: All 7 PASS (or skip if binaries missing).
 
-Note: AC6 pidfile paths use default prefix. If display_factory overrides the display but not the state prefix, pidfiles will be at `/tmp/.x11ctl-xvfb.pid` (default). This is correct because the env overrides set `X11CTL_DISPLAY` but the pidfile paths are derived from the default `state_prefix=".x11ctl"`. Each test has a unique display so Xvfb processes don't conflict, but pidfile paths WILL collide between concurrent tests. For sequential execution this is fine. For parallel, we would need `state_dir` overrides — deferred to a follow-up.
+Note: Each test gets a unique `X11CTL_STATE_DIR` (via pytest's `tmp_path`), so pidfiles, tiers files, and lock files are fully isolated between tests. The xauth file and X artifacts (lock, socket) remain in `/tmp` with display-number-derived unique names.
 
 - [ ] **Step 3: Commit**
 
@@ -552,10 +592,10 @@ class TestLifecycleScenarios:
         env = display_factory
 
         x11ctl_run(["start", "--headless"], env_overrides=env)
-        pid1 = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pid1 = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
 
         x11ctl_run(["start", "--headless"], env_overrides=env)
-        pid2 = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pid2 = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
 
         assert pid1 == pid2, f"PID changed: {pid1} -> {pid2}"
 
@@ -564,7 +604,7 @@ class TestLifecycleScenarios:
         env = display_factory
 
         x11ctl_run(["start", "--headless"], env_overrides=env)
-        pidfile_content = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pidfile_content = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
         old_pid = int(pidfile_content.split()[0])
 
         # Crash Xvfb
@@ -575,7 +615,7 @@ class TestLifecycleScenarios:
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert result.returncode == 0, f"Restart failed: {result.stderr}"
 
-        new_pidfile = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        new_pidfile = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
         new_pid = int(new_pidfile.split()[0])
         assert new_pid != old_pid
 
@@ -646,7 +686,7 @@ class TestSecurityAttacks:
     def test_symlink_at_pidfile_path(self, display_factory, tmp_path):
         """Symlink at pidfile path before start: start should handle safely."""
         env = display_factory
-        pidfile_path = "/tmp/.x11ctl-xvfb.pid"
+        pidfile_path = os.path.join(env["state_dir"], f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid")
 
         # Create a symlink pointing to a decoy
         decoy = tmp_path / "decoy"
@@ -699,7 +739,7 @@ class TestSecurityAttacks:
     def test_fifo_at_lock_path(self, display_factory):
         """FIFO at lock path: start should not hang, returns error."""
         env = display_factory
-        lock_path = "/tmp/.x11ctl.lock"
+        lock_path = os.path.join(env["state_dir"], f"{env['X11CTL_STATE_PREFIX']}.lock")
 
         # Remove existing lock if any
         try:
@@ -721,7 +761,7 @@ class TestSecurityAttacks:
     def test_fifo_at_pidfile_path(self, display_factory):
         """FIFO at pidfile path: read_pidfile returns None, start proceeds."""
         env = display_factory
-        pidfile_path = "/tmp/.x11ctl-xvfb.pid"
+        pidfile_path = os.path.join(env["state_dir"], f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid")
 
         try:
             os.unlink(pidfile_path)
@@ -842,7 +882,7 @@ class TestConcurrency:
         assert p2.returncode == 0, f"p2 failed: {err2.decode()}"
 
         # Exactly one Xvfb should be running for this display
-        pidfile = read_state_file(f"/tmp/.x11ctl-xvfb.pid")
+        pidfile = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
         assert pidfile is not None, "No pidfile after concurrent starts"
 
     def test_stop_during_startup(self, display_factory):
