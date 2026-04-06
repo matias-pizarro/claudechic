@@ -1545,3 +1545,75 @@ class TestStatusCommand:
              patch.object(x11ctl, "release_lock"):
             result = x11ctl.status_command_impl(cfg)
             assert result == 0
+
+
+# --- Xpra command assembly (Task 7) ---
+
+class TestXpraCommand:
+    def test_xpra_command_localhost(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_xpra_command(cfg)
+        assert cmd[0] == "xpra"
+        assert "shadow" in cmd
+        assert "--daemon=no" in cmd
+        assert f"--bind-tcp=127.0.0.1:{cfg.xpra_port}" in cmd
+        assert "--html=on" in cmd
+
+    def test_xpra_command_bind_all(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_xpra_command(cfg, bind="0.0.0.0")
+        assert f"--bind-tcp=0.0.0.0:{cfg.xpra_port}" in cmd
+
+    def test_xpra_env_has_xauthority(self):
+        cfg = x11ctl.Config()
+        env = x11ctl.build_xpra_env(cfg)
+        assert env["XAUTHORITY"] == cfg.xauth
+
+    def test_xpra_port_conflict_returns_2(self):
+        """start_xpra should return exit code 2 when port is occupied."""
+        cfg = x11ctl.Config()
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", cfg.xpra_port))
+        sock.listen(1)
+        try:
+            result = x11ctl.start_xpra(cfg, [], bind="127.0.0.1")
+            assert result == 2
+        finally:
+            sock.close()
+
+
+# --- VNC command assembly (Task 8) ---
+
+class TestVncCommand:
+    def test_x11vnc_command(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_x11vnc_command(cfg)
+        assert "x11vnc" in cmd
+        assert "-noxdamage" in cmd
+        assert "-localhost" in cmd
+        assert "-rfbport" in cmd
+
+    def test_websockify_command(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_websockify_command(cfg)
+        assert "websockify" in cmd
+        assert "--web=/usr/local/libexec/novnc" in cmd
+
+    def test_x11vnc_no_localhost_with_bind_all(self):
+        cfg = x11ctl.Config()
+        cmd = x11ctl.build_x11vnc_command(cfg, bind="0.0.0.0")
+        assert "-localhost" not in cmd
+
+    def test_vnc_port_conflict_returns_2(self):
+        """start_vnc should return exit code 2 when VNC port is occupied."""
+        cfg = x11ctl.Config()
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", cfg.vnc_port))
+        sock.listen(1)
+        try:
+            result = x11ctl.start_vnc(cfg, [], bind="127.0.0.1")
+            assert result == 2
+        finally:
+            sock.close()
