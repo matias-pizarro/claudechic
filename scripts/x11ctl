@@ -1492,7 +1492,7 @@ def run_with_temp_display(cfg: Config, command: list[str]) -> int:
     Returns the child command's exit code.
     """
     # Preflight
-    missing = check_binaries(["Xvfb", "xauth"])
+    missing = check_binaries(["Xvfb", "xauth", "xdpyinfo"])
     if missing:
         print(f"Error: missing required commands: {', '.join(missing)}", file=sys.stderr)
         return 1
@@ -1522,7 +1522,7 @@ def run_with_temp_display(cfg: Config, command: list[str]) -> int:
             except FileNotFoundError:
                 pass
             return 1
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as exc:
         print(f"Error: xauth failed: {exc}", file=sys.stderr)
         try:
             os.unlink(cfg.xauth)
@@ -1535,16 +1535,20 @@ def run_with_temp_display(cfg: Config, command: list[str]) -> int:
     child_proc: Optional[subprocess.Popen] = None
 
     def cleanup() -> None:
-        """Kill Xvfb and clean up state."""
+        """Kill Xvfb and clean up state. Idempotent — safe to call multiple
+        times (signal handler + finally block). Uses swap-and-null to prevent
+        re-entrancy issues when SIGTERM arrives during cleanup."""
         nonlocal xvfb_proc
-        if xvfb_proc is not None:
+        proc = xvfb_proc
+        xvfb_proc = None  # Idempotency gate — subsequent calls are no-ops
+        if proc is not None:
             try:
-                xvfb_proc.terminate()
-                xvfb_proc.wait(timeout=3)
+                proc.terminate()
+                proc.wait(timeout=3)
             except Exception:
                 try:
-                    xvfb_proc.kill()
-                    xvfb_proc.wait(timeout=1)
+                    proc.kill()
+                    proc.wait(timeout=1)
                 except Exception:
                     pass
         try:
