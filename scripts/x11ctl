@@ -2021,6 +2021,13 @@ def main() -> None:
     elif args.command == "status":
         sys.exit(status_command_impl(cfg))
     elif args.command == "env":
+        if not os.path.exists(cfg.xauth):
+            print(
+                f"Warning: xauth file does not exist: {cfg.xauth}\n"
+                f"  Run 'x11ctl start --headless' first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(format_env(cfg), end="")
     elif args.command == "run":
         run_cmd = getattr(args, "run_command", [])
