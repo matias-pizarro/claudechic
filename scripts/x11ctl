@@ -1786,7 +1786,29 @@ def start_command_impl(
         return 1
     try:
         current = read_tiers(cfg.tiers_file) or set()
-        to_stop, to_start = compute_tier_diff(current, desired)
+
+        # Crash recovery: verify tiers that should stay running have
+        # live processes.  Only check current ∩ desired — excess tiers
+        # (current - desired) will be stopped normally regardless.
+        stale_tiers: set[str] = set()
+        for tier in current & desired:
+            for comp in tier_components(tier):
+                pidfile = cfg.pidfile(comp)
+                data = read_pidfile(pidfile)
+                if data is None:
+                    stale_tiers.add(tier)
+                    break
+                pid, epoch = data
+                if not validate_pid(pid, epoch, _COMPONENT_COMM.get(comp, comp)):
+                    # Stale pidfile — remove before restarting
+                    try:
+                        os.unlink(pidfile)
+                    except FileNotFoundError:
+                        pass
+                    stale_tiers.add(tier)
+                    break
+
+        to_stop, to_start = compute_tier_diff(current - stale_tiers, desired)
 
         # Stop excess components (in STOP_ORDER). Abort if any fail.
         excess_stop_failed = False

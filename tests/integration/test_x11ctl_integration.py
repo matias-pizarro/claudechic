@@ -342,8 +342,6 @@ class TestLifecycleScenarios:
 
         assert content1 == content2, f"PID changed: {content1} -> {content2}"
 
-    # TODO: remove xfail when x11ctl stale pidfile cleanup is implemented
-    @pytest.mark.xfail(strict=True, reason="x11ctl does not yet clean stale pidfiles on restart")
     def test_crash_recovery(self, display_factory):
         """Kill Xvfb, then start --headless: cleans stale, starts fresh."""
         env = display_factory

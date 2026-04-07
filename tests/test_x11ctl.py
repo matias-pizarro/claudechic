@@ -1489,6 +1489,139 @@ class TestLockTimeout:
             assert result == 1
 
 
+class TestCrashRecovery:
+    """Crash recovery: start_command_impl must detect stale tiers and restart."""
+
+    def test_stale_headless_tier_triggers_restart(self):
+        """Tiers file says headless running but Xvfb is dead → must restart."""
+        cfg = x11ctl.Config()
+        started: list[str] = []
+
+        def mock_start_headless(c: x11ctl.Config, s: list[str], **kw: object) -> int:
+            s.append("xvfb")
+            started.append("xvfb")
+            return 0
+
+        # read_tiers returns {"headless"} (stale — component is dead)
+        # read_pidfile returns a pidfile entry for the dead process
+        # validate_pid returns False (process dead)
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=(9999, 1700000000)), \
+             patch.object(x11ctl, "validate_pid", return_value=False), \
+             patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink"):
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 0, "Restart after crash should succeed"
+            assert "xvfb" in started, "start_headless must be called to restart Xvfb"
+
+    def test_stale_tier_pidfile_cleaned_before_restart(self):
+        """Stale pidfile should be removed before calling start function."""
+        cfg = x11ctl.Config()
+        unlinked: list[str] = []
+
+        def mock_start_headless(c: x11ctl.Config, s: list[str], **kw: object) -> int:
+            s.append("xvfb")
+            return 0
+
+        def track_unlink(path: str) -> None:
+            unlinked.append(path)
+
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=(9999, 1700000000)), \
+             patch.object(x11ctl, "validate_pid", return_value=False), \
+             patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink", side_effect=track_unlink):
+            x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            xvfb_pidfile = cfg.pidfile("xvfb")
+            assert xvfb_pidfile in unlinked, \
+                f"Stale pidfile {xvfb_pidfile} should be unlinked before restart"
+
+    def test_healthy_tier_not_restarted(self):
+        """Tiers file says headless running and Xvfb is alive → no restart."""
+        cfg = x11ctl.Config()
+
+        # validate_pid returns True (process alive) — should NOT call start_headless
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=(1234, 1700000000)), \
+             patch.object(x11ctl, "validate_pid", return_value=True), \
+             patch.object(x11ctl, "start_headless") as mock_start, \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 0
+            mock_start.assert_not_called()
+
+    def test_stale_tier_with_missing_pidfile_triggers_restart(self):
+        """Tiers file says headless running but no pidfile → must restart."""
+        cfg = x11ctl.Config()
+        started: list[str] = []
+
+        def mock_start_headless(c: x11ctl.Config, s: list[str], **kw: object) -> int:
+            s.append("xvfb")
+            started.append("xvfb")
+            return 0
+
+        # read_pidfile returns None (no pidfile exists)
+        with patch.object(x11ctl, "read_tiers", return_value={"headless"}), \
+             patch.object(x11ctl, "read_pidfile", return_value=None), \
+             patch.object(x11ctl, "start_headless", side_effect=mock_start_headless), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"):
+            result = x11ctl.start_command_impl(cfg, desired={"headless"}, bind_all=False)
+            assert result == 0
+            assert "xvfb" in started, "start_headless must be called when pidfile missing"
+
+    def test_partial_vnc_tier_death_triggers_restart(self):
+        """VNC tier: x11vnc dead + websockify alive → whole tier restarted."""
+        cfg = x11ctl.Config()
+        started: list[str] = []
+
+        def mock_start_vnc(c: x11ctl.Config, s: list[str], **kw: object) -> int:
+            s.append("x11vnc")
+            s.append("websockify")
+            started.append("vnc")
+            return 0
+
+        # x11vnc pidfile exists but process is dead; websockify not reached
+        # because the loop breaks on the first dead component.
+        # xvfb pidfile also exists and is alive (headless should stay up).
+        pidfile_data = {
+            cfg.pidfile("xvfb"): (7777, 1700000000),
+            cfg.pidfile("x11vnc"): (8888, 1700000000),
+            cfg.pidfile("websockify"): (8889, 1700000000),
+        }
+
+        def mock_read_pidfile(path: str) -> tuple[int, int] | None:
+            return pidfile_data.get(path)
+
+        def mock_validate_pid(pid: int, epoch: int, comm: str) -> bool:
+            return pid != 8888  # x11vnc is dead, others alive
+
+        with patch.object(x11ctl, "read_tiers", return_value={"headless", "vnc"}), \
+             patch.object(x11ctl, "read_pidfile", side_effect=mock_read_pidfile), \
+             patch.object(x11ctl, "validate_pid", side_effect=mock_validate_pid), \
+             patch.object(x11ctl, "start_headless", return_value=0) as mock_headless, \
+             patch.object(x11ctl, "start_vnc", side_effect=mock_start_vnc), \
+             patch.object(x11ctl, "write_tiers"), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch("os.unlink"):
+            result = x11ctl.start_command_impl(
+                cfg, desired={"headless", "vnc"}, bind_all=False,
+            )
+            assert result == 0
+            assert "vnc" in started, "VNC tier must be restarted when x11vnc is dead"
+            mock_headless.assert_not_called()  # headless was alive, no restart
+
+
 class TestStartRollback:
     def test_rollback_on_xpra_failure(self):
         """If start_xpra fails after start_headless succeeds, headless should be rolled back."""
