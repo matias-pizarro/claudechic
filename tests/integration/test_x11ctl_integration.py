@@ -216,7 +216,7 @@ class TestAcceptanceCriteria:
         found_listener = False
         for line in check.stdout.splitlines()[1:]:  # skip header
             parts = line.split()
-            if len(parts) >= 6 and str(port) in parts[5]:
+            if len(parts) >= 6 and parts[5].endswith(f":{port}"):
                 found_listener = True
                 local_addr = parts[5]  # e.g., "127.0.0.1:10080" or "*:10080"
                 assert local_addr.startswith("127.0.0.1:"), \
