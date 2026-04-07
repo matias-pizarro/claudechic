@@ -16,7 +16,9 @@ import sys
 import pytest
 
 # PTY support is Unix-only
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="PTY not available on Windows"
+)
 
 
 class TestRunInPty:
