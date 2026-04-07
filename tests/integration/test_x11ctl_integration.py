@@ -389,7 +389,12 @@ class TestLifecycleScenarios:
             pytest.fail(f"New Xvfb (PID {new_entry.pid}) is not running after restart")
 
     def test_run_exit_code_propagation(self, display_factory):
-        """run /bin/sh -c 'exit 42' returns 42."""
+        """run /bin/sh -c 'exit 42' returns 42.
+
+        Note: does not explicitly start a display first — this exercises
+        x11ctl run's auto-start behavior (ephemeral Xvfb) which is the
+        common usage pattern.
+        """
         env = display_factory
         result = x11ctl_run(["run", "/bin/sh", "-c", "exit 42"], env_overrides=env)
         assert result.returncode == 42
@@ -405,3 +410,12 @@ class TestLifecycleScenarios:
         assert "DISPLAY=" in result.stdout
         assert "XAUTHORITY=" in result.stdout
         assert env["X11CTL_DISPLAY"] in result.stdout
+
+        # Verify output is valid shell syntax (eval-safe)
+        import subprocess as _sp
+        syntax_check = _sp.run(
+            ["/bin/sh", "-n"],
+            input=result.stdout, capture_output=True, text=True, timeout=5,
+        )
+        assert syntax_check.returncode == 0, \
+            f"env output is not valid shell syntax: {syntax_check.stderr}"
