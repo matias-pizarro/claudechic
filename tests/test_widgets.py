@@ -1,7 +1,5 @@
 """Pure widget tests - no SDK needed."""
 
-import asyncio
-
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -347,23 +345,103 @@ async def test_plan_section():
 
 @pytest.mark.asyncio
 async def test_context_bar_rendering():
-    """ContextBar shows correct fill and color."""
+    """ContextBar shows text format with percentage and token counts."""
     app = WidgetTestApp(lambda: ContextBar(id="ctx"))
     async with app.run_test():
         bar = app.query_one(ContextBar)
 
-        # Low usage - should be dim
+        # Low usage (5%) — dim color, text format
         bar.tokens = 10000
         bar.max_tokens = 200000
         rendered = bar.render()
         assert hasattr(rendered, "plain")
-        assert "5%" in rendered.plain  # type: ignore[union-attr]
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "5%" in plain
+        assert "[10.0K/200.0K]" in plain
 
-        # High usage - should be red
+        # High usage (90%) — red color, text format
         bar.tokens = 180000
         rendered = bar.render()
-        assert hasattr(rendered, "plain")
-        assert "90%" in rendered.plain  # type: ignore[union-attr]
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "90%" in plain
+        assert "[180.0K/200.0K]" in plain
+
+        # Zero tokens
+        bar.tokens = 0
+        rendered = bar.render()
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "0%" in plain
+        assert "[0/200.0K]" in plain
+
+        # Division safety: max_tokens=0
+        bar.max_tokens = 0
+        rendered = bar.render()
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "0%" in plain
+        assert "[0/0]" in plain
+
+
+@pytest.mark.asyncio
+async def test_context_bar_color_gradient():
+    """ContextBar background gradient: green → orange → red → crimson."""
+    from claudechic.widgets.layout.indicators import _context_bar_color
+
+    # 0% -> deep green (#117733)
+    fg, fg_dim, bg = _context_bar_color(0.0)
+    assert bg == "#117733"
+
+    # 15% -> midpoint green-orange (interpolated)
+    _, _, bg = _context_bar_color(0.15)
+    assert bg != "#117733" and bg != "#cc7700"  # somewhere in between
+
+    # 30% -> pure orange (#cc7700)
+    _, _, bg = _context_bar_color(0.30)
+    assert bg == "#cc7700"
+
+    # 40% -> midpoint orange-red (interpolated)
+    _, _, bg = _context_bar_color(0.40)
+    assert bg != "#cc7700" and bg != "#cc3333"
+
+    # 50% -> red (#cc3333)
+    _, _, bg = _context_bar_color(0.50)
+    assert bg == "#cc3333"
+
+    # 75% -> midpoint red-crimson (interpolated)
+    _, _, bg = _context_bar_color(0.75)
+    assert bg != "#cc3333" and bg != "#661111"
+
+    # 100% -> dark crimson (#661111)
+    _, _, bg = _context_bar_color(1.0)
+    assert bg == "#661111"
+
+    # Verify fg is always a valid contrast color, fg_dim is a hex color
+    for p in [0.0, 0.15, 0.30, 0.40, 0.50, 0.75, 1.0]:
+        fg_val, dim_val, _ = _context_bar_color(p)
+        assert fg_val in ("white", "black")
+        assert dim_val.startswith("#") and len(dim_val) == 7
+
+
+@pytest.mark.asyncio
+async def test_context_bar_bracket_muted():
+    """Bracket portion [used/max] uses a muted fg color distinct from the main fg."""
+    from claudechic.widgets.layout.indicators import _context_bar_color
+
+    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
+    async with app.run_test():
+        bar = app.query_one(ContextBar)
+        bar.max_tokens = 100
+
+        for token_val in [10, 40, 90]:
+            bar.tokens = token_val
+            pct = token_val / 100.0
+            fg, fg_dim, bg = _context_bar_color(pct)
+            rendered = bar.render()
+            # The bracket span (second) uses fg_dim, not the main fg
+            spans = rendered._spans  # type: ignore[union-attr]
+            bracket_style = str(spans[1].style)
+            assert fg_dim in bracket_style, (
+                f"Bracket at {token_val}% should use {fg_dim}, got {bracket_style}"
+            )
 
 
 @pytest.mark.asyncio

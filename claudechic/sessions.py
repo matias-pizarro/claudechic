@@ -8,6 +8,8 @@ from pathlib import Path
 
 import aiofiles
 
+from claudechic.formatting import TOKEN_REMINDER_PATTERN
+
 
 def is_valid_uuid(s: str) -> bool:
     """Check if string is a valid UUID (not agent-* internal sessions)."""
@@ -65,7 +67,13 @@ def get_project_sessions_dir(cwd: Path | None = None) -> Path | None:
     cwd = (cwd or Path.cwd()).absolute()
     # Replace path separators with dashes (handles both / and \ on Windows)
     # Also remove Windows drive colon (C:\foo -> C-foo)
-    project_key = str(cwd).replace(os.sep, "-").replace(":", "").replace("_", "-").replace(".", "-")
+    project_key = (
+        str(cwd)
+        .replace(os.sep, "-")
+        .replace(":", "")
+        .replace("_", "-")
+        .replace(".", "-")
+    )
     sessions_dir = Path.home() / ".claude/projects" / project_key
     return sessions_dir if sessions_dir.exists() else None
 
@@ -117,12 +125,15 @@ def _extract_session_info(filepath: Path) -> tuple[str, int, float]:
                         if not first_msg:
                             content = d.get("message", {}).get("content", "")
                             if isinstance(content, str) and content.strip():
-                                if not content.startswith("<command-"):
-                                    first_msg = content.replace("\n", " ")[:100]
+                                clean = TOKEN_REMINDER_PATTERN.sub("", content)
+                                if clean.strip() and not clean.startswith("<command-"):
+                                    first_msg = clean.replace("\n", " ")[:100]
                             elif isinstance(content, list) and content:
                                 block = content[0]
                                 if block.get("type") == "text":
-                                    txt = block.get("text", "")
+                                    txt = TOKEN_REMINDER_PATTERN.sub(
+                                        "", block.get("text", "")
+                                    )
                                     if txt.strip() and not txt.startswith("<command-"):
                                         first_msg = txt.replace("\n", " ")[:100]
 
@@ -226,11 +237,12 @@ async def load_session_messages(session_id: str, cwd: Path | None = None) -> lis
                 if d.get("type") == "user":
                     content = d.get("message", {}).get("content", "")
                     if isinstance(content, str) and content.strip():
-                        if content.strip().startswith("/"):
+                        clean = TOKEN_REMINDER_PATTERN.sub("", content)
+                        if clean.strip().startswith("/"):
                             continue
-                        if any(tag in content for tag in skip_tags):
+                        if any(tag in clean for tag in skip_tags):
                             continue
-                        messages.append({"type": "user", "content": content})
+                        messages.append({"type": "user", "content": clean})
                 elif d.get("type") == "assistant":
                     msg = d.get("message", {})
                     content_blocks = msg.get("content", [])
