@@ -2114,6 +2114,410 @@ def _determine_stop_tier(args: argparse.Namespace) -> str:
     return flags[0]
 
 
+# ---------------------------------------------------------------------------
+# Self-test cleanup and stale recovery
+# ---------------------------------------------------------------------------
+
+def cleanup_selftest(state_dir: str, xauth: str) -> None:
+    """Remove self-test state directory and xauth file.
+
+    Non-fatal: logs warnings but does not raise on failure.
+    """
+    try:
+        shutil.rmtree(state_dir)
+    except OSError as exc:
+        print(f"Warning: failed to remove state dir {state_dir}: {exc}", file=sys.stderr)
+    try:
+        if os.path.lexists(xauth) and not os.path.islink(xauth):
+            os.unlink(xauth)
+    except OSError as exc:
+        print(f"Warning: failed to remove xauth {xauth}: {exc}", file=sys.stderr)
+
+
+def clean_stale_selftest_dirs(
+    tmp_dir: str = "/tmp",
+) -> tuple[bool, Optional[dict[str, object]]]:
+    """Scan for stale self-test directories and clean them.
+
+    Three-phase algorithm per directory:
+      Phase 1 (classify): read pidfiles, validate_pid_tristate each.
+               If ANY is "unknown" → skip entire dir (fail closed).
+      Phase 2 (act): "dead" → clean pidfile. "alive" → stop_component.
+               If any stop fails → return (False, info) for caller to abort.
+      Phase 3 (clean): rmtree + unlink xauth (non-fatal on failure).
+
+    Returns (True, None) on success, (False, info_dict) on unkillable stale.
+    """
+    import glob as _glob
+
+    candidates = _glob.glob(os.path.join(tmp_dir, ".x11ctl-selftest-*-*"))
+    for candidate in sorted(candidates):
+        # Reject symlinks — prevents arbitrary rmtree
+        if os.path.islink(candidate):
+            continue
+
+        # Verify ownership (lstat — does not follow symlinks)
+        try:
+            st = os.lstat(candidate)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        if st.st_uid != os.getuid():
+            continue
+
+        # Verify we can open as directory (confirms real dir we own)
+        try:
+            fd = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            os.close(fd)
+        except OSError:
+            continue
+
+        # Phase 1: classify all pidfiles
+        pidfiles: list[tuple[str, str, int, int]] = []  # (path, comp_name, pid, epoch)
+        has_unknown = False
+        for pidfile in sorted(Path(candidate).glob("*.pid")):
+            comp_name = pidfile.stem  # e.g., "xvfb" from "xvfb.pid"
+            try:
+                content = pidfile.read_text().strip()
+                parts = content.split()
+                pid, epoch = int(parts[0]), int(parts[1])
+            except (OSError, ValueError, IndexError):
+                # Malformed pidfile → treat as dead
+                pidfiles.append((str(pidfile), comp_name, 0, 0))
+                continue
+
+            comm = _COMPONENT_COMM.get(comp_name, comp_name)
+            state = validate_pid_tristate(pid, epoch, comm)
+            if state == "unknown":
+                has_unknown = True
+                break
+            pidfiles.append((str(pidfile), comp_name, pid, epoch))
+
+        if has_unknown:
+            print(
+                f"Warning: skipping stale dir {candidate} — could not validate all PIDs",
+                file=sys.stderr,
+            )
+            continue
+
+        # Phase 2: act on classified pidfiles
+        for pidpath, comp_name, pid, epoch in pidfiles:
+            if pid == 0:
+                # Malformed → just remove pidfile
+                try:
+                    os.unlink(pidpath)
+                except FileNotFoundError:
+                    pass
+                continue
+
+            comm = _COMPONENT_COMM.get(comp_name, comp_name)
+            state = validate_pid_tristate(pid, epoch, comm)
+            if state == "dead":
+                try:
+                    os.unlink(pidpath)
+                except FileNotFoundError:
+                    pass
+            elif state == "alive":
+                ok = stop_component(pidpath, comm)
+                if not ok:
+                    return (False, {
+                        "pid": pid,
+                        "component": comp_name,
+                        "pidfile": pidpath,
+                        "state_dir": candidate,
+                    })
+
+        # Phase 3: clean directory and xauth
+        # Extract display number from dir name for xauth path
+        basename = os.path.basename(candidate)
+        # Pattern: .x11ctl-selftest-<N>-<random>
+        # Split: [".x11ctl", "selftest", "<N>", "<random>"]
+        parts = basename.split("-")
+        xauth_path = ""
+        if len(parts) >= 3:
+            try:
+                display_num = int(parts[2])
+                xauth_path = os.path.join(tmp_dir, f".x11ctl-selftest-{display_num}")
+            except ValueError:
+                pass
+
+        try:
+            shutil.rmtree(candidate)
+        except OSError as exc:
+            print(f"Warning: failed to rmtree {candidate}: {exc}", file=sys.stderr)
+
+        if xauth_path:
+            try:
+                if os.path.lexists(xauth_path) and not os.path.islink(xauth_path):
+                    os.unlink(xauth_path)
+            except OSError:
+                pass
+
+    return (True, None)
+
+
+def self_test_command_impl(tier: str) -> int:
+    """Run self-test exercises for the specified tier.
+
+    Acquires the global exclusive lock, verifies no production tiers are active,
+    cleans stale self-test state, selects a free display, and exercises the
+    requested tier(s).
+    """
+    # Use default config for global lock and tiers check
+    default_cfg = Config()
+    lock_fd = acquire_lock(default_cfg.lock_file, exclusive=True)
+    if lock_fd is None:
+        print("Error: another x11ctl operation is in progress", file=sys.stderr)
+        return 1
+    try:
+        # Refuse if production tiers are active
+        current = read_tiers(default_cfg.tiers_file)
+        if current:
+            print(
+                f"Error: cannot run self-test while tiers are active: {', '.join(sorted(current))}\n"
+                f"  Run 'x11ctl stop --all' first.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Clean stale self-test directories
+        ok, info = clean_stale_selftest_dirs()
+        if not ok and info is not None:
+            print(
+                f"Error: stale self-test process {info['component']} "
+                f"(PID {info['pid']}) could not be killed.\n"
+                f"  Manual fix: kill {info['pid']} && rm -rf {info['state_dir']}",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Select a free display (probe :98 → :80)
+        # Determine which ports need checking based on tier
+        needs_xpra_port = tier in ("tier2", "all")
+        needs_vnc_ports = tier in ("tier3", "all")
+
+        selected_display: Optional[int] = None
+        selected_cfg: Optional[Config] = None
+
+        for display_num in range(98, 79, -1):
+            # Check if display is occupied (lock or socket file)
+            lock_path = f"/tmp/.X{display_num}-lock"
+            socket_path = f"/tmp/.X11-unix/X{display_num}"
+            if os.path.exists(lock_path) or os.path.exists(socket_path):
+                continue
+
+            # Create temporary config to check offset ports
+            tmp_state = tempfile.mkdtemp(
+                prefix=f".x11ctl-selftest-{display_num}-",
+                dir="/tmp",
+            )
+            if os.path.isdir(tmp_state):
+                os.chmod(tmp_state, 0o700)
+            cfg = Config.for_self_test(display_num, state_dir=tmp_state)
+
+            # Check port availability for requested tier
+            ports_ok = True
+            if needs_xpra_port:
+                if not check_port_available("127.0.0.1", cfg.xpra_port):
+                    ports_ok = False
+            if needs_vnc_ports and ports_ok:
+                if not check_port_available("127.0.0.1", cfg.vnc_port):
+                    ports_ok = False
+                if not check_port_available("127.0.0.1", cfg.novnc_port):
+                    ports_ok = False
+
+            if not ports_ok:
+                # Clean up the temp dir we just created
+                try:
+                    shutil.rmtree(tmp_state)
+                except OSError:
+                    pass
+                continue
+
+            selected_display = display_num
+            selected_cfg = cfg
+            break
+
+        if selected_display is None or selected_cfg is None:
+            print(
+                "Error: all displays :98 through :80 are occupied.\n"
+                "  Free a display or stop conflicting X servers.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Signal handler: set a flag so the finally block handles cleanup.
+        # Avoid calling shutil.rmtree/sys.exit in the handler itself —
+        # CPython defers signal handlers between bytecodes, but rmtree
+        # is not async-signal-safe and may deadlock if interrupting
+        # the allocator.
+        state_dir = selected_cfg.state_dir
+        xauth = selected_cfg.xauth
+        caught_signal: list[int] = []  # mutable container for closure
+
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        original_sigint = signal.getsignal(signal.SIGINT)
+
+        def signal_handler(signum: int, frame: object) -> None:
+            caught_signal.append(signum)
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        try:
+            # Preflight: check required binaries
+            missing = check_binaries(["Xvfb", "xauth", "xdpyinfo"])
+            if missing:
+                print(
+                    f"Error: missing required commands: {', '.join(missing)}\n"
+                    f"  Run: pkg install {' '.join(missing)}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            # Exercise the requested tier
+            rc = _run_self_test_tier(selected_cfg, tier)
+            return rc
+        finally:
+            # Cleanup once — stop components, remove state
+            _stop_selftest_components(selected_cfg, tier)
+            cleanup_selftest(state_dir, xauth)
+            # Restore signal handlers
+            signal.signal(signal.SIGTERM, original_sigterm)
+            signal.signal(signal.SIGINT, original_sigint)
+            # Re-raise caught signal as the correct exit code
+            if caught_signal:
+                sys.exit(128 + caught_signal[0])
+    finally:
+        release_lock(lock_fd)
+
+
+def _stop_selftest_components(cfg: Config, tier: str) -> None:
+    """Stop all components that may have been started by self-test."""
+    # Stop in reverse dependency order
+    comps_to_stop: list[str] = []
+    if tier in ("tier3", "all"):
+        comps_to_stop.extend(["websockify", "x11vnc"])
+    if tier in ("tier2", "all"):
+        comps_to_stop.append("xpra")
+    if tier in ("tier1", "tier2", "tier3", "all"):
+        comps_to_stop.append("xvfb")
+
+    for comp in comps_to_stop:
+        pidfile = cfg.pidfile(comp)
+        if os.path.exists(pidfile):
+            stop_component(pidfile, _COMPONENT_COMM.get(comp, comp))
+
+
+def _run_self_test_tier(cfg: Config, tier: str) -> int:
+    """Execute self-test exercises for the specified tier.
+
+    Returns 0 on success, non-zero on failure.
+    """
+    started: list[str] = []
+
+    if tier in ("tier1", "tier2", "tier3", "all"):
+        # Start headless
+        rc = start_headless(cfg, started, bind="127.0.0.1")
+        if rc != 0:
+            print(f"self-test: headless start failed (exit {rc})", file=sys.stderr)
+            return rc
+
+        # Verify display is reachable
+        try:
+            result = subprocess.run(
+                ["xdpyinfo", "-display", cfg.display],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, "DISPLAY": cfg.display, "XAUTHORITY": cfg.xauth},
+            )
+            if result.returncode != 0:
+                print(
+                    f"self-test: xdpyinfo failed on {cfg.display}: {result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                return 1
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            print(f"self-test: xdpyinfo failed: {exc}", file=sys.stderr)
+            return 1
+
+        print(f"  ✓ headless: Xvfb started on {cfg.display}", file=sys.stderr)
+
+    if tier == "tier1" or tier == "all":
+        # Tier 1: screenshot test
+        screenshot_path = os.path.join(cfg.state_dir, "selftest-screenshot.png")
+        rc = screenshot_command_impl(cfg, screenshot_path)
+        if rc == 0:
+            print(f"  ✓ tier1: screenshot captured to {screenshot_path}", file=sys.stderr)
+        else:
+            # Screenshot may fail if ImageMagick not installed — warn but don't fail
+            print(f"  ⚠ tier1: screenshot failed (exit {rc}) — ImageMagick may not be installed", file=sys.stderr)
+
+    if tier in ("tier2", "all"):
+        # Tier 2: start xpra
+        rc = start_xpra(cfg, started, bind="127.0.0.1")
+        if rc != 0:
+            print(f"self-test: xpra start failed (exit {rc})", file=sys.stderr)
+            return rc
+
+        # Verify xpra HTML5 port is listening
+
+        deadline = time.monotonic() + 10.0
+        xpra_ok = False
+        while time.monotonic() < deadline:
+            if not check_port_available("127.0.0.1", cfg.xpra_port):
+                xpra_ok = True
+                break
+            time.sleep(0.5)
+        if xpra_ok:
+            print(f"  ✓ tier2: xpra HTML5 listening on port {cfg.xpra_port}", file=sys.stderr)
+        else:
+            print(
+                f"  ✗ tier2: xpra HTML5 not listening on port {cfg.xpra_port} after 10s",
+                file=sys.stderr,
+            )
+            return 1
+
+    if tier in ("tier3", "all"):
+        # Tier 3: start VNC
+        rc = start_vnc(cfg, started, bind="127.0.0.1")
+        if rc != 0:
+            print(f"self-test: vnc start failed (exit {rc})", file=sys.stderr)
+            return rc
+
+
+        deadline = time.monotonic() + 10.0
+        vnc_ok = False
+        novnc_ok = False
+        while time.monotonic() < deadline:
+            if not vnc_ok and not check_port_available("127.0.0.1", cfg.vnc_port):
+                vnc_ok = True
+            if not novnc_ok and not check_port_available("127.0.0.1", cfg.novnc_port):
+                novnc_ok = True
+            if vnc_ok and novnc_ok:
+                break
+            time.sleep(0.5)
+        if vnc_ok:
+            print(f"  ✓ tier3: VNC listening on port {cfg.vnc_port}", file=sys.stderr)
+        else:
+            print(f"  ✗ tier3: VNC not listening on port {cfg.vnc_port} after 10s", file=sys.stderr)
+            return 1
+        if novnc_ok:
+            print(f"  ✓ tier3: noVNC listening on port {cfg.novnc_port}", file=sys.stderr)
+        else:
+            print(f"  ✗ tier3: noVNC not listening on port {cfg.novnc_port} after 10s", file=sys.stderr)
+            return 1
+
+    # Status check
+    rc = status_command_impl(cfg)
+    if rc != 0:
+        print("self-test: status check reports unhealthy components", file=sys.stderr)
+        return rc
+    print("  ✓ status: all components healthy", file=sys.stderr)
+
+    return 0
+
+
 def main() -> None:
     """Entry point."""
     args = parse_args(sys.argv[1:])
@@ -2161,6 +2565,12 @@ def main() -> None:
                "xpra" if getattr(args, "tier2", False) else \
                "vnc" if getattr(args, "tier3", False) else "headless"
         sys.exit(setup_command_impl(tier))
+    elif args.command == "self-test":
+        tier = "all" if getattr(args, "all", False) else \
+               "tier1" if getattr(args, "tier1", False) else \
+               "tier2" if getattr(args, "tier2", False) else \
+               "tier3" if getattr(args, "tier3", False) else "tier1"
+        sys.exit(self_test_command_impl(tier))
     else:
         print(f"x11ctl: command '{args.command}' not yet implemented", file=sys.stderr)
         sys.exit(1)

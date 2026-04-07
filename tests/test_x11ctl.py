@@ -3,10 +3,12 @@
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import socket as _socket
+import stat as _stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1937,3 +1939,254 @@ class TestSetupCommand:
                  args=[], returncode=1, stderr="pkg error")):
             result = x11ctl.setup_command_impl(tier="headless")
             assert result != 0
+
+
+# --- Self-test subcommand ---
+
+class TestSelfTest:
+    # --- CLI parsing ---
+    def test_self_test_tier2(self):
+        args = x11ctl.parse_args(["self-test", "--tier2"])
+        assert args.command == "self-test"
+        assert args.tier2 is True
+
+    def test_self_test_tier3(self):
+        args = x11ctl.parse_args(["self-test", "--tier3"])
+        assert args.command == "self-test"
+        assert args.tier3 is True
+
+    # --- Refuse when tiers active ---
+    def test_self_test_refuses_when_tiers_active(self):
+        """self-test should refuse to run when a stack is already active."""
+        with patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch.object(x11ctl, "read_tiers", return_value={"headless"}):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert result != 0
+
+    def test_self_test_runs_when_clean(self):
+        """self-test should proceed when no tiers are active."""
+        with patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl, "clean_stale_selftest_dirs", return_value=(True, None)), \
+             patch.object(x11ctl, "find_binary", return_value=None), \
+             patch("os.path.exists", return_value=True):  # all displays occupied
+            # Will fail at display exhaustion, but proves it didn't
+            # refuse due to active tiers
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert isinstance(result, int)
+
+    # --- Stale recovery abort ---
+    def test_self_test_aborts_on_unkillable_stale(self, capsys):
+        """self_test_command_impl should abort with message when stale process unkillable."""
+        with patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl, "clean_stale_selftest_dirs",
+                          return_value=(False, {"pid": 12345, "component": "xvfb",
+                                                "pidfile": "/tmp/.x11ctl-selftest-98-abc/xvfb.pid",
+                                                "state_dir": "/tmp/.x11ctl-selftest-98-abc"})):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert result == 1
+            captured = capsys.readouterr()
+            assert "12345" in captured.err
+            assert "xvfb" in captured.err
+
+    # --- Display selection ---
+    def test_self_test_retries_on_port_conflict(self, tmp_path):
+        """self-test --tier2 should try next display when xpra offset port occupied."""
+        selected_displays: list[int] = []
+
+        def mock_exists(p: str) -> bool:
+            return False  # :98 display is free
+
+        def mock_port_available(host: str, port: int) -> bool:
+            return port != 10098  # Port 10098 (xpra for :98) occupied
+
+        original_for_self_test = x11ctl.Config.for_self_test
+
+        def capture_for_self_test(display_num: int, state_dir: str = "/tmp/fake") -> x11ctl.Config:
+            selected_displays.append(display_num)
+            return original_for_self_test(display_num, state_dir=state_dir)
+
+        with patch("os.path.exists", side_effect=mock_exists), \
+             patch.object(x11ctl, "check_port_available", side_effect=mock_port_available), \
+             patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl.Config, "for_self_test", side_effect=capture_for_self_test), \
+             patch.object(x11ctl, "find_binary", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch.object(x11ctl, "clean_stale_selftest_dirs", return_value=(True, None)), \
+             patch("tempfile.mkdtemp", return_value="/tmp/.x11ctl-selftest-97-fake"):
+            result = x11ctl.self_test_command_impl(tier="tier2")
+            assert 97 in selected_displays
+
+    def test_self_test_skips_occupied_display(self, tmp_path):
+        """self-test should skip display :98 if occupied and try :97."""
+        selected_displays: list[int] = []
+
+        def mock_exists(p: str) -> bool:
+            return "/tmp/.X98-lock" in p or "/tmp/.X11-unix/X98" in p
+
+        original_for_self_test = x11ctl.Config.for_self_test
+
+        def capture_for_self_test(display_num: int, state_dir: str = "/tmp/fake") -> x11ctl.Config:
+            selected_displays.append(display_num)
+            return original_for_self_test(display_num, state_dir=state_dir)
+
+        with patch("os.path.exists", side_effect=mock_exists), \
+             patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl.Config, "for_self_test", side_effect=capture_for_self_test), \
+             patch.object(x11ctl, "find_binary", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch.object(x11ctl, "clean_stale_selftest_dirs", return_value=(True, None)), \
+             patch("tempfile.mkdtemp", return_value="/tmp/.x11ctl-selftest-97-fake"):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert isinstance(result, int)
+            assert 97 in selected_displays
+
+    def test_self_test_fails_when_all_displays_occupied(self, capsys):
+        """self-test should fail with specific error when range 98→80 exhausted."""
+        with patch("os.path.exists", return_value=True), \
+             patch.object(x11ctl, "read_tiers", return_value=None), \
+             patch.object(x11ctl, "acquire_lock", return_value=99), \
+             patch.object(x11ctl, "release_lock"), \
+             patch.object(x11ctl, "clean_stale_selftest_dirs", return_value=(True, None)):
+            result = x11ctl.self_test_command_impl(tier="tier1")
+            assert result == 1
+            captured = capsys.readouterr()
+            assert "display" in captured.err.lower() or "occupied" in captured.err.lower()
+
+    # --- Stale directory recovery ---
+    def test_stale_recovery_cleans_dead_pids(self, tmp_path):
+        """Stale self-test dir with dead PIDs should be cleaned, including xauth."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        (stale_dir / "xvfb.pid").write_text("99999999 1712345678\n")
+        xauth = tmp_path / ".x11ctl-selftest-98"
+        xauth.write_text("cookie")
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="dead"):
+            success, _ = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert success is True
+            assert not stale_dir.exists()
+            assert not xauth.exists()
+
+    def test_stale_recovery_aborts_on_unkillable(self, tmp_path):
+        """Stale recovery returns failure data if a process survives SIGKILL."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        (stale_dir / "xvfb.pid").write_text("12345 1712345678\n")
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="alive"), \
+             patch.object(x11ctl, "stop_component", return_value=False):
+            success, info = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert success is False
+            assert info["pid"] == 12345
+            assert "xvfb" in info["component"]
+            assert stale_dir.exists()
+
+    def test_stale_recovery_skips_entire_dir_on_unknown(self, tmp_path):
+        """Any 'unknown' PID in a dir → skip entire dir untouched (two-phase)."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        (stale_dir / "xvfb.pid").write_text("12345 1712345678\n")
+        (stale_dir / "xpra.pid").write_text("99999999 1712345678\n")
+
+        def tristate_side_effect(pid: int, epoch: int, comm: str) -> str:
+            return "unknown" if pid == 12345 else "dead"
+
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch.object(x11ctl, "validate_pid_tristate", side_effect=tristate_side_effect), \
+             patch.object(x11ctl, "stop_component") as mock_stop:
+            success, _ = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert success is True  # continues to next dir (non-fatal skip)
+            assert stale_dir.exists()  # NOT cleaned
+            mock_stop.assert_not_called()
+
+    def test_stale_recovery_cleans_dead_validated_pid(self, tmp_path):
+        """validate_pid_tristate returning 'dead' → clean pidfile and dir."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        (stale_dir / "xvfb.pid").write_text("12345 1712345678\n")
+        xauth = tmp_path / ".x11ctl-selftest-98"
+        xauth.write_text("cookie")
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="dead"):
+            result = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert result[0] is True
+            assert not stale_dir.exists()
+            assert not xauth.exists()
+
+    def test_stale_recovery_warns_on_rmtree_failure(self, tmp_path):
+        """rmtree failure should warn and continue (non-fatal)."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        (stale_dir / "xvfb.pid").write_text("99999999 1712345678\n")
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch.object(x11ctl, "validate_pid_tristate", return_value="dead"), \
+             patch("shutil.rmtree", side_effect=OSError("permission denied")):
+            success, _ = x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert success is True  # non-fatal, continues
+
+    def test_stale_recovery_skips_other_user(self, tmp_path):
+        """Stale dir owned by another user should be skipped."""
+        stale_dir = tmp_path / ".x11ctl-selftest-98-abc"
+        stale_dir.mkdir(mode=0o700)
+        with patch("glob.glob", return_value=[str(stale_dir)]), \
+             patch("os.lstat") as mock_lstat:
+            mock_lstat.return_value.st_uid = 99999
+            mock_lstat.return_value.st_mode = _stat.S_IFDIR | 0o700
+            x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert stale_dir.exists()  # not touched
+
+    def test_stale_recovery_rejects_symlink(self, tmp_path):
+        """Symlinked stale dir should be skipped (prevents arbitrary rmtree)."""
+        target = tmp_path / "real_dir"
+        target.mkdir()
+        link = tmp_path / ".x11ctl-selftest-98-abc"
+        link.symlink_to(target)
+        with patch("glob.glob", return_value=[str(link)]):
+            x11ctl.clean_stale_selftest_dirs(str(tmp_path))
+            assert target.exists()  # target not deleted
+            assert link.is_symlink()  # symlink not followed
+
+    # --- Cleanup ---
+    def test_cleanup_removes_dir_and_xauth(self, tmp_path):
+        """Normal cleanup should rmtree state dir and unlink flat xauth."""
+        state_dir = tmp_path / ".x11ctl-selftest-97-xyz"
+        state_dir.mkdir(mode=0o700)
+        xauth = tmp_path / ".x11ctl-selftest-97"
+        xauth.write_text("cookie")
+        x11ctl.cleanup_selftest(str(state_dir), str(xauth))
+        assert not state_dir.exists()
+        assert not xauth.exists()
+
+    def test_cleanup_tolerates_missing_state_dir(self, tmp_path):
+        """cleanup_selftest should not crash when state dir already removed."""
+        missing = str(tmp_path / "nonexistent")
+        xauth = tmp_path / ".x11ctl-selftest-97"
+        xauth.write_text("cookie")
+        x11ctl.cleanup_selftest(missing, str(xauth))  # should not raise
+        assert not xauth.exists()
+
+    def test_cleanup_tolerates_missing_xauth(self, tmp_path):
+        """cleanup_selftest should not crash when xauth already removed."""
+        state_dir = tmp_path / ".x11ctl-selftest-97-xyz"
+        state_dir.mkdir(mode=0o700)
+        missing_xauth = str(tmp_path / "nonexistent-xauth")
+        x11ctl.cleanup_selftest(str(state_dir), missing_xauth)  # should not raise
+        assert not state_dir.exists()
+
+    def test_cleanup_tolerates_double_call(self, tmp_path):
+        """cleanup_selftest should be idempotent (safe for double-cleanup)."""
+        state_dir = tmp_path / ".x11ctl-selftest-97-xyz"
+        state_dir.mkdir(mode=0o700)
+        xauth = tmp_path / ".x11ctl-selftest-97"
+        xauth.write_text("cookie")
+        x11ctl.cleanup_selftest(str(state_dir), str(xauth))
+        x11ctl.cleanup_selftest(str(state_dir), str(xauth))  # second call should not raise
+        assert not state_dir.exists()
+        assert not xauth.exists()
