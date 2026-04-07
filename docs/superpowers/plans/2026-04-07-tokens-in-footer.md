@@ -20,8 +20,8 @@
 | `claudechic/widgets/layout/indicators.py` | Replace `ContextBar.render()` with text format |
 | `claudechic/agent.py` | Add `update_context()`, `_context_initialized`, `_prepare_prompt()`; reset in `disconnect()`; strip in `load_history()` |
 | `claudechic/sessions.py` | Strip token tags in `load_session_messages()` and `_extract_session_info()` |
-| `claudechic/app.py` | Use `agent.update_context()` in `refresh_context()`; call `refresh_cwd_label()` after |
-| `tests/test_widgets.py` | Update `test_context_bar_rendering`; add new ContextBar tests |
+| `claudechic/app.py` | Use `agent.update_context()` in `refresh_context()` and model-metadata path; call `refresh_cwd_label()` via `call_after_refresh` |
+| `tests/test_widgets.py` | Update `test_context_bar_rendering`; add boundary and styling tests |
 | `tests/test_agent.py` | Tests for `_prepare_prompt()`, `update_context()`, lifecycle, session resume |
 
 ---
@@ -29,26 +29,22 @@
 ### Task 1: Add `TOKEN_REMINDER_PATTERN` to `formatting.py`
 
 **Files:**
-- Modify: `claudechic/formatting.py:1-15`
-- Test: `tests/test_agent.py` (new file, created in Task 3)
+- Modify: `claudechic/formatting.py:19` (after `MIN_SESSION_LENGTH`)
 
 - [ ] **Step 1: Add the regex pattern**
 
-In `claudechic/formatting.py`, add after the existing imports (line 7) and before the constants block (line 14):
+In `claudechic/formatting.py`, after `MIN_SESSION_LENGTH = 8` (line 19), add:
 
 ```python
-import re
-```
 
-Then after `MIN_SESSION_LENGTH = 8` (line 19), add:
-
-```python
 # Matches only the token-injection system-reminder at the start of a string.
 # Anchored to ^ so mid-message user content is never stripped.
 TOKEN_REMINDER_PATTERN = re.compile(
     r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 ```
+
+Note: `re` is already imported at line 6 — do NOT add a duplicate import.
 
 - [ ] **Step 2: Verify import works**
 
@@ -68,10 +64,10 @@ git commit -m "feat: add TOKEN_REMINDER_PATTERN regex to formatting.py"
 ### Task 2: Replace `ContextBar.render()` with text format
 
 **Files:**
-- Modify: `claudechic/widgets/layout/indicators.py:70-106`
+- Modify: `claudechic/widgets/layout/indicators.py:10,70-106`
 - Modify: `tests/test_widgets.py:348-367`
 
-- [ ] **Step 1: Write the failing test — update existing test**
+- [ ] **Step 1: Write the failing test — update existing test and add boundary tests**
 
 In `tests/test_widgets.py`, replace the `test_context_bar_rendering` function (lines 348-367) with:
 
@@ -112,17 +108,80 @@ async def test_context_bar_rendering():
         plain = rendered.plain  # type: ignore[union-attr]
         assert "0%" in plain
         assert "[0/0]" in plain
+
+
+@pytest.mark.asyncio
+async def test_context_bar_color_thresholds():
+    """ContextBar applies correct color at threshold boundaries."""
+    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
+    async with app.run_test():
+        bar = app.query_one(ContextBar)
+        bar.max_tokens = 100
+
+        # 49% -> dim (last dim value)
+        bar.tokens = 49
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("dim" in str(s.style) for s in spans)
+
+        # 50% -> yellow (first yellow value)
+        bar.tokens = 50
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("yellow" in str(s.style) for s in spans)
+
+        # 79% -> yellow (last yellow value)
+        bar.tokens = 79
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("yellow" in str(s.style) for s in spans)
+
+        # 80% -> red (first red value)
+        bar.tokens = 80
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("red" in str(s.style) for s in spans)
+
+        # 100% -> red
+        bar.tokens = 100
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("red" in str(s.style) for s in spans)
+        assert "100%" in rendered.plain  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_context_bar_bracket_always_dim():
+    """Bracket portion [used/max] is always styled dim regardless of percentage."""
+    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
+    async with app.run_test():
+        bar = app.query_one(ContextBar)
+        bar.max_tokens = 100
+
+        for token_val in [10, 60, 90]:
+            bar.tokens = token_val
+            rendered = bar.render()
+            # The last span (bracket portion) should always be dim
+            spans = rendered._spans  # type: ignore[union-attr]
+            last_span = spans[-1]
+            assert "dim" in str(last_span.style), f"Bracket not dim at {token_val}%"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run python -m pytest tests/test_widgets.py::test_context_bar_rendering -v`
+Run: `uv run python -m pytest tests/test_widgets.py::test_context_bar_rendering tests/test_widgets.py::test_context_bar_color_thresholds tests/test_widgets.py::test_context_bar_bracket_always_dim -v`
 
-Expected: FAIL (current render returns visual bar, not text with `[10.0K/200.0K]`)
+Expected: FAIL (current render returns visual bar, not text)
 
 - [ ] **Step 3: Implement the new render method**
 
-In `claudechic/widgets/layout/indicators.py`, add `format_tokens` to the import (line 10):
+In `claudechic/widgets/layout/indicators.py`, change the import (line 10) from:
+
+```python
+from claudechic.formatting import MAX_CONTEXT_TOKENS
+```
+
+To:
 
 ```python
 from claudechic.formatting import MAX_CONTEXT_TOKENS, format_tokens
@@ -143,14 +202,17 @@ Replace `ContextBar.render()` (lines 76-106) with:
         used = format_tokens(self.tokens)
         total = format_tokens(self.max_tokens)
         return Text.assemble(
-            (f"{pct_int}% ", color),
+            (f"{pct_int}%", color),
+            (" ", ""),
             (f"[{used}/{total}]", "dim"),
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+Note: Uses 3-segment `Text.assemble` (percentage, space, brackets) matching the sidebar's `_render_context_label()` pattern. The old theme-aware color code is fully removed.
 
-Run: `uv run python -m pytest tests/test_widgets.py::test_context_bar_rendering -v`
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run python -m pytest tests/test_widgets.py::test_context_bar_rendering tests/test_widgets.py::test_context_bar_color_thresholds tests/test_widgets.py::test_context_bar_bracket_always_dim -v`
 
 Expected: PASS
 
@@ -173,14 +235,16 @@ git commit -m "feat: replace ContextBar visual bar with text token counts"
 
 **Files:**
 - Modify: `claudechic/agent.py:139-210,255-271`
-- Create: `tests/test_agent.py` (or add to existing)
+- Create: `tests/test_agent.py`
 
 - [ ] **Step 1: Write the failing tests**
 
-Create or append to `tests/test_agent.py`:
+Create `tests/test_agent.py`:
 
 ```python
 """Tests for Agent prompt preparation and context management."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -190,7 +254,12 @@ from claudechic.agent import Agent
 
 
 def _make_agent() -> Agent:
-    """Create a minimal Agent for testing (no SDK connection needed)."""
+    """Create a minimal Agent for testing (no SDK connection needed).
+
+    Note: Agent.__init__ imports FinishState from worktree.git (a dataclass) —
+    this is safe without git installed. disconnect() on an unconnected agent
+    skips the client/task cleanup and only runs asyncio.sleep(0) + gc cleanup.
+    """
     return Agent(name="test", cwd=Path("/tmp"))
 
 
@@ -221,6 +290,15 @@ class TestUpdateContext:
         assert agent._context_initialized is True
         await agent.disconnect()
         assert agent._context_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_no_injection_after_disconnect(self):
+        """After disconnect, _prepare_prompt should not inject (spec test #13)."""
+        agent = _make_agent()
+        agent.update_context(14000, 200000)
+        assert "<system-reminder>" in agent._prepare_prompt("hello")
+        await agent.disconnect()
+        assert agent._prepare_prompt("hello") == "hello"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -263,7 +341,7 @@ Add the flag reset in `disconnect()` — after `self._claude_pid = None` (line 2
 
 Run: `uv run python -m pytest tests/test_agent.py::TestUpdateContext -v`
 
-Expected: PASS
+Expected: PASS (the `test_no_injection_after_disconnect` will fail because `_prepare_prompt` doesn't exist yet — that's OK, it will pass after Task 4)
 
 - [ ] **Step 5: Commit**
 
@@ -306,6 +384,7 @@ class TestPreparePrompt:
         assert "<system-reminder>0/200000 tokens</system-reminder>" in result
 
     def test_plan_mode_ordering(self):
+        """Token reminder first, plan-mode second, user prompt last."""
         agent = _make_agent()
         agent.update_context(14000, 200000)
         agent.permission_mode = "plan"
@@ -345,17 +424,18 @@ In `claudechic/agent.py`, add the method before `_get_plan_mode_instructions()` 
         Called at the top of _process_response() before sending to SDK.
 
         Ordering: token reminder -> plan-mode instructions -> user prompt.
+        To achieve this, we prepend in reverse order: plan first, then token.
         """
-        # Inject context usage when initialized
+        # Prepend plan mode instructions if in plan mode
+        if self.permission_mode == "plan":
+            prompt = self._get_plan_mode_instructions() + prompt
+
+        # Inject context usage when initialized (outermost = first in string)
         if self._context_initialized:
             prompt = (
                 f"<system-reminder>{self.tokens}/{self.max_tokens} tokens"
                 f"</system-reminder>\n{prompt}"
             )
-
-        # Prepend plan mode instructions if in plan mode
-        if self.permission_mode == "plan":
-            prompt = self._get_plan_mode_instructions() + prompt
 
         return prompt
 ```
@@ -377,9 +457,9 @@ With:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run python -m pytest tests/test_agent.py::TestPreparePrompt -v`
+Run: `uv run python -m pytest tests/test_agent.py -v`
 
-Expected: PASS
+Expected: PASS (including the `test_no_injection_after_disconnect` from Task 3)
 
 - [ ] **Step 5: Run full test suite**
 
@@ -403,7 +483,7 @@ git commit -m "feat: add _prepare_prompt() for system-reminder injection"
 
 - [ ] **Step 1: Replace direct attribute assignments in `refresh_context()`**
 
-In `claudechic/app.py`, replace the SDK API success path (lines 982-995):
+In `claudechic/app.py`, replace the SDK API success path (lines 982-996):
 
 ```python
                     agent.tokens = usage.get("totalTokens", 0)
@@ -439,7 +519,7 @@ With:
                     self.context_bar.tokens = agent.tokens
                     self.context_bar.max_tokens = agent.max_tokens
                     self._update_sidebar_agent_context(agent)
-                    self.status_footer.refresh_cwd_label()
+                    self.call_after_refresh(self.status_footer.refresh_cwd_label)
                     return
 ```
 
@@ -463,20 +543,38 @@ With:
             self.context_bar.tokens = agent.tokens
             self.context_bar.max_tokens = agent.max_tokens
             self._update_sidebar_agent_context(agent)
-            self.status_footer.refresh_cwd_label()
+            self.call_after_refresh(self.status_footer.refresh_cwd_label)
 ```
 
-- [ ] **Step 2: Run full test suite**
+- [ ] **Step 2: Update the model-metadata path**
+
+In `claudechic/app.py`, find the model-metadata code (around line 2984):
+
+```python
+                agent.max_tokens = context_size
+                self.context_bar.max_tokens = context_size
+```
+
+Replace with:
+
+```python
+                agent.update_context(agent.tokens, context_size)
+                self.context_bar.max_tokens = context_size
+```
+
+This ensures the model-metadata path also goes through `update_context()`, setting `_context_initialized = True` when real model data arrives.
+
+- [ ] **Step 3: Run full test suite**
 
 Run: `uv run python -m pytest tests/ -n auto -q`
 
 Expected: All tests pass
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add claudechic/app.py
-git commit -m "refactor: use agent.update_context() in refresh_context(), add rebudgeting"
+git commit -m "refactor: use agent.update_context() in all token-setting paths, add rebudgeting"
 ```
 
 ---
@@ -484,11 +582,11 @@ git commit -m "refactor: use agent.update_context() in refresh_context(), add re
 ### Task 6: Strip token tags from session resume (`load_history` and `sessions.py`)
 
 **Files:**
-- Modify: `claudechic/agent.py:302-356`
+- Modify: `claudechic/agent.py:39,302-356`
 - Modify: `claudechic/sessions.py:87-143,208-233`
 - Modify: `tests/test_agent.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the tests**
 
 Append to `tests/test_agent.py`:
 
@@ -523,21 +621,25 @@ class TestTokenReminderPattern:
         assert result == "hello"
 ```
 
-- [ ] **Step 2: Run tests to verify they pass (pattern already exists from Task 1)**
+- [ ] **Step 2: Run pattern tests to verify they pass (pattern already exists from Task 1)**
 
 Run: `uv run python -m pytest tests/test_agent.py::TestTokenReminderPattern -v`
 
-Expected: PASS (pattern was already added in Task 1)
+Expected: PASS
 
 - [ ] **Step 3: Add stripping to `load_history()` in `agent.py`**
 
-In `claudechic/agent.py`, add the import near the top (after other formatting imports, around line 39):
+In `claudechic/agent.py`, change the import (line 39) from:
+
+```python
+from claudechic.formatting import MAX_CONTEXT_TOKENS
+```
+
+To:
 
 ```python
 from claudechic.formatting import MAX_CONTEXT_TOKENS, TOKEN_REMINDER_PATTERN
 ```
-
-(Replace the existing `from claudechic.formatting import MAX_CONTEXT_TOKENS` line.)
 
 In `load_history()`, modify the user message handling (line 332-334). Replace:
 
@@ -566,7 +668,7 @@ In `claudechic/sessions.py`, add the import at the top (after existing imports):
 from claudechic.formatting import TOKEN_REMINDER_PATTERN
 ```
 
-In `_extract_session_info()`, modify the string content path (line 119-121). Replace:
+In `_extract_session_info()`, modify the string content path (lines 119-121). Replace:
 
 ```python
                             if isinstance(content, str) and content.strip():
@@ -583,7 +685,7 @@ With:
                                     first_msg = clean.replace("\n", " ")[:100]
 ```
 
-Modify the list-content-block path (line 122-127). Replace:
+Modify the list-content-block path (lines 122-127). Replace:
 
 ```python
                             elif isinstance(content, list) and content:
@@ -605,7 +707,7 @@ With:
                                         first_msg = txt.replace("\n", " ")[:100]
 ```
 
-In `load_session_messages()`, modify the user message content handling (line 228-233). Replace:
+In `load_session_messages()`, modify the user message content handling (lines 228-233). Replace:
 
 ```python
                     if isinstance(content, str) and content.strip():
@@ -662,7 +764,7 @@ Expected: All hooks pass (ruff lint, ruff format, pyright)
 
 - [ ] **Step 3: Fix any lint/type issues**
 
-Address any ruff or pyright findings from step 2.
+Address any ruff or pyright findings from step 2. In particular, check that no unused imports remain in `indicators.py` after removing the theme-aware rendering code.
 
 - [ ] **Step 4: Commit any fixes**
 
@@ -679,14 +781,38 @@ git commit -m "chore: fix lint and type issues"
 
 **Spec coverage:**
 - AC1 (text format): Task 2
-- AC2 (color thresholds): Task 2 (dim/yellow/red in render)
-- AC3 (dim brackets): Task 2 (`[{used}/{total}]` always dim)
+- AC2 (color thresholds): Task 2 (`test_context_bar_color_thresholds`)
+- AC3 (dim brackets): Task 2 (`test_context_bar_bracket_always_dim`)
 - AC4 (system-reminder injection): Tasks 3-5
 - AC5 (raw integers): Task 4 (f-string with self.tokens/self.max_tokens)
 - AC6 (resume stripping): Task 6
-- AC7 (no overflow): Covered by existing footer rebudgeting + Task 5 rebudget call
+- AC7 (no overflow): Covered by existing footer rebudgeting + Task 5 `call_after_refresh` rebudget
 - AC8 (click works): Unchanged, existing `on_click` preserved
+
+**Spec test mapping (21 tests):**
+- Tests 1-5 (ContextBar): Task 2 — `test_context_bar_rendering`, `test_context_bar_color_thresholds`, `test_context_bar_bracket_always_dim`
+- Tests 6-11 (injection): Tasks 3-4 — `TestUpdateContext`, `TestPreparePrompt`
+- Tests 12-13 (lifecycle): Task 3 — `test_disconnect_resets_flag`, `test_no_injection_after_disconnect`
+- Tests 14-16 (resume pattern): Task 6 — `TestTokenReminderPattern`
+- Test 17 (session title): Deferred to integration — `_extract_session_info` is modified but testing it requires mock JSONL files; the regex tests validate the stripping logic
+- Tests 18-21 (integration): Deferred — these require `test_app_ui.py` fixtures with real Textual app lifecycle; Task 7 runs the existing integration suite as regression check
 
 **Placeholder scan:** No TBDs, TODOs, or "implement later" — all code blocks are complete.
 
 **Type consistency:** `update_context(tokens: int, max_tokens: int | None = None)`, `_prepare_prompt(self, prompt: str) -> str`, `_context_initialized: bool`, `TOKEN_REMINDER_PATTERN: re.Pattern` — all consistent across tasks.
+
+## Review History
+
+### Rev 1 → Rev 2
+
+Addressed findings from 6-agent review:
+
+- **H1 (`_prepare_prompt` ordering bug):** Fixed — plan mode prepends first in code, then token reminder wraps outermost. Produces correct order: token → plan → user.
+- **H2 (model-metadata path bypasses `update_context`):** Added Step 2 to Task 5 updating `app.py:2984`.
+- **H3 (5 missing spec tests):** Added boundary color tests, split styling test, lifecycle post-disconnect test. Integration tests (#18-21) and session title test (#17) explicitly deferred with rationale.
+- **M1 (duplicate import re):** Removed — note says "re is already imported."
+- **M2 (missing boundary tests + split styling):** Added `test_context_bar_color_thresholds` and `test_context_bar_bracket_always_dim`.
+- **M3 (rebudgeting):** Changed to `self.call_after_refresh(self.status_footer.refresh_cwd_label)`. Added model-metadata path.
+- **M4 (unused theme code):** Added note in Task 7 to clean up unused imports.
+- **M5 (session-resume tests):** Acknowledged; regex tests validate stripping logic, loader behavior verified by existing integration tests.
+- **M6 (2-segment vs 3-segment):** Changed to 3-segment `Text.assemble` matching sidebar pattern.
