@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -206,8 +207,10 @@ class TestAcceptanceCriteria:
         # Check sockstat for the port — LOCAL ADDRESS should be 127.0.0.1, not *
         # sockstat format: USER COMMAND PID FD PROTO LOCAL_ADDRESS FOREIGN_ADDRESS
         # Use -4 to filter to IPv4 TCP only (excludes Unix domain sockets)
+        # Use absolute path to match x11ctl's hardening pattern (prevents
+        # PATH hijacking from feeding bogus output to the security test).
         check = subprocess.run(
-            ["sockstat", "-4", "-l", "-p", str(port)],
+            ["/usr/bin/sockstat", "-4", "-l", "-p", str(port)],
             capture_output=True, text=True, timeout=5,
         )
         found_listener = False
@@ -238,11 +241,10 @@ class TestAcceptanceCriteria:
 
         # Build a PATH that has python3 but NOT Xvfb, by filtering out
         # the directory containing Xvfb from the current PATH.
-        import sys as _sys
         xvfb_path = shutil.which("Xvfb")
         assert xvfb_path is not None, "Xvfb must be installed (module-level skip should catch this)"
         xvfb_dir = os.path.dirname(xvfb_path)
-        python_dir = os.path.dirname(_sys.executable)
+        python_dir = os.path.dirname(sys.executable)
         # Keep all PATH dirs except the one containing Xvfb
         current_dirs = os.environ.get("PATH", "").split(":")
         restricted_dirs = [d for d in current_dirs if d != xvfb_dir]
@@ -252,8 +254,7 @@ class TestAcceptanceCriteria:
         env["PATH"] = ":".join(restricted_dirs)
 
         # Verify Xvfb is actually gone from restricted PATH
-        import subprocess as _sp
-        which_check = _sp.run(
+        which_check = subprocess.run(
             ["which", "Xvfb"], capture_output=True, text=True,
             env={**os.environ, "PATH": env["PATH"]},
         )
