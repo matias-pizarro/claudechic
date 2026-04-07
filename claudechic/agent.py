@@ -189,6 +189,7 @@ class Agent:
         self.max_tokens: int = (
             MAX_CONTEXT_TOKENS  # Context window size (updated from model info)
         )
+        self._context_initialized: bool = False  # Set by update_context()
 
         # Worktree finish state (for /worktree finish flow)
         self.finish_state: FinishState | None = None
@@ -213,6 +214,18 @@ class Agent:
 
         # Checkpoint tracking for /rewind command (UUIDs of user messages)
         self.checkpoint_uuids: list[str] = []
+
+    def update_context(self, tokens: int, max_tokens: int | None = None) -> None:
+        """Atomically update token state and mark context as initialized.
+
+        Args:
+            tokens: Current context token usage.
+            max_tokens: Context window size. If None, preserves existing value.
+        """
+        self.tokens = tokens
+        if max_tokens is not None:
+            self.max_tokens = max_tokens
+        self._context_initialized = True
 
     @property
     def analytics_id(self) -> str:
@@ -269,6 +282,7 @@ class Agent:
                 pass
             self.client = None
         self._claude_pid = None
+        self._context_initialized = False
 
         # IMPORTANT: This cleanup is critical - do not remove!
         # See .ai-docs/anyio-cancel-scope-bug.md for full explanation.
