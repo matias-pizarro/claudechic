@@ -22,7 +22,10 @@ pytestmark = [
 
 
 class TestAcceptanceCriteria:
-    """All 11 acceptance criteria from the design spec."""
+    """Acceptance criteria AC1-AC7 from the design spec.
+
+    AC8-AC11 are in Task 3 (same file, added later).
+    """
 
     def test_ac1_run_xdpyinfo(self, display_factory):
         """AC1: x11ctl run xdpyinfo exits 0."""
@@ -46,6 +49,8 @@ class TestAcceptanceCriteria:
 
     def test_ac3_screenshot_produces_png(self, display_factory, tmp_path):
         """AC3: screenshot produces valid PNG."""
+        if shutil.which("import") is None:
+            pytest.skip("ImageMagick import not installed")
         env = display_factory
         x11ctl_run(["start", "--headless"], env_overrides=env)
 
@@ -151,6 +156,8 @@ class TestAcceptanceCriteria:
                 break  # Process is gone
             time.sleep(0.1)
 
-        # Degraded
+        # Degraded — exit 1 and stderr should indicate the dead component
         r2 = x11ctl_run(["status"], env_overrides=env)
-        assert r2.returncode == 1
+        assert r2.returncode == 1, f"Expected degraded status (exit 1), got {r2.returncode}"
+        assert "down" in r2.stderr.lower() or "dead" in r2.stderr.lower(), \
+            f"Expected 'down' or 'dead' in stderr, got: {r2.stderr}"
