@@ -69,5 +69,11 @@ exclude = ["build", ".venv", "dist", "site", "**/__pycache__"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: integration tests requiring X11 binaries (Xvfb, xpra, etc.)",
+]
+# Integration tests excluded by default (run with: pytest -m integration)
+# This prevents accidental parallel runs with pytest-xdist
+addopts = "-m 'not integration'"
 
 [tool.setuptools_scm]
