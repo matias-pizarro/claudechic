@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import x11ctl_run, assert_port_listening, assert_port_free, read_state_file
+from .conftest import x11ctl_run, assert_port_listening, assert_port_free, read_state_file, parse_pidfile
 
 pytestmark = [
     pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed"),
@@ -89,33 +89,45 @@ class TestAcceptanceCriteria:
     def test_ac6_start_stop_start_idempotent(self, display_factory):
         """AC6: start/stop/start cycle is idempotent, no stale PIDs."""
         env = display_factory
+        pidfile = os.path.join(
+            env["state_dir"],
+            f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
+        )
 
         # First start
         r1 = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert r1.returncode == 0
 
-        pid1 = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
-        assert pid1 is not None
+        content1 = read_state_file(pidfile)
+        assert content1 is not None
+        entry1 = parse_pidfile(content1)
+        assert entry1 is not None
 
         # Stop
         r2 = x11ctl_run(["stop"], env_overrides=env)
         assert r2.returncode == 0
 
-        # Verify stopped
-        assert read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid")) is None
+        # Verify stopped — pidfile should be removed
+        assert read_state_file(pidfile) is None
 
         # Second start
         r3 = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert r3.returncode == 0
 
-        pid2 = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
-        assert pid2 is not None
+        content2 = read_state_file(pidfile)
+        assert content2 is not None
+        entry2 = parse_pidfile(content2)
+        assert entry2 is not None
         # Different PID after restart
-        assert pid1.split()[0] != pid2.split()[0]
+        assert entry1.pid != entry2.pid
 
     def test_ac7_status_healthy_and_degraded(self, display_factory):
         """AC7: status exits 0 healthy, 1 when component killed."""
         env = display_factory
+        pidfile = os.path.join(
+            env["state_dir"],
+            f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
+        )
 
         x11ctl_run(["start", "--headless"], env_overrides=env)
 
@@ -124,11 +136,20 @@ class TestAcceptanceCriteria:
         assert r1.returncode == 0
 
         # Kill Xvfb
-        pidfile_content = read_state_file(os.path.join(env["state_dir"], f"{env.get('X11CTL_STATE_PREFIX', '.x11ctl')}-xvfb.pid"))
-        assert pidfile_content is not None
-        xvfb_pid = int(pidfile_content.split()[0])
-        os.kill(xvfb_pid, signal.SIGKILL)
-        time.sleep(0.5)
+        content = read_state_file(pidfile)
+        assert content is not None
+        entry = parse_pidfile(content)
+        assert entry is not None
+        os.kill(entry.pid, signal.SIGKILL)
+
+        # Poll until process is gone (avoids fixed sleep flakiness)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(entry.pid, 0)  # Check if still alive
+            except ProcessLookupError:
+                break  # Process is gone
+            time.sleep(0.1)
 
         # Degraded
         r2 = x11ctl_run(["status"], env_overrides=env)
