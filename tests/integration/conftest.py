@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SCRIPT = str(Path(__file__).parent.parent.parent / "scripts" / "x11ctl")
-assert Path(SCRIPT).is_file(), f"x11ctl script not found at {SCRIPT}"
+if not Path(SCRIPT).is_file():
+    raise RuntimeError(f"x11ctl script not found at {SCRIPT}")
 
 # Display range for test isolation. 120 slots should be ample for any
 # single-session test suite (current plan: ~25 tests).
@@ -67,11 +68,17 @@ def x11ctl_run(
     Returns CompletedProcess. All tests use this instead of raw subprocess.run.
     Automatically sets X11CTL_ALLOW_HOST=1 for jail guard bypass in dev.
 
-    Only keys starting with ``X11CTL_`` or ``PATH`` are forwarded from
-    env_overrides — convenience keys (display_num, state_dir) are excluded
-    explicitly rather than via type-sniffing.
+    Env construction:
+    1. Start with a sanitised copy of os.environ (all pre-existing X11CTL_*
+       vars stripped to prevent the developer's shell from leaking config).
+    2. Set X11CTL_ALLOW_HOST=1 for jail guard bypass.
+    3. Apply env_overrides, skipping convenience keys (display_num, state_dir)
+       and non-string values.
     """
-    env = {**os.environ, "X11CTL_ALLOW_HOST": "1"}
+    # Strip pre-existing X11CTL_* from parent env to prevent bleed-through
+    # (e.g., X11CTL_BIND=0.0.0.0 in the developer's shell).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
+    env["X11CTL_ALLOW_HOST"] = "1"
     if env_overrides:
         env.update({
             k: v for k, v in env_overrides.items()
@@ -236,7 +243,12 @@ def display_factory(tmp_path):
 
 
 def _kill_pidfiles_in_dir(state_dir: str, state_prefix: str) -> None:
-    """Read pidfiles matching state_prefix in state_dir and SIGKILL each PID."""
+    """Read pidfiles matching state_prefix in state_dir and SIGKILL each PID.
+
+    Like read_state_file, this deliberately bypasses x11ctl's symlink safety
+    checks (O_NOFOLLOW, fstat).  The state_dir is a pytest tmp_path, so
+    symlink attacks are unrealistic in the test context.
+    """
     for pidfile in glob.glob(os.path.join(state_dir, f"{state_prefix}-*.pid")):
         try:
             content = Path(pidfile).read_text().strip()
@@ -261,11 +273,16 @@ def session_cleanup():
     """
     yield  # Tests run here
 
-    # Brute-force: find and kill any remaining X11 processes on test displays
+    # Brute-force: find and kill any remaining X11 processes on test displays.
+    # Build a set of display args for O(1) lookup instead of O(displays) per line.
+    _display_args = frozenset(f":{d}" for d in DISPLAY_RANGE)
+    _x11_names = ("Xvfb", "xpra", "x11vnc", "websockify")
     try:
         result = subprocess.run(
             ["/bin/ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=5
         )
+        if result.returncode != 0:
+            logger.warning("ps failed (rc=%d): %s", result.returncode, result.stderr[:200])
         for line in result.stdout.splitlines()[1:]:  # skip header
             line = line.strip()
             if not line:
@@ -275,20 +292,18 @@ def session_cleanup():
                 continue
             args_str = " ".join(parts[1:])
             args_list = parts[1:]
-            for display_num in DISPLAY_RANGE:
-                display_arg = f":{display_num}"
-                # Match display number as a standalone argument, not a substring
-                if display_arg in args_list and any(
-                    name in args_str for name in ["Xvfb", "xpra", "x11vnc", "websockify"]
-                ):
-                    try:
-                        pid = int(parts[0])
-                        os.kill(pid, signal.SIGKILL)
-                        logger.info(
-                            "session_cleanup killed orphan PID %d (%s)", pid, args_str[:80]
-                        )
-                    except (ProcessLookupError, PermissionError, ValueError):
-                        pass
+            # Match if any argument is a test display AND process is X11-related
+            if any(a in _display_args for a in args_list) and any(
+                name in args_str for name in _x11_names
+            ):
+                try:
+                    pid = int(parts[0])
+                    os.kill(pid, signal.SIGKILL)
+                    logger.info(
+                        "session_cleanup killed orphan PID %d (%s)", pid, args_str[:80]
+                    )
+                except (ProcessLookupError, PermissionError, ValueError):
+                    pass
     except Exception:
         logger.warning("session_cleanup ps scan failed", exc_info=True)
 
