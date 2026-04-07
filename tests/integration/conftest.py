@@ -2,6 +2,16 @@
 
 Every test invokes scripts/x11ctl as a subprocess. No x11ctl module imports.
 Each test gets a unique display number for isolation.
+
+Test isolation relies on these x11ctl env vars (test-only escape hatches,
+NOT part of the public API — subject to change without notice):
+  X11CTL_STATE_DIR    — directory for pidfiles, tiers, lock (default: /tmp)
+  X11CTL_STATE_PREFIX — filename prefix for state files (default: .x11ctl)
+  X11CTL_DISPLAY      — X display number (default: :99)
+  X11CTL_XAUTH        — xauth file path
+  X11CTL_XPRA_PORT    — xpra HTML5 client port
+  X11CTL_VNC_PORT     — x11vnc port
+  X11CTL_NOVNC_PORT   — noVNC/websockify port
 """
 import glob
 import logging
