@@ -7,7 +7,7 @@ from textual.reactive import reactive
 from textual.widgets import Static
 from rich.text import Text
 
-from claudechic.formatting import MAX_CONTEXT_TOKENS
+from claudechic.formatting import MAX_CONTEXT_TOKENS, format_tokens
 from claudechic.profiling import profile, timed
 from claudechic.processes import BackgroundProcess
 
@@ -75,35 +75,20 @@ class ContextBar(IndicatorWidget):
 
     def render(self) -> RenderResult:
         pct = min(self.tokens / self.max_tokens, 1.0) if self.max_tokens else 0
-        bar_width = 10
-        filled = int(pct * bar_width)
-        # Fill color intensifies as context usage grows
-        theme = self.app.current_theme
-        warning = theme.warning if isinstance(theme.warning, str) else "#aaaa00"
-        error = theme.error if isinstance(theme.error, str) else "#cc3333"
-        # Theme-aware colors
-        if theme.dark:
-            low_fill, empty_color, empty_text = "#666666", "#333333", "white"
-        else:
-            low_fill, empty_color, empty_text = "#999999", "#dddddd", "black"
+        pct_int = int(pct * 100)
         if pct < 0.5:
-            fill_color, text_color = low_fill, empty_text
+            color = "dim"
         elif pct < 0.8:
-            fill_color, text_color = warning, "black"
+            color = "yellow"
         else:
-            fill_color, text_color = error, "white"
-        # Center percentage text in bar
-        pct_str = f"{pct * 100:.0f}%"
-        start = (bar_width - len(pct_str)) // 2
-        result = Text()
-        for i in range(bar_width):
-            bg = fill_color if i < filled else empty_color
-            if start <= i < start + len(pct_str):
-                fg = text_color if i < filled else empty_text
-                result.append(pct_str[i - start], style=f"{fg} on {bg}")
-            else:
-                result.append(" ", style=f"on {bg}")
-        return result
+            color = "red"
+        used = format_tokens(self.tokens)
+        total = format_tokens(self.max_tokens)
+        return Text.assemble(
+            (f"{pct_int}%", color),
+            (" ", ""),
+            (f"[{used}/{total}]", "dim"),
+        )
 
     def on_click(self, event) -> None:
         """Run /context command on click."""

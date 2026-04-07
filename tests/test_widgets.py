@@ -347,23 +347,97 @@ async def test_plan_section():
 
 @pytest.mark.asyncio
 async def test_context_bar_rendering():
-    """ContextBar shows correct fill and color."""
+    """ContextBar shows text format with percentage and token counts."""
     app = WidgetTestApp(lambda: ContextBar(id="ctx"))
     async with app.run_test():
         bar = app.query_one(ContextBar)
 
-        # Low usage - should be dim
+        # Low usage (5%) — dim color, text format
         bar.tokens = 10000
         bar.max_tokens = 200000
         rendered = bar.render()
         assert hasattr(rendered, "plain")
-        assert "5%" in rendered.plain  # type: ignore[union-attr]
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "5%" in plain
+        assert "[10.0K/200.0K]" in plain
 
-        # High usage - should be red
+        # High usage (90%) — red color, text format
         bar.tokens = 180000
         rendered = bar.render()
-        assert hasattr(rendered, "plain")
-        assert "90%" in rendered.plain  # type: ignore[union-attr]
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "90%" in plain
+        assert "[180.0K/200.0K]" in plain
+
+        # Zero tokens
+        bar.tokens = 0
+        rendered = bar.render()
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "0%" in plain
+        assert "[0/200.0K]" in plain
+
+        # Division safety: max_tokens=0
+        bar.max_tokens = 0
+        rendered = bar.render()
+        plain = rendered.plain  # type: ignore[union-attr]
+        assert "0%" in plain
+        assert "[0/0]" in plain
+
+
+@pytest.mark.asyncio
+async def test_context_bar_color_thresholds():
+    """ContextBar applies correct color at threshold boundaries."""
+    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
+    async with app.run_test():
+        bar = app.query_one(ContextBar)
+        bar.max_tokens = 100
+
+        # 49% -> dim (last dim value)
+        bar.tokens = 49
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("dim" in str(s.style) for s in spans)
+
+        # 50% -> yellow (first yellow value)
+        bar.tokens = 50
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("yellow" in str(s.style) for s in spans)
+
+        # 79% -> yellow (last yellow value)
+        bar.tokens = 79
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("yellow" in str(s.style) for s in spans)
+
+        # 80% -> red (first red value)
+        bar.tokens = 80
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("red" in str(s.style) for s in spans)
+
+        # 100% -> red
+        bar.tokens = 100
+        rendered = bar.render()
+        spans = rendered._spans  # type: ignore[union-attr]
+        assert any("red" in str(s.style) for s in spans)
+        assert "100%" in rendered.plain  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_context_bar_bracket_always_dim():
+    """Bracket portion [used/max] is always styled dim regardless of percentage."""
+    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
+    async with app.run_test():
+        bar = app.query_one(ContextBar)
+        bar.max_tokens = 100
+
+        for token_val in [10, 60, 90]:
+            bar.tokens = token_val
+            rendered = bar.render()
+            # The last span (bracket portion) should always be dim
+            spans = rendered._spans  # type: ignore[union-attr]
+            last_span = spans[-1]
+            assert "dim" in str(last_span.style), f"Bracket not dim at {token_val}%"
 
 
 @pytest.mark.asyncio
