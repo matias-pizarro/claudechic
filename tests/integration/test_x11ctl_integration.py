@@ -6,6 +6,7 @@ Requires Xvfb and related X11 binaries to be installed.
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -175,7 +176,6 @@ class TestAcceptanceCriteria:
             pytest.skip("xpra not installed")
 
         # Occupy the xpra port
-        import socket
         port = int(env["X11CTL_XPRA_PORT"])
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -210,12 +210,16 @@ class TestAcceptanceCriteria:
             ["sockstat", "-4", "-l", "-p", str(port)],
             capture_output=True, text=True, timeout=5,
         )
+        found_listener = False
         for line in check.stdout.splitlines()[1:]:  # skip header
             parts = line.split()
             if len(parts) >= 6 and str(port) in parts[5]:
+                found_listener = True
                 local_addr = parts[5]  # e.g., "127.0.0.1:10080" or "*:10080"
                 assert local_addr.startswith("127.0.0.1:"), \
                     f"Port {port} bound to non-localhost: {local_addr} (full line: {line})"
+        assert found_listener, \
+            f"sockstat found no listener on port {port}: {check.stdout}"
 
     def test_ac10_xauth_mode_0600(self, display_factory):
         """AC10: xauth file created with mode 0600."""
@@ -232,12 +236,29 @@ class TestAcceptanceCriteria:
         """AC11: missing dependency produces clear error listing install command."""
         env = {**display_factory}
 
-        # Construct a PATH that has python3 but NOT Xvfb.
+        # Build a PATH that has python3 but NOT Xvfb, by filtering out
+        # the directory containing Xvfb from the current PATH.
         import sys as _sys
+        xvfb_path = shutil.which("Xvfb")
+        assert xvfb_path is not None, "Xvfb must be installed (module-level skip should catch this)"
+        xvfb_dir = os.path.dirname(xvfb_path)
         python_dir = os.path.dirname(_sys.executable)
-        # Include python dir + basic system dirs, exclude Xvfb location
-        restricted_path = f"{python_dir}:/usr/bin:/bin"
-        env["PATH"] = restricted_path
+        # Keep all PATH dirs except the one containing Xvfb
+        current_dirs = os.environ.get("PATH", "").split(":")
+        restricted_dirs = [d for d in current_dirs if d != xvfb_dir]
+        # Ensure python3 is still reachable
+        if python_dir not in restricted_dirs:
+            restricted_dirs.insert(0, python_dir)
+        env["PATH"] = ":".join(restricted_dirs)
+
+        # Verify Xvfb is actually gone from restricted PATH
+        import subprocess as _sp
+        which_check = _sp.run(
+            ["which", "Xvfb"], capture_output=True, text=True,
+            env={**os.environ, "PATH": env["PATH"]},
+        )
+        if which_check.returncode == 0:
+            pytest.skip(f"Cannot hide Xvfb (also in {which_check.stdout.strip()})")
 
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert result.returncode != 0
