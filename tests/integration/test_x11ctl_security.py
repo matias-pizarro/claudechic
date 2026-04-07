@@ -99,9 +99,15 @@ class TestSecurityAttacks:
 
         os.mkfifo(lock_path)
         try:
-            # Should timeout quickly (not hang on FIFO)
+            # Should timeout quickly (not hang on FIFO).
+            # acquire_lock opens with O_NONBLOCK, gets ENXIO on the FIFO,
+            # catches OSError, and returns None → "another operation in progress".
             result = x11ctl_run(["start", "--headless"], env_overrides=env, timeout=10)
             assert result.returncode != 0
+            # Verify rejection was through the lock-acquisition path
+            assert "lock" in result.stderr.lower() or "another" in result.stderr.lower() \
+                or "operation" in result.stderr.lower(), \
+                f"Expected lock-related error in stderr: {result.stderr}"
         finally:
             try:
                 os.unlink(lock_path)
@@ -133,7 +139,13 @@ class TestSecurityAttacks:
                 pass
 
     def test_symlink_at_x_socket(self, display_factory, tmp_path):
-        """Symlink at X socket path: stale cleanup should fail closed."""
+        """Symlink at X socket path: stale cleanup should fail closed.
+
+        NOTE: This test creates a symlink in the shared /tmp/.X11-unix/
+        directory (outside tmp_path). Cleanup is handled by both the test's
+        finally block and the display_factory fixture finalizer. Sequential
+        display numbering prevents same-run collision.
+        """
         env = display_factory
         display_num = env["display_num"]
         socket_dir = Path("/tmp/.X11-unix")
