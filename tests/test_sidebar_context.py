@@ -57,7 +57,9 @@ class TestAgentItemContextLabel:
     def test_update_context_sets_values(self):
         """update_context() sets internal state correctly."""
         item = AgentItem("id1", "main", AgentStatus.IDLE)
-        item.update_context(cwd="/home/user/project", tokens=75_000, max_tokens=1_000_000)
+        item.update_context(
+            cwd="/home/user/project", tokens=75_000, max_tokens=1_000_000
+        )
         assert item._cwd == "/home/user/project"
         assert item._tokens == 75_000
         assert item._max_tokens == 1_000_000

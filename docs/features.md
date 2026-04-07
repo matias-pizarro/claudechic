@@ -72,3 +72,21 @@ Claude Chic collects anonymous usage analytics to help improve the project. You 
 ```
 
 Analytics are **opt-in by default** for new installations. Data collected includes feature usage patterns (which commands are used) but never conversation content.
+
+## Context Awareness
+
+The footer displays real-time context window usage as text with a color-coded background:
+
+```
+ 32% [14.0K/200.0K]
+```
+
+The background uses a smooth gradient that intensifies with usage:
+- **0%** — Deep green (`#117733`)
+- **30%** — Orange (`#CC7700`)
+- **50%** — Red (`#CC3333`)
+- **100%** — Dark crimson (`#661111`)
+
+Click the context bar to run `/context` for detailed token breakdown.
+
+Additionally, every prompt sent to Claude includes a system-reminder with the current token count (e.g., `<system-reminder>14000/200000 tokens</system-reminder>`). This gives the model awareness of context window pressure, allowing operator instructions to guide behavior at different saturation levels.

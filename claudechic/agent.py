@@ -36,7 +36,7 @@ from claude_agent_sdk.types import (
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
 from claudechic.features.worktree.git import FinishState
 from claudechic.file_index import FileIndex
-from claudechic.formatting import MAX_CONTEXT_TOKENS
+from claudechic.formatting import MAX_CONTEXT_TOKENS, TOKEN_REMINDER_PATTERN
 from claudechic.permissions import PermissionRequest
 from claudechic.sessions import get_plan_path_for_session
 from claudechic.tasks import create_safe_task
@@ -189,6 +189,7 @@ class Agent:
         self.max_tokens: int = (
             MAX_CONTEXT_TOKENS  # Context window size (updated from model info)
         )
+        self._context_initialized: bool = False  # Set by update_context()
 
         # Worktree finish state (for /worktree finish flow)
         self.finish_state: FinishState | None = None
@@ -213,6 +214,18 @@ class Agent:
 
         # Checkpoint tracking for /rewind command (UUIDs of user messages)
         self.checkpoint_uuids: list[str] = []
+
+    def update_context(self, tokens: int, max_tokens: int | None = None) -> None:
+        """Atomically update token state and mark context as initialized.
+
+        Args:
+            tokens: Current context token usage.
+            max_tokens: Context window size. If None, preserves existing value.
+        """
+        self.tokens = tokens
+        if max_tokens is not None:
+            self.max_tokens = max_tokens
+        self._context_initialized = True
 
     @property
     def analytics_id(self) -> str:
@@ -269,6 +282,7 @@ class Agent:
                 pass
             self.client = None
         self._claude_pid = None
+        self._context_initialized = False
 
         # IMPORTANT: This cleanup is critical - do not remove!
         # See .ai-docs/anyio-cancel-scope-bug.md for full explanation.
@@ -328,9 +342,10 @@ class Agent:
                         ChatItem(role="assistant", content=current_assistant)
                     )
                     current_assistant = None
-                # Add user message
+                # Add user message (strip injected token reminder from wire format)
+                clean_text = TOKEN_REMINDER_PATTERN.sub("", m["content"])
                 self.messages.append(
-                    ChatItem(role="user", content=UserContent(text=m["content"]))
+                    ChatItem(role="user", content=UserContent(text=clean_text))
                 )
             elif m["type"] == "assistant":
                 # Add text block to current assistant content (preserving order)
@@ -445,6 +460,28 @@ class Agent:
     # Response processing
     # -----------------------------------------------------------------------
 
+    def _prepare_prompt(self, prompt: str) -> str:
+        """Augment prompt with system-reminder and plan-mode instructions.
+
+        Side-effect-free: reads self state but does not mutate anything.
+        Called at the top of _process_response() before sending to SDK.
+
+        Ordering: token reminder -> plan-mode instructions -> user prompt.
+        To achieve this, we prepend in reverse order: plan first, then token.
+        """
+        # Prepend plan mode instructions if in plan mode
+        if self.permission_mode == "plan":
+            prompt = self._get_plan_mode_instructions() + prompt
+
+        # Inject context usage when initialized (outermost = first in string)
+        if self._context_initialized:
+            prompt = (
+                f"<system-reminder>{self.tokens}/{self.max_tokens} tokens"
+                f"</system-reminder>\n{prompt}"
+            )
+
+        return prompt
+
     def _get_plan_mode_instructions(self) -> str:
         """Get plan mode instructions with the plan file path.
 
@@ -481,9 +518,8 @@ Key Rules:
     async def _process_response(self, prompt: str) -> None:
         """Process SDK response stream."""
         try:
-            # Prepend plan mode instructions if in plan mode
-            if self.permission_mode == "plan":
-                prompt = self._get_plan_mode_instructions() + prompt
+            # Augment prompt with token reminder and plan-mode instructions
+            prompt = self._prepare_prompt(prompt)
 
             # Send message with images if any
             if self.pending_images:

@@ -9,7 +9,13 @@ from textual.reactive import reactive
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-from claudechic.formatting import format_cwd, format_session_id, MIN_CWD_LENGTH, MAX_CWD_LENGTH, MIN_SESSION_LENGTH
+from claudechic.formatting import (
+    format_cwd,
+    format_session_id,
+    MIN_CWD_LENGTH,
+    MAX_CWD_LENGTH,
+    MIN_SESSION_LENGTH,
+)
 from claudechic.widgets.base.clickable import ClickableLabel
 from claudechic.widgets.layout.indicators import CPUBar, ContextBar, ProcessIndicator
 from claudechic.processes import BackgroundProcess
@@ -139,7 +145,9 @@ class StatusFooter(Static):
             yield ContextBar(id="context-bar")
             yield CPUBar(id="cpu-bar")
             yield Static("", id="cwd-label", classes="footer-label hidden")
-            yield SessionIndicator("", id="session-label", classes="footer-label hidden")
+            yield SessionIndicator(
+                "", id="session-label", classes="footer-label hidden"
+            )
             yield Static("", id="branch-label", classes="footer-label")
 
     def set_cwd(self, cwd: str) -> None:
@@ -246,7 +254,9 @@ class StatusFooter(Static):
                 session_label.add_class("hidden")
             else:
                 assert self._session_id is not None  # narrowed by has_session guard
-                session_label.update(format_session_id(self._session_id, session_budget))
+                session_label.update(
+                    format_session_id(self._session_id, session_budget)
+                )
                 session_label.remove_class("hidden")
 
     def watch_branch(self, value: str) -> None:
