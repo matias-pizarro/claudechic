@@ -6,14 +6,13 @@ Requires Xvfb and related X11 binaries to be installed.
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from .conftest import x11ctl_run, assert_port_listening, assert_port_free, read_state_file, parse_pidfile
+from .conftest import x11ctl_run, assert_port_listening, read_state_file, parse_pidfile
 
 pytestmark = [
     pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed"),
@@ -52,7 +51,8 @@ class TestAcceptanceCriteria:
         if shutil.which("import") is None:
             pytest.skip("ImageMagick import not installed")
         env = display_factory
-        x11ctl_run(["start", "--headless"], env_overrides=env)
+        setup = x11ctl_run(["start", "--headless"], env_overrides=env)
+        assert setup.returncode == 0, f"setup start failed: {setup.stderr}"
 
         out_path = str(tmp_path / "test.png")
         result = x11ctl_run(["screenshot", out_path], env_overrides=env)
@@ -134,7 +134,8 @@ class TestAcceptanceCriteria:
             f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
         )
 
-        x11ctl_run(["start", "--headless"], env_overrides=env)
+        setup = x11ctl_run(["start", "--headless"], env_overrides=env)
+        assert setup.returncode == 0, f"setup start failed: {setup.stderr}"
 
         # Healthy
         r1 = x11ctl_run(["status"], env_overrides=env)
