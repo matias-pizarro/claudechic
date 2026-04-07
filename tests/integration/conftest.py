@@ -72,8 +72,8 @@ def x11ctl_run(
     1. Start with a sanitised copy of os.environ (all pre-existing X11CTL_*
        vars stripped to prevent the developer's shell from leaking config).
     2. Set X11CTL_ALLOW_HOST=1 for jail guard bypass.
-    3. Apply env_overrides, skipping convenience keys (display_num, state_dir)
-       and non-string values.
+    3. Apply env_overrides, skipping convenience keys listed in
+       ``_CONVENIENCE_KEYS``.
     """
     # Strip pre-existing X11CTL_* from parent env to prevent bleed-through
     # (e.g., X11CTL_BIND=0.0.0.0 in the developer's shell).
@@ -83,7 +83,6 @@ def x11ctl_run(
         env.update({
             k: v for k, v in env_overrides.items()
             if k not in _CONVENIENCE_KEYS
-            and isinstance(v, str)
         })
     return subprocess.run(
         [SCRIPT] + args,
@@ -128,19 +127,25 @@ def assert_port_free(host: str, port: int, timeout: float = 15.0) -> None:
 def parse_pidfile(content: str) -> PidfileEntry | None:
     """Parse pidfile content into (pid, epoch) or None on malformed data.
 
-    Expected format: "{pid} {epoch}\\n" (two space-separated ints).
-    This centralises the format assumption so callers do not need to
-    repeat ``int(content.split()[0])``.
+    Mirrors x11ctl's ``read_pidfile`` validation:
+    - Exactly two space-separated fields
+    - pid >= 1  (pid < 1 would cause os.kill to target process groups)
+    - epoch >= 0
     """
     try:
         parts = content.strip().split()
-        return PidfileEntry(pid=int(parts[0]), epoch=int(parts[1]))
+        if len(parts) != 2:
+            return None
+        pid, epoch = int(parts[0]), int(parts[1])
+        if pid < 1 or epoch < 0:
+            return None
+        return PidfileEntry(pid=pid, epoch=epoch)
     except (IndexError, ValueError):
         return None
 
 
 def read_state_file(path: str) -> str | None:
-    """Read a state file directly. Returns content or None.
+    """Read a state file directly. Returns stripped content or None.
 
     This is a deliberate side-channel observation — it reads state files
     without x11ctl's safety checks (O_NOFOLLOW, fstat, ownership).
@@ -148,6 +153,11 @@ def read_state_file(path: str) -> str | None:
     Assumed pidfile format: "{pid} {epoch}\\n" (two space-separated ints).
     If x11ctl changes this format, ``parse_pidfile`` and callers must be
     updated.
+
+    NOTE: Content is strip()'d, so trailing whitespace/newline variations
+    are normalised.  This is an accepted trade-off for test convenience —
+    format-drift in whitespace would not be detected by tests using this
+    helper.
     """
     try:
         return Path(path).read_text().strip()
@@ -252,9 +262,15 @@ def _kill_pidfiles_in_dir(state_dir: str, state_prefix: str) -> None:
     for pidfile in glob.glob(os.path.join(state_dir, f"{state_prefix}-*.pid")):
         try:
             content = Path(pidfile).read_text().strip()
-            entry = parse_pidfile(content)
-            if entry is not None:
-                os.kill(entry.pid, signal.SIGKILL)
+        except OSError:
+            logger.warning("Failed to read pidfile %s", pidfile, exc_info=True)
+            continue
+        entry = parse_pidfile(content)
+        if entry is None:
+            logger.warning("Malformed pidfile %s: %r", pidfile, content)
+            continue
+        try:
+            os.kill(entry.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
@@ -307,19 +323,16 @@ def session_cleanup():
     except Exception:
         logger.warning("session_cleanup ps scan failed", exc_info=True)
 
-    # Clean up stale flat /tmp files (xauth, X lock, X socket)
-    for display_num in DISPLAY_RANGE:
-        for pattern in [
-            f"/tmp/.x11ctl-test-{display_num}*",
-            f"/tmp/.X{display_num}-lock",
-        ]:
-            for f in glob.glob(pattern):
-                try:
-                    os.unlink(f)
-                except OSError:
-                    pass
-        socket_path = f"/tmp/.X11-unix/X{display_num}"
+    # Clean up stale flat /tmp files using consolidated globs instead of
+    # per-display-number iteration (120 displays → 2 globs + filter).
+    for f in glob.glob("/tmp/.x11ctl-test-*"):
         try:
-            os.unlink(socket_path)
+            os.unlink(f)
         except OSError:
             pass
+    for display_num in DISPLAY_RANGE:
+        for path in [f"/tmp/.X{display_num}-lock", f"/tmp/.X11-unix/X{display_num}"]:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
