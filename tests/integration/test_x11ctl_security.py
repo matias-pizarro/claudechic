@@ -6,7 +6,6 @@ Every test invokes scripts/x11ctl as a subprocess.
 import os
 import shutil
 import stat
-import time
 from pathlib import Path
 
 import pytest
@@ -132,6 +131,10 @@ class TestSecurityAttacks:
             result = x11ctl_run(["start", "--headless"], env_overrides=env, timeout=15)
             assert result.returncode == 0, \
                 f"Expected start to succeed (FIFO pidfile treated as absent): {result.stderr}"
+            # Verify Xvfb actually started (new regular pidfile should exist)
+            new_content = read_state_file(pidfile_path)
+            assert new_content is not None, \
+                "Expected new pidfile after FIFO was rejected and Xvfb started"
         finally:
             try:
                 os.unlink(pidfile_path)
@@ -151,15 +154,20 @@ class TestSecurityAttacks:
         socket_dir = Path("/tmp/.X11-unix")
         socket_path = socket_dir / f"X{display_num}"
 
+        # Skip if the socket path is already occupied by a real X server
+        if socket_path.exists() and not socket_path.is_symlink():
+            pytest.skip(f"X socket {socket_path} already in use by real X server")
+
         # Create a symlink at the socket path
         decoy = tmp_path / "decoy_socket"
         decoy.write_text("")
         socket_dir.mkdir(exist_ok=True)
+        # Use unlink(missing_ok=True) + single symlink to avoid TOCTOU in setup
         try:
-            os.symlink(str(decoy), str(socket_path))
-        except FileExistsError:
-            os.unlink(str(socket_path))
-            os.symlink(str(decoy), str(socket_path))
+            socket_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        os.symlink(str(decoy), str(socket_path))
 
         try:
             # Start should detect the symlinked socket and fail closed
