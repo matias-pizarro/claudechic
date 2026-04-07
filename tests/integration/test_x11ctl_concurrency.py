@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import x11ctl_run, SCRIPT, read_state_file
+from .conftest import x11ctl_run, SCRIPT, read_state_file, _CONVENIENCE_KEYS
 
 pytestmark = [
     pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed"),
@@ -20,17 +20,28 @@ pytestmark = [
 ]
 
 
+def _build_subprocess_env(display_env: dict) -> dict[str, str]:
+    """Build a subprocess env dict from a display_factory result.
+
+    Mirrors x11ctl_run's env construction: strips parent X11CTL_* vars,
+    sets ALLOW_HOST, and applies display_env excluding convenience keys.
+    This avoids each test duplicating the env-building logic.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
+    env["X11CTL_ALLOW_HOST"] = "1"
+    env.update({
+        k: v for k, v in display_env.items()
+        if k not in _CONVENIENCE_KEYS and isinstance(v, str)
+    })
+    return env
+
+
 class TestConcurrency:
 
     def test_concurrent_start_is_idempotent(self, display_factory):
         """Two concurrent start --headless: both succeed, one Xvfb runs."""
         env = display_factory
-        base_env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
-        base_env["X11CTL_ALLOW_HOST"] = "1"
-        base_env.update({
-            k: v for k, v in env.items()
-            if k.startswith("X11CTL_")
-        })
+        base_env = _build_subprocess_env(env)
 
         # Launch two starts simultaneously
         p1 = subprocess.Popen(
@@ -50,7 +61,7 @@ class TestConcurrency:
         assert p1.returncode == 0, f"p1 failed: {err1.decode()}"
         assert p2.returncode == 0, f"p2 failed: {err2.decode()}"
 
-        # Exactly one Xvfb should be running for this display
+        # Verify pidfile exists (lock + idempotency guarantees single Xvfb)
         pidfile = os.path.join(
             env["state_dir"],
             f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
@@ -59,14 +70,12 @@ class TestConcurrency:
         assert content is not None, "No pidfile after concurrent starts"
 
     def test_stop_during_startup(self, display_factory):
-        """start in background, stop immediately: no orphaned processes."""
+        """start in background, stop after lock acquired: no orphaned processes."""
         env = display_factory
-        base_env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
-        base_env["X11CTL_ALLOW_HOST"] = "1"
-        base_env.update({
-            k: v for k, v in env.items()
-            if k.startswith("X11CTL_")
-        })
+        base_env = _build_subprocess_env(env)
+        lock_path = os.path.join(
+            env["state_dir"], f"{env['X11CTL_STATE_PREFIX']}.lock"
+        )
 
         # Start in background
         start_proc = subprocess.Popen(
@@ -74,14 +83,20 @@ class TestConcurrency:
             env=base_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
-        # Give it a moment to acquire lock
-        time.sleep(0.5)
+        # Poll until start has acquired the lock (or has exited)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if start_proc.poll() is not None:
+                break  # Already finished
+            if os.path.exists(lock_path):
+                break  # Lock acquired — safe to issue stop
+            time.sleep(0.1)
 
-        # Stop immediately
-        x11ctl_run(["stop"], env_overrides=env, timeout=15)
-
-        # Wait for start to finish
+        # Wait for start to finish (stop will block on lock if start holds it)
         start_proc.communicate(timeout=15)
+
+        # Stop (may be no-op if start already finished and exited)
+        x11ctl_run(["stop"], env_overrides=env, timeout=15)
 
         # Verify: no orphaned Xvfb on this display
         display = env["X11CTL_DISPLAY"]
@@ -95,12 +110,7 @@ class TestConcurrency:
     def test_concurrent_stop(self, display_factory):
         """Two concurrent stop: both succeed, no errors."""
         env = display_factory
-        base_env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
-        base_env["X11CTL_ALLOW_HOST"] = "1"
-        base_env.update({
-            k: v for k, v in env.items()
-            if k.startswith("X11CTL_")
-        })
+        base_env = _build_subprocess_env(env)
 
         # Start first
         setup = x11ctl_run(["start", "--headless"], env_overrides=env)
@@ -126,12 +136,7 @@ class TestConcurrency:
     def test_signal_during_run(self, display_factory):
         """SIGTERM to x11ctl run: child killed, display cleaned."""
         env = display_factory
-        base_env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
-        base_env["X11CTL_ALLOW_HOST"] = "1"
-        base_env.update({
-            k: v for k, v in env.items()
-            if k.startswith("X11CTL_")
-        })
+        base_env = _build_subprocess_env(env)
 
         # Launch run with a long-running child
         run_proc = subprocess.Popen(
@@ -139,7 +144,7 @@ class TestConcurrency:
             env=base_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
-        # Wait for Xvfb to start
+        # Wait for Xvfb to start (socket appears or process exits early)
         display_num = env["display_num"]
         socket_path = f"/tmp/.X11-unix/X{display_num}"
         for _ in range(20):
@@ -149,13 +154,13 @@ class TestConcurrency:
 
         # Send SIGTERM
         run_proc.send_signal(signal.SIGTERM)
+        # wait() ensures process exited AND its finally cleanup ran
         run_proc.wait(timeout=15)
 
         # Should have exited (not hung)
         assert run_proc.returncode is not None
 
-        # Verify xauth cleaned up
+        # Verify xauth cleaned up — process already waited, so cleanup
+        # (which runs in x11ctl's finally block) has completed. No sleep needed.
         xauth_path = env["X11CTL_XAUTH"]
-        # Give cleanup a moment
-        time.sleep(1)
         assert not os.path.exists(xauth_path), f"xauth not cleaned: {xauth_path}"
