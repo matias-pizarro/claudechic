@@ -383,58 +383,65 @@ async def test_context_bar_rendering():
 
 @pytest.mark.asyncio
 async def test_context_bar_color_gradient():
-    """ContextBar background gradient: green → orange → red."""
+    """ContextBar background gradient: green → orange → red → crimson."""
     from claudechic.widgets.layout.indicators import _context_bar_color
 
-    # 0% -> pure green (#229944)
-    fg, bg = _context_bar_color(0.0)
-    assert bg == "#229944"
+    # 0% -> deep green (#117733)
+    fg, fg_dim, bg = _context_bar_color(0.0)
+    assert bg == "#117733"
 
     # 15% -> midpoint green-orange (interpolated)
-    _, bg = _context_bar_color(0.15)
-    assert bg != "#229944" and bg != "#cc7700"  # somewhere in between
+    _, _, bg = _context_bar_color(0.15)
+    assert bg != "#117733" and bg != "#cc7700"  # somewhere in between
 
     # 30% -> pure orange (#cc7700)
-    _, bg = _context_bar_color(0.30)
+    _, _, bg = _context_bar_color(0.30)
     assert bg == "#cc7700"
 
     # 40% -> midpoint orange-red (interpolated)
-    _, bg = _context_bar_color(0.40)
+    _, _, bg = _context_bar_color(0.40)
     assert bg != "#cc7700" and bg != "#cc3333"
 
-    # 50% -> pure red (#cc3333)
-    _, bg = _context_bar_color(0.50)
+    # 50% -> red (#cc3333)
+    _, _, bg = _context_bar_color(0.50)
     assert bg == "#cc3333"
 
-    # 80% -> still red
-    _, bg = _context_bar_color(0.80)
-    assert bg == "#cc3333"
+    # 75% -> midpoint red-crimson (interpolated)
+    _, _, bg = _context_bar_color(0.75)
+    assert bg != "#cc3333" and bg != "#661111"
 
-    # 100% -> still red
-    _, bg = _context_bar_color(1.0)
-    assert bg == "#cc3333"
+    # 100% -> dark crimson (#661111)
+    _, _, bg = _context_bar_color(1.0)
+    assert bg == "#661111"
 
-    # Verify fg is always a valid contrast color
-    for p in [0.0, 0.15, 0.30, 0.40, 0.50, 1.0]:
-        fg_val, _ = _context_bar_color(p)
+    # Verify fg is always a valid contrast color, fg_dim is a hex color
+    for p in [0.0, 0.15, 0.30, 0.40, 0.50, 0.75, 1.0]:
+        fg_val, dim_val, _ = _context_bar_color(p)
         assert fg_val in ("white", "black")
+        assert dim_val.startswith("#") and len(dim_val) == 7
 
 
 @pytest.mark.asyncio
-async def test_context_bar_bracket_always_dim():
-    """Bracket portion [used/max] is always styled dim regardless of percentage."""
+async def test_context_bar_bracket_muted():
+    """Bracket portion [used/max] uses a muted fg color distinct from the main fg."""
+    from claudechic.widgets.layout.indicators import _context_bar_color
+
     app = WidgetTestApp(lambda: ContextBar(id="ctx"))
     async with app.run_test():
         bar = app.query_one(ContextBar)
         bar.max_tokens = 100
 
-        for token_val in [10, 60, 90]:
+        for token_val in [10, 40, 90]:
             bar.tokens = token_val
+            pct = token_val / 100.0
+            fg, fg_dim, bg = _context_bar_color(pct)
             rendered = bar.render()
-            # The bracket portion (second span) should always contain dim
+            # The bracket span (second) uses fg_dim, not the main fg
             spans = rendered._spans  # type: ignore[union-attr]
-            bracket_span = spans[1]
-            assert "dim" in str(bracket_span.style), f"Bracket not dim at {token_val}%"
+            bracket_style = str(spans[1].style)
+            assert fg_dim in bracket_style, (
+                f"Bracket at {token_val}% should use {fg_dim}, got {bracket_style}"
+            )
 
 
 @pytest.mark.asyncio
