@@ -176,13 +176,14 @@ class TestAcceptanceCriteria:
         if shutil.which("xpra") is None:
             pytest.skip("xpra not installed")
 
-        # Occupy the xpra port
+        # Occupy the xpra port — wrap bind/listen in try/finally for cleanup
         port = int(env["X11CTL_XPRA_PORT"])
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", port))
-        sock.listen(1)
         try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+
             # Start headless first (xpra needs it)
             setup = x11ctl_run(["start", "--headless"], env_overrides=env)
             assert setup.returncode == 0, f"setup start failed: {setup.stderr}"
@@ -199,6 +200,8 @@ class TestAcceptanceCriteria:
         env = display_factory
         if shutil.which("xpra") is None:
             pytest.skip("xpra not installed")
+        if not os.path.isfile("/usr/bin/sockstat"):
+            pytest.skip("sockstat not available (FreeBSD-only test)")
 
         result = x11ctl_run(["start", "--xpra"], env_overrides=env)
         assert result.returncode == 0, f"start --xpra failed: {result.stderr}"
@@ -305,6 +308,14 @@ class TestLifecycleScenarios:
         assert_port_free("127.0.0.1", int(env["X11CTL_XPRA_PORT"]))
         if shutil.which("websockify") is not None:
             assert_port_free("127.0.0.1", int(env["X11CTL_VNC_PORT"]))
+
+        # Verify xpra pidfile was cleaned up
+        xpra_pidfile = os.path.join(
+            env["state_dir"],
+            f"{env['X11CTL_STATE_PREFIX']}-xpra.pid",
+        )
+        assert read_state_file(xpra_pidfile) is None, \
+            f"xpra pidfile not cleaned after downgrade: {xpra_pidfile}"
 
     def test_idempotent_start(self, display_factory):
         """start --headless twice: second is no-op, same PID."""
