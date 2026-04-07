@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 
@@ -74,6 +73,8 @@ class TestConcurrency:
             os.kill(entry.pid, 0)
         except ProcessLookupError:
             pytest.fail(f"Xvfb PID {entry.pid} not running after concurrent starts")
+        except PermissionError:
+            pass  # Process exists but owned by different user (CI edge case)
 
     def test_stop_during_startup(self, display_factory):
         """start in background, stop after lock acquired: no orphaned processes."""
@@ -104,14 +105,15 @@ class TestConcurrency:
         # Stop (may be no-op if start already finished and exited)
         x11ctl_run(["stop"], env_overrides=env, timeout=15)
 
-        # Verify: no orphaned Xvfb on this display
+        # Verify: no orphaned Xvfb on this display (use -eo pid,args to
+        # minimize information leakage in CI failure messages)
         display = env["X11CTL_DISPLAY"]
         ps_result = subprocess.run(
-            ["/bin/ps", "aux"], capture_output=True, text=True, timeout=5,
+            ["/bin/ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=5,
         )
         for line in ps_result.stdout.splitlines():
             if "Xvfb" in line and display in line:
-                pytest.fail(f"Orphaned Xvfb found: {line}")
+                pytest.fail(f"Orphaned Xvfb found: {line.strip()}")
 
     def test_concurrent_stop(self, display_factory):
         """Two concurrent stop: both succeed, no errors."""
