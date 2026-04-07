@@ -20,6 +20,16 @@ pytestmark = [
 
 
 class TestSecurityAttacks:
+    """Filesystem attack tests for x11ctl's state file handling.
+
+    Covers symlink injection and FIFO-based DoS at pidfile, xauth, lock,
+    and X socket paths.
+
+    Future work (not in current plan scope):
+    - Hardlink attacks (bypass O_NOFOLLOW; mitigated by check_owner)
+    - TOCTOU race between islink() and rename() in write_pidfile
+    - Path traversal via X11CTL_STATE_PREFIX containing ../
+    """
 
     def test_symlink_at_pidfile_path(self, display_factory, tmp_path):
         """Symlink at pidfile path before start: start should handle safely."""
@@ -37,10 +47,12 @@ class TestSecurityAttacks:
 
         try:
             result = x11ctl_run(["start", "--headless"], env_overrides=env)
-            # write_pidfile rejects symlinks — start should fail
+            # write_pidfile rejects symlinks — start should fail.
+            # The returncode assertion is the primary guard; the decoy check
+            # is defense-in-depth (verifies the symlink target was not written
+            # to, even though os.rename semantics would also prevent that).
             assert result.returncode != 0, \
                 "Expected failure when pidfile is a symlink, got exit 0"
-            # Decoy must not have been modified (symlink was not followed)
             assert decoy.read_text() == "attacker data"
         finally:
             # Clean up symlink
