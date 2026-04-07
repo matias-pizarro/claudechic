@@ -38,7 +38,13 @@ def _build_subprocess_env(display_env: dict) -> dict[str, str]:
 class TestConcurrency:
 
     def test_concurrent_start_is_idempotent(self, display_factory):
-        """Two concurrent start --headless: both succeed, one Xvfb runs."""
+        """Two concurrent start --headless: both succeed, one Xvfb runs.
+
+        NOTE: True simultaneous lock contention depends on OS scheduling.
+        One process may finish before the other reaches acquire_lock().
+        The test verifies the invariant (both return 0, one pidfile, process
+        alive) regardless of whether contention actually occurred.
+        """
         env = display_factory
         base_env = _build_subprocess_env(env)
 
