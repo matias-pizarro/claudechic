@@ -18,6 +18,12 @@ MIN_CWD_LENGTH = 10  # Below this budget, hide cwd entirely
 MAX_CWD_LENGTH = 80  # Cap to prevent cwd from dominating the bar
 MIN_SESSION_LENGTH = 8  # Below this budget, hide session_id entirely
 
+# Matches only the token-injection system-reminder at the start of a string.
+# Anchored to ^ so mid-message user content is never stripped.
+TOKEN_REMINDER_PATTERN = re.compile(
+    r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
+)
+
 
 def format_session_id(session_id: str, budget: int) -> str:
     """Format session ID with adaptive truncation.
