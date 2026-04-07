@@ -140,6 +140,8 @@ class TestSecurityAttacks:
         try:
             # Start should detect the symlinked socket and fail closed
             result = x11ctl_run(["start", "--headless"], env_overrides=env)
+            assert result.returncode != 0, \
+                "Expected failure when X socket is a symlink, got exit 0"
             # The symlink should NOT have been followed or deleted
             assert decoy.exists(), "Decoy was deleted — symlink was followed!"
         finally:
