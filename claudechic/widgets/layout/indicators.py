@@ -67,6 +67,34 @@ class CPUBar(IndicatorWidget):
         self.app.push_screen(ProfileModal())
 
 
+def _context_bar_color(pct: float) -> tuple[str, str]:
+    """Return (fg, bg) hex colors for a context usage percentage.
+
+    Gradient: green (0%) → orange (30%) → red (50%+).
+    Linear RGB interpolation between anchor points.
+    """
+    # Anchor colors (R, G, B)
+    green = (0x22, 0x99, 0x44)   # #229944
+    orange = (0xCC, 0x77, 0x00)  # #CC7700
+    red = (0xCC, 0x33, 0x33)     # #CC3333
+
+    if pct <= 0.30:
+        # Green → Orange
+        t = pct / 0.30
+        r, g, b = (int(a + (b - a) * t) for a, b in zip(green, orange))
+    elif pct <= 0.50:
+        # Orange → Red
+        t = (pct - 0.30) / 0.20
+        r, g, b = (int(a + (b - a) * t) for a, b in zip(orange, red))
+    else:
+        r, g, b = red
+
+    bg = f"#{r:02x}{g:02x}{b:02x}"
+    # White text on darker backgrounds, black on lighter ones
+    fg = "black" if (r * 0.299 + g * 0.587 + b * 0.114) > 140 else "white"
+    return fg, bg
+
+
 class ContextBar(IndicatorWidget):
     """Display context usage as a progress bar. Click to run /context."""
 
@@ -76,12 +104,7 @@ class ContextBar(IndicatorWidget):
     def render(self) -> RenderResult:
         pct = min(self.tokens / self.max_tokens, 1.0) if self.max_tokens else 0
         pct_int = int(pct * 100)
-        if pct < 0.5:
-            fg, bg = "white", "#333333"
-        elif pct < 0.8:
-            fg, bg = "black", "#aaaa00"
-        else:
-            fg, bg = "white", "#cc3333"
+        fg, bg = _context_bar_color(pct)
         used = format_tokens(self.tokens)
         total = format_tokens(self.max_tokens)
         return Text.assemble(

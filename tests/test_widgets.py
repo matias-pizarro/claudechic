@@ -382,43 +382,42 @@ async def test_context_bar_rendering():
 
 
 @pytest.mark.asyncio
-async def test_context_bar_color_thresholds():
-    """ContextBar applies correct color at threshold boundaries."""
-    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
-    async with app.run_test():
-        bar = app.query_one(ContextBar)
-        bar.max_tokens = 100
+async def test_context_bar_color_gradient():
+    """ContextBar background gradient: green → orange → red."""
+    from claudechic.widgets.layout.indicators import _context_bar_color
 
-        # 49% -> low bg (#333333)
-        bar.tokens = 49
-        rendered = bar.render()
-        spans = rendered._spans  # type: ignore[union-attr]
-        assert any("#333333" in str(s.style) for s in spans)
+    # 0% -> pure green (#229944)
+    fg, bg = _context_bar_color(0.0)
+    assert bg == "#229944"
 
-        # 50% -> warning bg (#aaaa00)
-        bar.tokens = 50
-        rendered = bar.render()
-        spans = rendered._spans  # type: ignore[union-attr]
-        assert any("#aaaa00" in str(s.style) for s in spans)
+    # 15% -> midpoint green-orange (interpolated)
+    _, bg = _context_bar_color(0.15)
+    assert bg != "#229944" and bg != "#cc7700"  # somewhere in between
 
-        # 79% -> warning bg (#aaaa00)
-        bar.tokens = 79
-        rendered = bar.render()
-        spans = rendered._spans  # type: ignore[union-attr]
-        assert any("#aaaa00" in str(s.style) for s in spans)
+    # 30% -> pure orange (#cc7700)
+    _, bg = _context_bar_color(0.30)
+    assert bg == "#cc7700"
 
-        # 80% -> error bg (#cc3333)
-        bar.tokens = 80
-        rendered = bar.render()
-        spans = rendered._spans  # type: ignore[union-attr]
-        assert any("#cc3333" in str(s.style) for s in spans)
+    # 40% -> midpoint orange-red (interpolated)
+    _, bg = _context_bar_color(0.40)
+    assert bg != "#cc7700" and bg != "#cc3333"
 
-        # 100% -> error bg (#cc3333)
-        bar.tokens = 100
-        rendered = bar.render()
-        spans = rendered._spans  # type: ignore[union-attr]
-        assert any("#cc3333" in str(s.style) for s in spans)
-        assert "100%" in rendered.plain  # type: ignore[union-attr]
+    # 50% -> pure red (#cc3333)
+    _, bg = _context_bar_color(0.50)
+    assert bg == "#cc3333"
+
+    # 80% -> still red
+    _, bg = _context_bar_color(0.80)
+    assert bg == "#cc3333"
+
+    # 100% -> still red
+    _, bg = _context_bar_color(1.0)
+    assert bg == "#cc3333"
+
+    # Verify fg is always a valid contrast color
+    for p in [0.0, 0.15, 0.30, 0.40, 0.50, 1.0]:
+        fg_val, _ = _context_bar_color(p)
+        assert fg_val in ("white", "black")
 
 
 @pytest.mark.asyncio
