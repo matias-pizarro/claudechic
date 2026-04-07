@@ -150,9 +150,8 @@ def read_state_file(path: str) -> str | None:
     This is a deliberate side-channel observation — it reads state files
     without x11ctl's safety checks (O_NOFOLLOW, fstat, ownership).
 
-    Assumed pidfile format: "{pid} {epoch}\\n" (two space-separated ints).
-    If x11ctl changes this format, ``parse_pidfile`` and callers must be
-    updated.
+    Use ``parse_pidfile()`` on the returned string to get structured
+    (pid, epoch) access with validation matching x11ctl's own parser.
 
     NOTE: Content is strip()'d, so trailing whitespace/newline variations
     are normalised.  This is an accepted trade-off for test convenience —
@@ -227,7 +226,13 @@ def display_factory(tmp_path):
 
     # Finalizer: stop everything and clean up
     try:
-        x11ctl_run(["stop"], env_overrides=env, timeout=15)
+        result = x11ctl_run(["stop"], env_overrides=env, timeout=15)
+        if result.returncode != 0:
+            logger.warning(
+                "x11ctl stop returned %d for display :%d: %s",
+                result.returncode, display_num, result.stderr.strip(),
+            )
+            _kill_pidfiles_in_dir(state_dir, state_prefix)
     except subprocess.TimeoutExpired:
         logger.warning("x11ctl stop timed out for display :%d", display_num)
         _kill_pidfiles_in_dir(state_dir, state_prefix)
@@ -323,8 +328,8 @@ def session_cleanup():
     except Exception:
         logger.warning("session_cleanup ps scan failed", exc_info=True)
 
-    # Clean up stale flat /tmp files using consolidated globs instead of
-    # per-display-number iteration (120 displays → 2 globs + filter).
+    # Clean up all stale flat /tmp test artifacts (xauth files, plus any
+    # leaked pidfiles/logs if X11CTL_STATE_DIR was not set).
     for f in glob.glob("/tmp/.x11ctl-test-*"):
         try:
             os.unlink(f)
