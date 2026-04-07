@@ -81,7 +81,7 @@ def x11ctl_run(
     env["X11CTL_ALLOW_HOST"] = "1"
     if env_overrides:
         env.update({
-            k: v for k, v in env_overrides.items()
+            k: str(v) for k, v in env_overrides.items()
             if k not in _CONVENIENCE_KEYS
         })
     return subprocess.run(

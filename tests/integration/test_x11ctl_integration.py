@@ -190,8 +190,8 @@ class TestAcceptanceCriteria:
             result = x11ctl_run(["start", "--xpra"], env_overrides=env)
             assert result.returncode == 2, \
                 f"Expected exit 2 for port conflict, got {result.returncode}: {result.stderr}"
-            assert "already in use" in result.stderr.lower() or "port" in result.stderr.lower(), \
-                f"Expected port conflict message in stderr: {result.stderr}"
+            assert "already in use" in result.stderr.lower(), \
+                f"Expected 'already in use' in stderr: {result.stderr}"
         finally:
             sock.close()
 
@@ -267,8 +267,12 @@ class TestAcceptanceCriteria:
 
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert result.returncode != 0
-        assert "missing" in result.stderr.lower() or "not found" in result.stderr.lower(), \
+        stderr_lower = result.stderr.lower()
+        assert "missing" in stderr_lower or "not found" in stderr_lower, \
             f"Expected missing dep message: {result.stderr}"
+        # Verify Xvfb specifically was the missing dependency (not xauth or another tool)
+        assert "xvfb" in stderr_lower, \
+            f"Expected Xvfb to be the missing dependency, got: {result.stderr}"
 
 
 class TestLifecycleScenarios:
@@ -339,7 +343,7 @@ class TestLifecycleScenarios:
         assert content1 == content2, f"PID changed: {content1} -> {content2}"
 
     # TODO: remove xfail when x11ctl stale pidfile cleanup is implemented
-    @pytest.mark.xfail(reason="x11ctl does not yet clean stale pidfiles on restart")
+    @pytest.mark.xfail(strict=True, reason="x11ctl does not yet clean stale pidfiles on restart")
     def test_crash_recovery(self, display_factory):
         """Kill Xvfb, then start --headless: cleans stale, starts fresh."""
         env = display_factory
