@@ -76,7 +76,8 @@ class TestSecurityAttacks:
         try:
             result = x11ctl_run(["start", "--headless"], env_overrides=env)
             assert result.returncode != 0, "Start should fail when xauth is a symlink"
-            assert "symlink" in result.stderr.lower() or "error" in result.stderr.lower()
+            assert "symlink" in result.stderr.lower() or "xauth" in result.stderr.lower(), \
+                f"Expected symlink/xauth-related error in stderr: {result.stderr}"
             # Decoy should be unchanged
             assert decoy.read_text() == "attacker data"
         finally:
