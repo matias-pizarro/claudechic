@@ -29,8 +29,8 @@ def _build_subprocess_env(display_env: dict) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
     env["X11CTL_ALLOW_HOST"] = "1"
     env.update({
-        k: v for k, v in display_env.items()
-        if k not in _CONVENIENCE_KEYS and isinstance(v, str)
+        k: str(v) for k, v in display_env.items()
+        if k not in _CONVENIENCE_KEYS
     })
     return env
 
@@ -77,7 +77,12 @@ class TestConcurrency:
             pass  # Process exists but owned by different user (CI edge case)
 
     def test_stop_during_startup(self, display_factory):
-        """start in background, stop after lock acquired: no orphaned processes."""
+        """start and stop in quick succession: no orphaned processes.
+
+        Issues stop while start may still be running (after lock is
+        observed or start finishes). The key assertion is that no Xvfb
+        processes are orphaned regardless of the race outcome.
+        """
         env = display_factory
         base_env = _build_subprocess_env(env)
         lock_path = os.path.join(
@@ -96,17 +101,18 @@ class TestConcurrency:
             if start_proc.poll() is not None:
                 break  # Already finished
             if os.path.exists(lock_path):
-                break  # Lock acquired — safe to issue stop
+                break  # Lock acquired — issue stop while start may still hold it
             time.sleep(0.1)
 
-        # Wait for start to finish (stop will block on lock if start holds it)
-        start_proc.communicate(timeout=15)
-
-        # Stop (may be no-op if start already finished and exited)
+        # Issue stop while start_proc may still be running. Stop will either:
+        # (a) block on the lock until start releases it, then stop normally, or
+        # (b) find nothing to stop if start already finished and exited.
         x11ctl_run(["stop"], env_overrides=env, timeout=15)
 
-        # Verify: no orphaned Xvfb on this display (use -eo pid,args to
-        # minimize information leakage in CI failure messages)
+        # Now wait for start to finish
+        start_proc.communicate(timeout=15)
+
+        # Verify: no orphaned Xvfb on this display
         display = env["X11CTL_DISPLAY"]
         ps_result = subprocess.run(
             ["/bin/ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=5,
