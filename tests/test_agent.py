@@ -49,10 +49,54 @@ class TestUpdateContext:
 
     @pytest.mark.asyncio
     async def test_no_injection_after_disconnect(self):
-        """After disconnect, _prepare_prompt should not inject (spec test #13).
-        Note: _prepare_prompt will be added in Task 4 — this test will fail until then."""
+        """After disconnect, _prepare_prompt should not inject (spec test #13)."""
         agent = _make_agent()
         agent.update_context(14000, 200000)
         await agent.disconnect()
-        # This test depends on Task 4's _prepare_prompt — skip assertion for now
         assert agent._context_initialized is False
+        result = agent._prepare_prompt("hello")
+        assert result == "hello"
+        assert "<system-reminder>" not in result
+
+
+class TestPreparePrompt:
+    def test_injects_when_initialized(self):
+        agent = _make_agent()
+        agent.update_context(14000, 200000)
+        result = agent._prepare_prompt("hello")
+        assert result.startswith("<system-reminder>14000/200000 tokens</system-reminder>")
+        assert result.endswith("hello")
+
+    def test_skips_when_not_initialized(self):
+        agent = _make_agent()
+        result = agent._prepare_prompt("hello")
+        assert result == "hello"
+        assert "<system-reminder>" not in result
+
+    def test_tokens_zero_with_initialized(self):
+        agent = _make_agent()
+        agent.update_context(0, 200000)
+        result = agent._prepare_prompt("hello")
+        assert "<system-reminder>0/200000 tokens</system-reminder>" in result
+
+    def test_plan_mode_ordering(self):
+        """Token reminder first, plan-mode second, user prompt last."""
+        agent = _make_agent()
+        agent.update_context(14000, 200000)
+        agent.permission_mode = "plan"
+        result = agent._prepare_prompt("hello")
+        # Token reminder comes first
+        token_pos = result.index("<system-reminder>14000/200000 tokens</system-reminder>")
+        # Plan mode instructions come second
+        plan_pos = result.index("PLAN MODE ACTIVE")
+        # User prompt comes last
+        user_pos = result.index("hello")
+        assert token_pos < plan_pos < user_pos
+
+    def test_plan_mode_without_context(self):
+        """Plan mode instructions still prepend even without context init."""
+        agent = _make_agent()
+        agent.permission_mode = "plan"
+        result = agent._prepare_prompt("hello")
+        assert "PLAN MODE ACTIVE" in result
+        assert "<system-reminder>0/" not in result  # No token injection

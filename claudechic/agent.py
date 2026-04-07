@@ -459,6 +459,28 @@ class Agent:
     # Response processing
     # -----------------------------------------------------------------------
 
+    def _prepare_prompt(self, prompt: str) -> str:
+        """Augment prompt with system-reminder and plan-mode instructions.
+
+        Side-effect-free: reads self state but does not mutate anything.
+        Called at the top of _process_response() before sending to SDK.
+
+        Ordering: token reminder -> plan-mode instructions -> user prompt.
+        To achieve this, we prepend in reverse order: plan first, then token.
+        """
+        # Prepend plan mode instructions if in plan mode
+        if self.permission_mode == "plan":
+            prompt = self._get_plan_mode_instructions() + prompt
+
+        # Inject context usage when initialized (outermost = first in string)
+        if self._context_initialized:
+            prompt = (
+                f"<system-reminder>{self.tokens}/{self.max_tokens} tokens"
+                f"</system-reminder>\n{prompt}"
+            )
+
+        return prompt
+
     def _get_plan_mode_instructions(self) -> str:
         """Get plan mode instructions with the plan file path.
 
@@ -495,9 +517,8 @@ Key Rules:
     async def _process_response(self, prompt: str) -> None:
         """Process SDK response stream."""
         try:
-            # Prepend plan mode instructions if in plan mode
-            if self.permission_mode == "plan":
-                prompt = self._get_plan_mode_instructions() + prompt
+            # Augment prompt with token reminder and plan-mode instructions
+            prompt = self._prepare_prompt(prompt)
 
             # Send message with images if any
             if self.pending_images:
