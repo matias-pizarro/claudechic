@@ -389,35 +389,35 @@ async def test_context_bar_color_thresholds():
         bar = app.query_one(ContextBar)
         bar.max_tokens = 100
 
-        # 49% -> dim (last dim value)
+        # 49% -> low bg (#333333)
         bar.tokens = 49
         rendered = bar.render()
         spans = rendered._spans  # type: ignore[union-attr]
-        assert any("dim" in str(s.style) for s in spans)
+        assert any("#333333" in str(s.style) for s in spans)
 
-        # 50% -> yellow (first yellow value)
+        # 50% -> warning bg (#aaaa00)
         bar.tokens = 50
         rendered = bar.render()
         spans = rendered._spans  # type: ignore[union-attr]
-        assert any("yellow" in str(s.style) for s in spans)
+        assert any("#aaaa00" in str(s.style) for s in spans)
 
-        # 79% -> yellow (last yellow value)
+        # 79% -> warning bg (#aaaa00)
         bar.tokens = 79
         rendered = bar.render()
         spans = rendered._spans  # type: ignore[union-attr]
-        assert any("yellow" in str(s.style) for s in spans)
+        assert any("#aaaa00" in str(s.style) for s in spans)
 
-        # 80% -> red (first red value)
+        # 80% -> error bg (#cc3333)
         bar.tokens = 80
         rendered = bar.render()
         spans = rendered._spans  # type: ignore[union-attr]
-        assert any("red" in str(s.style) for s in spans)
+        assert any("#cc3333" in str(s.style) for s in spans)
 
-        # 100% -> red
+        # 100% -> error bg (#cc3333)
         bar.tokens = 100
         rendered = bar.render()
         spans = rendered._spans  # type: ignore[union-attr]
-        assert any("red" in str(s.style) for s in spans)
+        assert any("#cc3333" in str(s.style) for s in spans)
         assert "100%" in rendered.plain  # type: ignore[union-attr]
 
 
@@ -432,10 +432,10 @@ async def test_context_bar_bracket_always_dim():
         for token_val in [10, 60, 90]:
             bar.tokens = token_val
             rendered = bar.render()
-            # The last span (bracket portion) should always be dim
+            # The bracket portion (second span) should always contain dim
             spans = rendered._spans  # type: ignore[union-attr]
-            last_span = spans[-1]
-            assert "dim" in str(last_span.style), f"Bracket not dim at {token_val}%"
+            bracket_span = spans[1]
+            assert "dim" in str(bracket_span.style), f"Bracket not dim at {token_val}%"
 
 
 @pytest.mark.asyncio

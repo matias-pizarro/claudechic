@@ -77,17 +77,17 @@ class ContextBar(IndicatorWidget):
         pct = min(self.tokens / self.max_tokens, 1.0) if self.max_tokens else 0
         pct_int = int(pct * 100)
         if pct < 0.5:
-            color = "dim"
+            fg, bg = "white", "#333333"
         elif pct < 0.8:
-            color = "yellow"
+            fg, bg = "black", "#aaaa00"
         else:
-            color = "red"
+            fg, bg = "white", "#cc3333"
         used = format_tokens(self.tokens)
         total = format_tokens(self.max_tokens)
         return Text.assemble(
-            (f"{pct_int}%", color),
-            (" ", ""),
-            (f"[{used}/{total}]", "dim"),
+            (f" {pct_int}% ", f"{fg} on {bg}"),
+            (f"[{used}/{total}]", f"dim on {bg}"),
+            (" ", f"on {bg}"),
         )
 
     def on_click(self, event) -> None:
