@@ -275,21 +275,35 @@ class TestLifecycleScenarios:
         if shutil.which("xpra") is None or shutil.which("x11vnc") is None:
             pytest.skip("xpra or x11vnc not installed")
 
+        pidfile = os.path.join(
+            env["state_dir"],
+            f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
+        )
+
         result = x11ctl_run(["start", "--all"], env_overrides=env)
         assert result.returncode == 0, f"start --all failed: {result.stderr}"
 
-        # Verify all running
+        # Capture xvfb PID before downgrade
         r1 = x11ctl_run(["status"], env_overrides=env)
         assert r1.returncode == 0
         assert "xvfb" in r1.stderr.lower()
+        content_before = read_state_file(pidfile)
 
         # Downgrade
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert result.returncode == 0, f"downgrade failed: {result.stderr}"
         r2 = x11ctl_run(["status"], env_overrides=env)
         assert "xvfb" in r2.stderr.lower()
-        # xpra port should be free
+
+        # Verify xvfb PID survived the downgrade (same pidfile content)
+        content_after = read_state_file(pidfile)
+        assert content_before == content_after, \
+            f"Xvfb PID changed during downgrade: {content_before} -> {content_after}"
+
+        # Both xpra and VNC ports should be free after downgrade
         assert_port_free("127.0.0.1", int(env["X11CTL_XPRA_PORT"]))
+        if shutil.which("websockify") is not None:
+            assert_port_free("127.0.0.1", int(env["X11CTL_VNC_PORT"]))
 
     def test_idempotent_start(self, display_factory):
         """start --headless twice: second is no-op, same PID."""
@@ -309,6 +323,7 @@ class TestLifecycleScenarios:
 
         assert content1 == content2, f"PID changed: {content1} -> {content2}"
 
+    # TODO: remove xfail when x11ctl stale pidfile cleanup is implemented
     @pytest.mark.xfail(reason="x11ctl does not yet clean stale pidfiles on restart")
     def test_crash_recovery(self, display_factory):
         """Kill Xvfb, then start --headless: cleans stale, starts fresh."""
