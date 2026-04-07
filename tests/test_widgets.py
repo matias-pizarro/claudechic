@@ -1,7 +1,5 @@
 """Pure widget tests - no SDK needed."""
 
-import asyncio
-
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static

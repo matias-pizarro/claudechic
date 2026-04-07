@@ -64,7 +64,9 @@ class TestPreparePrompt:
         agent = _make_agent()
         agent.update_context(14000, 200000)
         result = agent._prepare_prompt("hello")
-        assert result.startswith("<system-reminder>14000/200000 tokens</system-reminder>")
+        assert result.startswith(
+            "<system-reminder>14000/200000 tokens</system-reminder>"
+        )
         assert result.endswith("hello")
 
     def test_skips_when_not_initialized(self):
@@ -86,7 +88,9 @@ class TestPreparePrompt:
         agent.permission_mode = "plan"
         result = agent._prepare_prompt("hello")
         # Token reminder comes first
-        token_pos = result.index("<system-reminder>14000/200000 tokens</system-reminder>")
+        token_pos = result.index(
+            "<system-reminder>14000/200000 tokens</system-reminder>"
+        )
         # Plan mode instructions come second
         plan_pos = result.index("PLAN MODE ACTIVE")
         # User prompt comes last

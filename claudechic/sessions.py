@@ -67,7 +67,13 @@ def get_project_sessions_dir(cwd: Path | None = None) -> Path | None:
     cwd = (cwd or Path.cwd()).absolute()
     # Replace path separators with dashes (handles both / and \ on Windows)
     # Also remove Windows drive colon (C:\foo -> C-foo)
-    project_key = str(cwd).replace(os.sep, "-").replace(":", "").replace("_", "-").replace(".", "-")
+    project_key = (
+        str(cwd)
+        .replace(os.sep, "-")
+        .replace(":", "")
+        .replace("_", "-")
+        .replace(".", "-")
+    )
     sessions_dir = Path.home() / ".claude/projects" / project_key
     return sessions_dir if sessions_dir.exists() else None
 
@@ -125,7 +131,9 @@ def _extract_session_info(filepath: Path) -> tuple[str, int, float]:
                             elif isinstance(content, list) and content:
                                 block = content[0]
                                 if block.get("type") == "text":
-                                    txt = TOKEN_REMINDER_PATTERN.sub("", block.get("text", ""))
+                                    txt = TOKEN_REMINDER_PATTERN.sub(
+                                        "", block.get("text", "")
+                                    )
                                     if txt.strip() and not txt.startswith("<command-"):
                                         first_msg = txt.replace("\n", " ")[:100]
 

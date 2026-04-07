@@ -61,7 +61,7 @@ def format_cwd(path: str, max_length: int) -> str:
     # Home substitution
     home = os.path.expanduser("~")
     if path.startswith(home + "/") or path == home:
-        path = "~" + path[len(home):]
+        path = "~" + path[len(home) :]
 
     if len(path) <= max_length:
         return path
@@ -91,7 +91,7 @@ def format_cwd(path: str, max_length: int) -> str:
     # Last-segment fallback: even the last segment alone exceeds budget
     last = segments[-1]
     # Character-level front-truncation of last segment
-    return "\u2026" + last[-(max_length - 1):]
+    return "\u2026" + last[-(max_length - 1) :]
 
 
 def format_tokens(n: int) -> str:
