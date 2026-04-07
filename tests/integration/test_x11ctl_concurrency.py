@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import x11ctl_run, SCRIPT, read_state_file, _CONVENIENCE_KEYS
+from .conftest import x11ctl_run, SCRIPT, read_state_file, parse_pidfile, _CONVENIENCE_KEYS
 
 pytestmark = [
     pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed"),
@@ -61,13 +61,19 @@ class TestConcurrency:
         assert p1.returncode == 0, f"p1 failed: {err1.decode()}"
         assert p2.returncode == 0, f"p2 failed: {err2.decode()}"
 
-        # Verify pidfile exists (lock + idempotency guarantees single Xvfb)
+        # Verify pidfile exists with valid content and process alive
         pidfile = os.path.join(
             env["state_dir"],
             f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
         )
         content = read_state_file(pidfile)
         assert content is not None, "No pidfile after concurrent starts"
+        entry = parse_pidfile(content)
+        assert entry is not None, f"Malformed pidfile content: {content!r}"
+        try:
+            os.kill(entry.pid, 0)
+        except ProcessLookupError:
+            pytest.fail(f"Xvfb PID {entry.pid} not running after concurrent starts")
 
     def test_stop_during_startup(self, display_factory):
         """start in background, stop after lock acquired: no orphaned processes."""
