@@ -72,8 +72,11 @@ testpaths = ["tests"]
 markers = [
     "integration: integration tests requiring X11 binaries (Xvfb, xpra, etc.)",
 ]
-# Integration tests excluded by default (run with: pytest -m integration)
-# This prevents accidental parallel runs with pytest-xdist
+# Integration tests excluded by default. Override with:
+#   pytest -m integration tests/integration/   # run integration only
+#   pytest -m ''  tests/                        # run ALL tests (unit + integration)
+# Note: command-line -m replaces addopts -m (pytest >=7). Combined markers
+# (e.g., -m 'slow and integration') also work because CLI wins over addopts.
 addopts = "-m 'not integration'"
 
 [tool.setuptools_scm]

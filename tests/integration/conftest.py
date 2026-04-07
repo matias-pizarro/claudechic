@@ -3,25 +3,44 @@
 Every test invokes scripts/x11ctl as a subprocess. No x11ctl module imports.
 Each test gets a unique display number for isolation.
 """
+import glob
+import logging
 import os
 import signal
 import socket
 import subprocess
-import shutil
 import time
-import threading
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 SCRIPT = str(Path(__file__).parent.parent.parent / "scripts" / "x11ctl")
-DISPLAY_RANGE = range(80, 99)  # :80 through :98
-_display_counter = threading.Lock()
+assert Path(SCRIPT).is_file(), f"x11ctl script not found at {SCRIPT}"
+
+# Display range for test isolation. 120 slots should be ample for any
+# single-session test suite (current plan: ~25 tests).
+DISPLAY_RANGE = range(80, 200)
 _next_display = 80
+
+# Keys in the DisplayEnv dict that are NOT env vars (convenience metadata).
+_CONVENIENCE_KEYS = frozenset({"display_num", "state_dir"})
+
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+class PidfileEntry(NamedTuple):
+    """Parsed pidfile content: pid and epoch timestamp."""
+    pid: int
+    epoch: int
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +56,18 @@ def x11ctl_run(
 
     Returns CompletedProcess. All tests use this instead of raw subprocess.run.
     Automatically sets X11CTL_ALLOW_HOST=1 for jail guard bypass in dev.
+
+    Only keys starting with ``X11CTL_`` or ``PATH`` are forwarded from
+    env_overrides — convenience keys (display_num, state_dir) are excluded
+    explicitly rather than via type-sniffing.
     """
     env = {**os.environ, "X11CTL_ALLOW_HOST": "1"}
     if env_overrides:
-        # Filter out non-string values (e.g., display_num int convenience key)
-        env.update({k: v for k, v in env_overrides.items() if isinstance(v, str)})
+        env.update({
+            k: v for k, v in env_overrides.items()
+            if k not in _CONVENIENCE_KEYS
+            and isinstance(v, str)
+        })
     return subprocess.run(
         [SCRIPT] + args,
         capture_output=True, text=True, timeout=timeout,
@@ -63,11 +89,12 @@ def assert_port_listening(host: str, port: int, timeout: float = 5.0) -> None:
     raise AssertionError(f"Port {host}:{port} not listening after {timeout}s")
 
 
-def assert_port_free(host: str, port: int, timeout: float = 5.0) -> None:
+def assert_port_free(host: str, port: int, timeout: float = 15.0) -> None:
     """Assert that a TCP port is NOT bound, polling until confirmed free.
 
-    Polls for up to `timeout` seconds to handle TIME_WAIT and process
-    teardown delays.
+    Default timeout is 15 s to accommodate TCP TIME_WAIT (typically 30–60 s
+    on FreeBSD, but x11ctl processes use SO_REUSEADDR so 15 s is usually
+    sufficient for the process to terminate and release the port).
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -81,14 +108,29 @@ def assert_port_free(host: str, port: int, timeout: float = 5.0) -> None:
     raise AssertionError(f"Port {host}:{port} still listening after {timeout}s")
 
 
+def parse_pidfile(content: str) -> PidfileEntry | None:
+    """Parse pidfile content into (pid, epoch) or None on malformed data.
+
+    Expected format: "{pid} {epoch}\\n" (two space-separated ints).
+    This centralises the format assumption so callers do not need to
+    repeat ``int(content.split()[0])``.
+    """
+    try:
+        parts = content.strip().split()
+        return PidfileEntry(pid=int(parts[0]), epoch=int(parts[1]))
+    except (IndexError, ValueError):
+        return None
+
+
 def read_state_file(path: str) -> str | None:
-    """Read a /tmp/.x11ctl-* state file directly. Returns content or None.
+    """Read a state file directly. Returns content or None.
 
     This is a deliberate side-channel observation — it reads state files
     without x11ctl's safety checks (O_NOFOLLOW, fstat, ownership).
 
     Assumed pidfile format: "{pid} {epoch}\\n" (two space-separated ints).
-    If x11ctl changes this format, this helper and callers must be updated.
+    If x11ctl changes this format, ``parse_pidfile`` and callers must be
+    updated.
     """
     try:
         return Path(path).read_text().strip()
@@ -105,7 +147,7 @@ def display_factory(tmp_path):
     """Allocate a unique display number with fully isolated state directory.
 
     Each test gets its own:
-    - Display number (:80-:98, unique via atomic counter)
+    - Display number (:80-:199, unique via sequential counter)
     - State directory (pytest tmp_path — isolated pidfiles, tiers, lock)
     - Xauth file (in /tmp with unique name — passes xauth regex validation)
     - Offset ports (derived from display number)
@@ -124,15 +166,18 @@ def display_factory(tmp_path):
         }
 
     Registers a finalizer that stops the display and cleans up.
+
+    NOTE: Sequential execution only — no pytest-xdist support.
+    For parallel execution, a file-based display allocator would be needed.
     """
     global _next_display
-    # Atomic counter — sequential execution only (no pytest-xdist support).
-    # For parallel execution, would need file-based allocation.
-    _next_display_local = _next_display
+    if _next_display >= 200:
+        pytest.fail(
+            "Display counter exhausted (reached 200). "
+            "Increase DISPLAY_RANGE or investigate test teardown failures."
+        )
+    display_num = _next_display
     _next_display += 1
-    if _next_display > 98:
-        _next_display = 80
-    display_num = _next_display_local
 
     state_dir = str(tmp_path)
     state_prefix = f".x11ctl-test-{display_num}"
@@ -156,28 +201,40 @@ def display_factory(tmp_path):
     # Finalizer: stop everything and clean up
     try:
         x11ctl_run(["stop"], env_overrides=env, timeout=15)
-    except (subprocess.TimeoutExpired, Exception):
-        # Fallback: read pidfiles from state_dir and kill directly
-        import glob as _glob
-        for pidfile in _glob.glob(os.path.join(state_dir, "*.pid")):
-            try:
-                content = Path(pidfile).read_text().strip()
-                pid = int(content.split()[0])
-                os.kill(pid, signal.SIGKILL)
-            except (ValueError, ProcessLookupError, PermissionError, OSError):
-                pass
+    except subprocess.TimeoutExpired:
+        logger.warning("x11ctl stop timed out for display :%d", display_num)
+        _kill_pidfiles_in_dir(state_dir, state_prefix)
+    except Exception:
+        logger.warning(
+            "x11ctl stop failed for display :%d, falling back to direct kill",
+            display_num, exc_info=True,
+        )
+        _kill_pidfiles_in_dir(state_dir, state_prefix)
+
     # Clean up xauth (flat in /tmp, not in state_dir)
     try:
         os.unlink(f"/tmp/.x11ctl-test-{display_num}")
-    except FileNotFoundError:
+    except OSError:
         pass
     # Clean up X artifacts
     for path in [f"/tmp/.X{display_num}-lock", f"/tmp/.X11-unix/X{display_num}"]:
         try:
             os.unlink(path)
-        except FileNotFoundError:
+        except OSError:
             pass
     # state_dir is cleaned by pytest's tmp_path fixture automatically
+
+
+def _kill_pidfiles_in_dir(state_dir: str, state_prefix: str) -> None:
+    """Read pidfiles matching state_prefix in state_dir and SIGKILL each PID."""
+    for pidfile in glob.glob(os.path.join(state_dir, f"{state_prefix}-*.pid")):
+        try:
+            content = Path(pidfile).read_text().strip()
+            entry = parse_pidfile(content)
+            if entry is not None:
+                os.kill(entry.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -185,27 +242,16 @@ def session_cleanup():
     """Session-scoped safety net. Runs at end of all tests.
 
     Scans for orphaned processes and stale state files in the test
-    display range (:80-:98) and cleans them up.
+    display range (:80-:199) and cleans them up.
+
+    NOTE: Per-test state dirs (tmp_path) are already cleaned by pytest.
+    This fixture cannot reconstruct those paths, so it relies on the
+    brute-force ps scan to catch orphaned processes. The file cleanup
+    targets flat /tmp artifacts (xauth, X lock/socket files).
     """
     yield  # Tests run here
 
-    # Kill any orphaned X11 processes in our display range
-    for display_num in DISPLAY_RANGE:
-        pidfile_patterns = [
-            f"/tmp/.x11ctl-test-{display_num}-*.pid",
-            f"/tmp/.x11ctl-test-{display_num}.pid",
-        ]
-        # Try stopping via x11ctl first
-        env = {
-            "X11CTL_DISPLAY": f":{display_num}",
-            "X11CTL_XAUTH": f"/tmp/.x11ctl-test-{display_num}",
-        }
-        try:
-            x11ctl_run(["stop"], env_overrides=env, timeout=10)
-        except Exception:
-            pass
-
-    # Brute-force: find and kill any remaining Xvfb on test displays
+    # Brute-force: find and kill any remaining X11 processes on test displays
     try:
         result = subprocess.run(
             ["/bin/ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=5
@@ -214,21 +260,29 @@ def session_cleanup():
             line = line.strip()
             if not line:
                 continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            args_str = " ".join(parts[1:])
+            args_list = parts[1:]
             for display_num in DISPLAY_RANGE:
-                # Match display number as an argument (e.g., ":82" in "Xvfb :82 ...")
-                if f" :{display_num} " in f" {line} " and any(
-                    name in line for name in ["Xvfb", "xpra", "x11vnc", "websockify"]
+                display_arg = f":{display_num}"
+                # Match display number as a standalone argument, not a substring
+                if display_arg in args_list and any(
+                    name in args_str for name in ["Xvfb", "xpra", "x11vnc", "websockify"]
                 ):
                     try:
-                        pid = int(line.split()[0])
+                        pid = int(parts[0])
                         os.kill(pid, signal.SIGKILL)
+                        logger.info(
+                            "session_cleanup killed orphan PID %d (%s)", pid, args_str[:80]
+                        )
                     except (ProcessLookupError, PermissionError, ValueError):
                         pass
     except Exception:
-        pass
+        logger.warning("session_cleanup ps scan failed", exc_info=True)
 
-    # Clean up stale files
-    import glob
+    # Clean up stale flat /tmp files (xauth, X lock, X socket)
     for display_num in DISPLAY_RANGE:
         for pattern in [
             f"/tmp/.x11ctl-test-{display_num}*",
