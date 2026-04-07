@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-07
 **Branch:** tokens-in-footer
-**Status:** Reviewed (rev 3)
+**Status:** Reviewed (rev 4)
 
 ## Problem
 
@@ -20,7 +20,6 @@ Separately, the Claude model itself has no awareness of its own context window s
 - No changes to the sidebar `AgentItem` context display (already has token counts).
 - No configuration toggle for the system-reminder injection (always on). A feature flag may be added later if model behavior issues arise, but is deliberately omitted from the first version to avoid premature complexity.
 - No color or urgency hints inside the injected system-reminder (the operator handles that via external CLAUDE.md rules or operator instructions).
-- No changes to how tokens are fetched or tracked (`refresh_context` in `app.py`, `Agent.tokens`, `Agent.max_tokens` are untouched).
 - No implementation task list — that belongs in the implementation plan, not the spec.
 
 ## Acceptance Criteria
@@ -31,7 +30,7 @@ Separately, the Claude model itself has no awareness of its own context window s
 4. Every prompt sent to the SDK includes `<system-reminder>{used}/{max} tokens</system-reminder>`, **except** when context data is not yet initialized (see injection guard).
 5. The system-reminder uses raw integers (e.g., `14000/200000`) not human-formatted values.
 6. Resumed sessions do not display injected `<system-reminder>` token tags in user messages. Other `<system-reminder>` tags (e.g., plan-mode instructions) are preserved.
-7. No footer truncation or overflow on 80-column terminals. When space is constrained, the footer hides cwd and session labels first (existing behavior); the ContextBar, model label, and branch label remain visible.
+7. No footer truncation or overflow on 80-column terminals. When space is constrained, the footer hides cwd and session labels first (existing behavior). The model and branch labels have bounded width (model name + git branch) and are not dynamically truncated.
 8. Clicking the `ContextBar` still runs `/context`.
 
 ## Design
@@ -59,9 +58,9 @@ Note: `format_tokens(200000)` returns `"200.0K"` (not `"200K"`). The `.0` is onl
 
 This intentionally drops the current theme-aware dark/light color logic in favor of matching the sidebar's simpler approach. The sidebar already uses plain `dim`/`yellow`/`red` styles and has shipped without issues across themes.
 
-**Width:** The `ContextBar` CSS in `styles.tcss` (line 512) has `width: auto` and `content-align: right middle`. Text length varies from ~13 chars (`0% [0/200.0K]`) to ~21 chars (`100% [200.0K/200.0K]`). Edge cases like `format_tokens(999999) = "1000.0K"` can produce up to ~25 chars but are unlikely in practice. The footer's spacer-based layout absorbs width variations, and the existing `_render_cwd_label()` budget recomputation hides cwd/session labels when siblings grow.
+**Width:** The `ContextBar` CSS in `styles.tcss` (line 512) has `width: auto` and `content-align: right middle`. Text length varies from ~13 chars (`0% [0/200.0K]`) to ~22 chars (`100% [200.0K/200.0K]`). The footer's spacer-based layout absorbs width variations, and the existing `_render_cwd_label()` budget recomputation hides cwd/session labels when siblings grow.
 
-**Footer rebudgeting:** When `ContextBar` width changes (due to token count updates), the footer must recompute the cwd/session label budgets. The `ContextBar` widget should trigger `StatusFooter.refresh_cwd_label()` when its rendered width changes, or `app.py` should call `refresh_cwd_label()` after updating context-bar values in `refresh_context()`.
+**Footer rebudgeting:** When `ContextBar` width changes (due to token count updates), the footer must recompute the cwd/session label budgets. `app.py` calls `self.status_footer.refresh_cwd_label()` after updating context-bar values in `refresh_context()`. This follows the existing pattern where `refresh_context()` already directly sets `self.context_bar.tokens` — adding a rebudget call at the same site keeps all context-bar update logic in one place.
 
 **Division safety:** When `max_tokens == 0`, render `0% [0/0]` (same guard as existing code: `if self.max_tokens else 0`).
 
@@ -69,13 +68,41 @@ This intentionally drops the current theme-aware dark/light color logic in favor
 
 ### Part 2: System Message Injection
 
-**File:** `claudechic/agent.py` — new `_prepare_prompt()` method
+**File:** `claudechic/agent.py` — new `_prepare_prompt()` method and `update_context()` method
 
-Extract a dedicated `_prepare_prompt(self, prompt: str) -> str` method that handles all prompt augmentation. This is a **pure transformation** (`str → str`) with no side effects — it reads `self.tokens`, `self.max_tokens`, and `self.permission_mode` but does not mutate state. It is called at the top of `_process_response()` and centralizes:
+#### `_prepare_prompt(self, prompt: str) -> str`
+
+A **side-effect-free method** that reads `self._context_initialized`, `self.tokens`, `self.max_tokens`, and `self.permission_mode` to augment the prompt. It does not mutate any state. It is called at the top of `_process_response()` and centralizes:
 1. System-reminder injection (when context data is initialized)
 2. Plan-mode instruction prepend (when `permission_mode == "plan"`)
 
 This replaces the current inline plan-mode prepend in `_process_response()`.
+
+Note: `_prepare_prompt` reads mutable instance attributes rather than accepting them as parameters. This is consistent with other private methods on `Agent` (e.g., `_handle_permission` reads `self.permission_mode`). Tests set the relevant attributes on an `Agent` instance before calling `_prepare_prompt()`.
+
+#### `update_context(self, tokens: int, max_tokens: int | None = None) -> None`
+
+A new public method on `Agent` that atomically updates token state:
+
+```python
+def update_context(self, tokens: int, max_tokens: int | None = None) -> None:
+    self.tokens = tokens
+    if max_tokens is not None:
+        self.max_tokens = max_tokens
+    self._context_initialized = True
+```
+
+This replaces the current pattern in `app.py` where `refresh_context()` directly sets `agent.tokens` and `agent.max_tokens` as separate attribute assignments. Benefits:
+- Encapsulates the `_context_initialized` flag — app.py never touches the private flag directly.
+- Ensures tokens and max_tokens are updated atomically with the initialized flag.
+- The `max_tokens` parameter is optional: the SDK API path provides both values; the session-file fallback path provides only `tokens`.
+
+**Injection guard:** `_context_initialized` starts `False`. It is set to `True` only via `update_context()`. It is **reset to `False`** in `Agent.disconnect()` to ensure lifecycle events (`/new`, `/clear`, reconnect, resume, model switch) do not carry stale data. After reconnect, `refresh_context()` calls `update_context()` which re-enables injection.
+
+**Fallback path behavior:** The session-file fallback in `refresh_context()` only provides `tokens`, not `max_tokens`. It calls `agent.update_context(tokens)` (without max_tokens), which sets `_context_initialized = True`. In this case, `max_tokens` retains its previous value. This is acceptable because:
+- On first connect, `max_tokens` is set from model metadata before the first `refresh_context()` call.
+- On subsequent turns, `max_tokens` is already correct from a prior SDK API response.
+- The fallback only fires when the SDK API is unavailable, which is rare.
 
 **System-reminder format:**
 
@@ -83,13 +110,9 @@ This replaces the current inline plan-mode prepend in `_process_response()`.
 <system-reminder>14000/200000 tokens</system-reminder>
 ```
 
-- Uses **raw integers** (e.g., `14000/200000`), not human-formatted values (`14.0K/200.0K`). Raw integers are unambiguous for machine consumption and avoid coupling the agent layer to the presentation-formatting module.
+- Uses **raw integers** (e.g., `14000/200000`), not human-formatted values. Raw integers are unambiguous for machine consumption and avoid coupling the agent layer to the presentation-formatting module.
 - No percentage, no color, no urgency guidance — plain numbers only.
 - The operator (via CLAUDE.md or other rules) is responsible for defining behavioral instructions based on these numbers. This feature provides the data; behavior is defined externally.
-
-**Injection guard:** Add a `_context_initialized: bool` flag to `Agent`, initially `False`. Set to `True` when `refresh_context()` successfully updates token data (via the observer callback). Skip injection when `_context_initialized` is `False`. This avoids injecting the hardcoded default `MAX_CONTEXT_TOKENS` before the actual model's context window is known.
-
-Note: `max_tokens` is initialized to `MAX_CONTEXT_TOKENS` (200,000), never 0, so a `max_tokens == 0` check would protect against an impossible state. The `_context_initialized` flag correctly gates on whether real data has been received.
 
 **Final prompt shape:**
 
@@ -127,23 +150,26 @@ The token reminder always appears first. Plan-mode instructions follow. The user
 
 When a session is resumed via `load_history()`, user messages are loaded from the SDK's persisted session file. These contain the raw wire-format prompt including any `<system-reminder>` tags that were prepended. Without cleanup, resumed sessions would display raw `<system-reminder>14000/200000 tokens</system-reminder>` text at the beginning of user messages.
 
-**Solution:** Define a **narrow, specific regex** in `formatting.py` that matches **only** the token-injection pattern:
+**Solution:** Define a **narrow, start-anchored regex** in `formatting.py` that matches **only** the token-injection pattern at the beginning of a message:
 
 ```python
 TOKEN_REMINDER_PATTERN = re.compile(
-    r"\n*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
+    r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 ```
 
-This pattern matches `<system-reminder>14000/200000 tokens</system-reminder>` but does **not** match plan-mode instructions, other system-reminders, or user-typed content containing `<system-reminder>` tags. This is intentionally narrower than the generic `SYSTEM_REMINDER_PATTERN` in `widgets/content/tools.py`.
+Key properties:
+- **Anchored to start** (`^`): Only matches at the beginning of the string. A user who types `<system-reminder>42/100 tokens</system-reminder>` mid-message is unaffected.
+- **Narrow content match** (`\d+/\d+ tokens`): Does not match plan-mode instructions, other system-reminders, or arbitrary content.
+- **Strips trailing newlines** (`\n*`): Cleans up the separator between the tag and the user's actual text.
 
 **Placement:** `formatting.py` (shared, no UI dependencies). Imported by:
 - `agent.py` — used in `load_history()` to strip token tags from user message text.
 - `sessions.py` — used in `load_session_messages()` and `_extract_session_info()` to strip token tags before command filtering and title extraction.
 
-This avoids an inverted dependency (agent → widget layer) and ensures all session-file consumers see clean text.
+In `_extract_session_info()`, stripping applies to **both content paths**: when content is a plain string, and when content is a list of blocks (image-backed messages where content is `[{"type": "text", "text": "..."}]`). The stripping is applied to the text value before title extraction.
 
-**Stripping happens in `load_history()`** (definitively, not "or" the widget layer). The agent's in-memory `self.messages` model is the single source of truth — cleaning at the source means any future consumer of `Agent.messages` gets clean data automatically.
+**Stripping happens in `load_history()`** (definitively, not the widget layer). The agent's in-memory `self.messages` model is the single source of truth — cleaning at the source means any future consumer of `Agent.messages` gets clean data automatically.
 
 ## Affected Files
 
@@ -151,11 +177,11 @@ This avoids an inverted dependency (agent → widget layer) and ensures all sess
 |------|--------|
 | `claudechic/widgets/layout/indicators.py` | Replace `ContextBar.render()` visual bar with text format |
 | `claudechic/formatting.py` | Add `TOKEN_REMINDER_PATTERN` regex |
-| `claudechic/agent.py` | Add `_prepare_prompt()`, `_context_initialized` flag; refactor plan-mode prepend; strip token tags in `load_history()` |
-| `claudechic/sessions.py` | Strip token tags in `load_session_messages()` and `_extract_session_info()` |
-| `claudechic/app.py` | Set `_context_initialized = True` after successful `refresh_context()`; call `refresh_cwd_label()` after context-bar updates |
+| `claudechic/agent.py` | Add `_prepare_prompt()`, `update_context()`, `_context_initialized` flag; reset flag in `disconnect()`; refactor plan-mode prepend; strip token tags in `load_history()` |
+| `claudechic/sessions.py` | Strip token tags in `load_session_messages()` and `_extract_session_info()` (both string and list-content-block paths) |
+| `claudechic/app.py` | Use `agent.update_context()` in `refresh_context()` instead of direct attribute assignment; call `refresh_cwd_label()` after context-bar updates |
 | `tests/test_widgets.py` | Update `test_context_bar_rendering`; add new test cases |
-| `tests/test_agent.py` (new or existing) | Tests for `_prepare_prompt()`, injection, plan-mode interaction, session resume |
+| `tests/test_agent.py` (new or existing) | Tests for `_prepare_prompt()`, `update_context()`, injection, plan-mode interaction, session resume, lifecycle reset |
 
 ## Testing Strategy
 
@@ -169,28 +195,35 @@ This avoids an inverted dependency (agent → widget layer) and ensures all sess
 
 ### Unit Tests — System-Reminder Injection
 
-6. **`_prepare_prompt()` basic** — Set `_context_initialized=True`, `tokens=14000`, `max_tokens=200000`; assert output starts with `<system-reminder>14000/200000 tokens</system-reminder>`.
-7. **Plan-mode interaction** — Set `permission_mode="plan"`, `_context_initialized=True`; assert output contains both token reminder AND plan-mode instructions, in correct order (token first, plan second, user prompt last).
+6. **`_prepare_prompt()` basic** — Call `agent.update_context(14000, 200000)`; assert `_prepare_prompt("hello")` starts with `<system-reminder>14000/200000 tokens</system-reminder>`.
+7. **Plan-mode interaction** — Set `permission_mode="plan"`, call `update_context()`; assert output contains both token reminder AND plan-mode instructions, in correct order (token first, plan second, user prompt last).
 8. **Image path** — Set `pending_images` non-empty; assert the prompt passed to `_build_message_with_images()` includes the system-reminder.
-9. **Injection guard** — Set `_context_initialized=False`; assert no `<system-reminder>` is prepended.
-10. **Edge case: tokens=0 with initialized context** — Set `_context_initialized=True`, `tokens=0`; assert `<system-reminder>0/200000 tokens</system-reminder>` is prepended.
+9. **Injection guard (uninitialized)** — Do NOT call `update_context()`; assert no `<system-reminder>` is prepended.
+10. **Edge case: tokens=0 with initialized context** — Call `update_context(0, 200000)`; assert `<system-reminder>0/200000 tokens</system-reminder>` is prepended.
+11. **`update_context()` atomicity** — Assert that calling `update_context(5000)` (no max_tokens) sets `_context_initialized=True` and preserves existing `max_tokens`.
+
+### Unit Tests — Lifecycle
+
+12. **Reset on disconnect** — Call `update_context(14000, 200000)`, then `disconnect()`; assert `_context_initialized` is `False`.
+13. **No injection after `/new`** — Simulate disconnect+reconnect cycle; assert first prompt after reconnect has no system-reminder (until `refresh_context()` calls `update_context()` again).
 
 ### Unit Tests — Session Resume
 
-11. **Token tag stripping** — Load a mock session containing user messages with token `<system-reminder>` tags; assert they are stripped from `UserContent.text`.
-12. **Plan-mode tags preserved** — Load a mock session containing user messages with plan-mode `<system-reminder>` tags; assert they are NOT stripped.
-13. **Session title extraction** — Verify `_extract_session_info()` does not include token reminder in session titles.
+14. **Token tag stripping** — Load a mock session containing user messages with token `<system-reminder>` tags; assert they are stripped from `UserContent.text`.
+15. **Plan-mode tags preserved** — Load a mock session containing user messages with plan-mode `<system-reminder>` tags; assert they are NOT stripped.
+16. **Mid-message user content preserved** — Load a mock session where user typed `<system-reminder>42/100 tokens</system-reminder>` mid-message; assert it is NOT stripped (anchored regex).
+17. **Session title extraction** — Verify `_extract_session_info()` does not include token reminder in session titles. Test both string and list-content-block paths.
 
 ### Integration Tests
 
-14. **Footer displays token text** — In `test_app_ui.py`, verify `ContextBar` renders text after context refresh.
-15. **Click still works** — Verify clicking `ContextBar` triggers `/context`.
-16. **Narrow terminal** — Verify footer layout at 80 columns does not overflow or truncate critical elements. Verify cwd/session labels hide before ContextBar does.
-17. **Footer rebudgets on context update** — Verify that updating ContextBar tokens triggers cwd/session label rebudgeting.
+18. **Footer displays token text** — In `test_app_ui.py`, verify `ContextBar` renders text after context refresh.
+19. **Click still works** — Verify clicking `ContextBar` triggers `/context`.
+20. **Narrow terminal** — Verify footer layout at 80 columns does not overflow or truncate critical elements. Verify cwd/session labels hide before ContextBar does.
+21. **Footer rebudgets on context update** — Verify that updating ContextBar tokens triggers cwd/session label rebudgeting.
 
 ## Risks
 
-- **Horizontal space on narrow terminals:** The text is wider than the old bar (~13-21 chars vs ~12 with padding). The footer has a spacer and budget recomputation that hides cwd/session labels first. Risk mitigated by integration test #16.
+- **Horizontal space on narrow terminals:** The text is wider than the old bar (~13-22 chars vs ~12 with padding). The footer has a spacer and budget recomputation that hides cwd/session labels first. Risk mitigated by integration test #20.
 - **Token staleness:** Values are one-turn stale. Near saturation, the model may underestimate usage significantly (depending on previous turn size). Typical conversational turns undercount by 5–20K tokens; pasted documents or long tool chains can undercount more. Accepted trade-off — a synchronous refresh would add latency to every message send.
 - **Model behavior uncertainty:** The model may ignore the token data, add unwanted meta-commentary ("I see context is filling up..."), or prematurely truncate responses. This is mitigated by keeping the injection data-only and relying on operator instructions to define behavior. If no operator instruction is defined, the injection is inert overhead (~10 tokens/turn).
 - **Mid-session model switch:** If the user changes models, `max_tokens` updates on the next `refresh_context()`. Until then, the injected max may be stale. Low impact — the value corrects within one turn.
@@ -224,16 +257,26 @@ Addressed findings from 6-agent review (3 roborev, 1 code-reviewer, 1 architect,
 
 Addressed findings from 6-agent re-review:
 
-- **H1 (broad tag stripping):** Replaced generic `SYSTEM_REMINDER_PATTERN` with narrow `TOKEN_REMINDER_PATTERN` that only matches `\d+/\d+ tokens` format. Plan-mode tags and user content are preserved.
+- **H1 (broad tag stripping):** Replaced generic `SYSTEM_REMINDER_PATTERN` with narrow `TOKEN_REMINDER_PATTERN` that only matches `\d+/\d+ tokens` format.
 - **H2 (SDK persistence undocumented):** Added explicit SDK persistence assumption documentation.
-- **M1 (session-file consumers):** Extended stripping to `sessions.py` (`load_session_messages`, `_extract_session_info`), not just `load_history()`.
+- **M1 (session-file consumers):** Extended stripping to `sessions.py` (`load_session_messages`, `_extract_session_info`).
 - **M2 (footer rebudgeting):** Added footer rebudget trigger when ContextBar width changes.
-- **M3 (regex layer violation):** Moved `TOKEN_REMINDER_PATTERN` to `formatting.py` (shared, no UI dependencies).
-- **M4 (Part 3 placement):** Resolved definitively to `load_history()` (removed "or").
-- **M5 (`_prepare_prompt` purity):** Documented as pure `str → str` transformation with no side effects.
-- **M6 (impossible guard state):** Replaced `max_tokens == 0` guard with `_context_initialized` flag set by `refresh_context()`.
-- **M7 (acceptance criteria contradiction):** Added "except when context data is not yet initialized" qualifier.
+- **M3 (regex layer violation):** Moved `TOKEN_REMINDER_PATTERN` to `formatting.py`.
+- **M4 (Part 3 placement):** Resolved definitively to `load_history()`.
+- **M5 (`_prepare_prompt` purity):** Documented as pure `str → str` transformation.
+- **M6 (impossible guard state):** Replaced `max_tokens == 0` guard with `_context_initialized` flag.
+- **M7 (acceptance criteria contradiction):** Added "except" qualifier.
 - **M8 (SDK assumption):** Documented in Part 3 and Risks.
-- **L1 (narrow terminal priority):** Specified that cwd/session labels hide first; ContextBar remains visible.
-- **L4 (width edge cases):** Noted `format_tokens(999999) = "1000.0K"` edge case.
-- Added test #12 (plan-mode tags preserved), test #13 (session title extraction), test #17 (footer rebudgeting).
+
+### Rev 3 → Rev 4 (2026-04-07)
+
+Addressed findings from 6-agent third review:
+
+- **H1 (`_context_initialized` lifecycle):** Reset flag in `Agent.disconnect()`. All lifecycle events (reconnect, `/new`, `/clear`, model switch) pass through disconnect, ensuring stale data is never carried forward.
+- **H2 (fallback path sets flag incorrectly):** Documented fallback behavior: `update_context(tokens)` without max_tokens sets initialized=True but preserves existing max_tokens, which is correct because max_tokens was already set from model metadata or a prior SDK response.
+- **H3 (boundary violation):** Added `Agent.update_context()` method. `app.py` now calls this method instead of directly setting private attributes. The initialized flag is fully encapsulated.
+- **M1 (regex not anchored):** Anchored `TOKEN_REMINDER_PATTERN` to start of string with `^`. Mid-message user content is now immune to stripping.
+- **M2 (list-content-block stripping):** Specified stripping in both string and list-content-block paths of `_extract_session_info()`.
+- **M3 (rebudget "or"):** Committed to the `app.py` approach — `refresh_cwd_label()` called after context-bar updates in `refresh_context()`.
+- **M4 ("pure" terminology):** Changed to "side-effect-free method."
+- **M5 (test gaps):** Added lifecycle tests (#12-13), mid-message preservation test (#16), `update_context` atomicity test (#11), list-content-block title test (#17).
