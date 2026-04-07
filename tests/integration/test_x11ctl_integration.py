@@ -38,11 +38,14 @@ class TestAcceptanceCriteria:
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
         assert result.returncode == 0, f"start failed: {result.stderr}"
 
-        # Verify display works via xdpyinfo
+        # Verify display works via xdpyinfo (sanitise env like x11ctl_run does)
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("X11CTL_")}
+        clean_env["DISPLAY"] = env["X11CTL_DISPLAY"]
+        clean_env["XAUTHORITY"] = env["X11CTL_XAUTH"]
         check = subprocess.run(
             ["xdpyinfo", "-display", env["X11CTL_DISPLAY"]],
             capture_output=True, text=True, timeout=10,
-            env={**os.environ, "XAUTHORITY": env["X11CTL_XAUTH"]},
+            env=clean_env,
         )
         assert check.returncode == 0, f"xdpyinfo failed: {check.stderr}"
 
