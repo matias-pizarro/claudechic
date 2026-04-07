@@ -5,7 +5,6 @@ Every test invokes scripts/x11ctl as a subprocess.
 """
 import os
 import shutil
-import stat
 from pathlib import Path
 
 import pytest

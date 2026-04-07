@@ -416,8 +416,7 @@ class TestLifecycleScenarios:
         assert env["X11CTL_DISPLAY"] in result.stdout
 
         # Verify output is valid shell syntax (eval-safe)
-        import subprocess as _sp
-        syntax_check = _sp.run(
+        syntax_check = subprocess.run(
             ["/bin/sh", "-n"],
             input=result.stdout, capture_output=True, text=True, timeout=5,
         )
