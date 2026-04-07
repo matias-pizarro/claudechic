@@ -216,6 +216,7 @@ class TestAcceptanceCriteria:
             ["/usr/bin/sockstat", "-4", "-l", "-p", str(port)],
             capture_output=True, text=True, timeout=5,
         )
+        assert check.returncode == 0, f"sockstat failed: {check.stderr}"
         found_listener = False
         for line in check.stdout.splitlines()[1:]:  # skip header
             parts = line.split()
@@ -287,10 +288,12 @@ class TestLifecycleScenarios:
         result = x11ctl_run(["start", "--all"], env_overrides=env)
         assert result.returncode == 0, f"start --all failed: {result.stderr}"
 
-        # Capture xvfb PID before downgrade
+        # Verify all tiers running before downgrade
         r1 = x11ctl_run(["status"], env_overrides=env)
         assert r1.returncode == 0
-        assert "xvfb" in r1.stderr.lower()
+        status_lower = r1.stderr.lower()
+        assert "xvfb" in status_lower, f"xvfb not in pre-downgrade status: {r1.stderr}"
+        assert "xpra" in status_lower, f"xpra not in pre-downgrade status: {r1.stderr}"
         content_before = read_state_file(pidfile)
 
         # Downgrade
@@ -362,6 +365,12 @@ class TestLifecycleScenarios:
             except ProcessLookupError:
                 break
             time.sleep(0.1)
+
+        # Precondition: stale pidfile must still exist (this is the crash
+        # recovery scenario — the pidfile outlives the process).
+        stale_content = read_state_file(pidfile)
+        assert stale_content is not None, \
+            "Stale pidfile was cleaned before restart — not testing crash recovery"
 
         # Restart — should clean stale artifacts and start fresh
         result = x11ctl_run(["start", "--headless"], env_overrides=env)
