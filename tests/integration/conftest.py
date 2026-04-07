@@ -284,8 +284,11 @@ def _kill_pidfiles_in_dir(state_dir: str, state_prefix: str) -> None:
 def session_cleanup():
     """Session-scoped safety net. Runs at end of all tests.
 
-    Scans for orphaned processes and stale state files in the test
-    display range (:80-:199) and cleans them up.
+    Scans for orphaned processes and stale state files from this test
+    suite and cleans them up. Only kills processes that match ALL of:
+    display in test range (:80-:199), X11-related binary name, AND
+    our test xauth pattern (x11ctl-test-) in args — preventing
+    accidental termination of unrelated user processes.
 
     NOTE: Per-test state dirs (tmp_path) are already cleaned by pytest.
     This fixture cannot reconstruct those paths, so it relies on the
@@ -313,10 +316,12 @@ def session_cleanup():
                 continue
             args_str = " ".join(parts[1:])
             args_list = parts[1:]
-            # Match if any argument is a test display AND process is X11-related
-            if any(a in _display_args for a in args_list) and any(
-                name in args_str for name in _x11_names
-            ):
+            # Match only processes started by our test suite: must have a test
+            # display arg AND an X11-related process name AND our test xauth
+            # pattern in the args (prevents killing unrelated user processes).
+            if (any(a in _display_args for a in args_list)
+                    and any(name in args_str for name in _x11_names)
+                    and "x11ctl-test-" in args_str):
                 try:
                     pid = int(parts[0])
                     os.kill(pid, signal.SIGKILL)
