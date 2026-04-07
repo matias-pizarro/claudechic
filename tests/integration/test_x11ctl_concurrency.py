@@ -139,6 +139,14 @@ class TestConcurrency:
         assert p1.returncode == 0, f"p1 failed: {err1.decode()}"
         assert p2.returncode == 0, f"p2 failed: {err2.decode()}"
 
+        # Verify post-stop state is clean (pidfile removed)
+        pidfile = os.path.join(
+            env["state_dir"],
+            f"{env['X11CTL_STATE_PREFIX']}-xvfb.pid",
+        )
+        assert read_state_file(pidfile) is None, \
+            "Pidfile not cleaned after concurrent stops"
+
     def test_signal_during_run(self, display_factory):
         """SIGTERM to x11ctl run: child killed, display cleaned."""
         env = display_factory
@@ -163,8 +171,9 @@ class TestConcurrency:
         # wait() ensures process exited AND its finally cleanup ran
         run_proc.wait(timeout=15)
 
-        # Should have exited (not hung)
-        assert run_proc.returncode is not None
+        # x11ctl's signal handler does sys.exit(128 + signum)
+        assert run_proc.returncode != 0, \
+            f"Expected non-zero exit from SIGTERM, got {run_proc.returncode}"
 
         # Verify xauth cleaned up — process already waited, so cleanup
         # (which runs in x11ctl's finally block) has completed. No sleep needed.
