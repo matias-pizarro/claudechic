@@ -100,3 +100,40 @@ class TestPreparePrompt:
         result = agent._prepare_prompt("hello")
         assert "PLAN MODE ACTIVE" in result
         assert "<system-reminder>0/" not in result  # No token injection
+
+
+class TestTokenReminderPattern:
+    def test_matches_token_reminder_at_start(self):
+        from claudechic.formatting import TOKEN_REMINDER_PATTERN
+
+        text = "<system-reminder>14000/200000 tokens</system-reminder>\nhello"
+        result = TOKEN_REMINDER_PATTERN.sub("", text)
+        assert result == "hello"
+
+    def test_preserves_plan_mode_tags(self):
+        from claudechic.formatting import TOKEN_REMINDER_PATTERN
+
+        text = "<system-reminder>\nPLAN MODE ACTIVE\n</system-reminder>\nhello"
+        result = TOKEN_REMINDER_PATTERN.sub("", text)
+        assert result == text  # Unchanged
+
+    def test_preserves_mid_message_content(self):
+        from claudechic.formatting import TOKEN_REMINDER_PATTERN
+
+        text = "user said <system-reminder>42/100 tokens</system-reminder> here"
+        result = TOKEN_REMINDER_PATTERN.sub("", text)
+        assert result == text  # Unchanged (not at start)
+
+    def test_strips_with_leading_whitespace(self):
+        from claudechic.formatting import TOKEN_REMINDER_PATTERN
+
+        text = "  <system-reminder>5000/200000 tokens</system-reminder>\nhello"
+        result = TOKEN_REMINDER_PATTERN.sub("", text)
+        assert result == "hello"
+
+    def test_strips_trailing_newlines(self):
+        from claudechic.formatting import TOKEN_REMINDER_PATTERN
+
+        text = "<system-reminder>14000/200000 tokens</system-reminder>\n\nhello"
+        result = TOKEN_REMINDER_PATTERN.sub("", text)
+        assert result == "hello"

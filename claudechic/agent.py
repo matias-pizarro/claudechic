@@ -36,7 +36,7 @@ from claude_agent_sdk.types import (
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
 from claudechic.features.worktree.git import FinishState
 from claudechic.file_index import FileIndex
-from claudechic.formatting import MAX_CONTEXT_TOKENS
+from claudechic.formatting import MAX_CONTEXT_TOKENS, TOKEN_REMINDER_PATTERN
 from claudechic.permissions import PermissionRequest
 from claudechic.sessions import get_plan_path_for_session
 from claudechic.tasks import create_safe_task
@@ -342,9 +342,10 @@ class Agent:
                         ChatItem(role="assistant", content=current_assistant)
                     )
                     current_assistant = None
-                # Add user message
+                # Add user message (strip injected token reminder from wire format)
+                clean_text = TOKEN_REMINDER_PATTERN.sub("", m["content"])
                 self.messages.append(
-                    ChatItem(role="user", content=UserContent(text=m["content"]))
+                    ChatItem(role="user", content=UserContent(text=clean_text))
                 )
             elif m["type"] == "assistant":
                 # Add text block to current assistant content (preserving order)
