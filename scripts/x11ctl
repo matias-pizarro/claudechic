@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import glob
 import os
 import re
 import shlex
@@ -2128,8 +2129,11 @@ def cleanup_selftest(state_dir: str, xauth: str) -> None:
     except OSError as exc:
         print(f"Warning: failed to remove state dir {state_dir}: {exc}", file=sys.stderr)
     try:
-        if os.path.lexists(xauth) and not os.path.islink(xauth):
-            os.unlink(xauth)
+        if os.path.lexists(xauth):
+            if os.path.islink(xauth):
+                print(f"Warning: xauth {xauth} is a symlink — skipping removal", file=sys.stderr)
+            else:
+                os.unlink(xauth)
     except OSError as exc:
         print(f"Warning: failed to remove xauth {xauth}: {exc}", file=sys.stderr)
 
@@ -2148,9 +2152,7 @@ def clean_stale_selftest_dirs(
 
     Returns (True, None) on success, (False, info_dict) on unkillable stale.
     """
-    import glob as _glob
-
-    candidates = _glob.glob(os.path.join(tmp_dir, ".x11ctl-selftest-*-*"))
+    candidates = glob.glob(os.path.join(tmp_dir, ".x11ctl-selftest-*-*"))
     for candidate in sorted(candidates):
         # Reject symlinks — prevents arbitrary rmtree
         if os.path.islink(candidate):
@@ -2173,8 +2175,9 @@ def clean_stale_selftest_dirs(
         except OSError:
             continue
 
-        # Phase 1: classify all pidfiles
-        pidfiles: list[tuple[str, str, int, int]] = []  # (path, comp_name, pid, epoch)
+        # Phase 1: classify all pidfiles — store state to avoid
+        # calling validate_pid_tristate twice (TOCTOU + overhead).
+        classified: list[tuple[str, str, int, str]] = []  # (path, comp_name, pid, state)
         has_unknown = False
         for pidfile in sorted(Path(candidate).glob("*.pid")):
             comp_name = pidfile.stem  # e.g., "xvfb" from "xvfb.pid"
@@ -2184,7 +2187,7 @@ def clean_stale_selftest_dirs(
                 pid, epoch = int(parts[0]), int(parts[1])
             except (OSError, ValueError, IndexError):
                 # Malformed pidfile → treat as dead
-                pidfiles.append((str(pidfile), comp_name, 0, 0))
+                classified.append((str(pidfile), comp_name, 0, "dead"))
                 continue
 
             comm = _COMPONENT_COMM.get(comp_name, comp_name)
@@ -2192,7 +2195,7 @@ def clean_stale_selftest_dirs(
             if state == "unknown":
                 has_unknown = True
                 break
-            pidfiles.append((str(pidfile), comp_name, pid, epoch))
+            classified.append((str(pidfile), comp_name, pid, state))
 
         if has_unknown:
             print(
@@ -2201,8 +2204,8 @@ def clean_stale_selftest_dirs(
             )
             continue
 
-        # Phase 2: act on classified pidfiles
-        for pidpath, comp_name, pid, epoch in pidfiles:
+        # Phase 2: act on classified pidfiles (using stored state)
+        for pidpath, comp_name, pid, state in classified:
             if pid == 0:
                 # Malformed → just remove pidfile
                 try:
@@ -2210,15 +2213,13 @@ def clean_stale_selftest_dirs(
                 except FileNotFoundError:
                     pass
                 continue
-
-            comm = _COMPONENT_COMM.get(comp_name, comp_name)
-            state = validate_pid_tristate(pid, epoch, comm)
             if state == "dead":
                 try:
                     os.unlink(pidpath)
                 except FileNotFoundError:
                     pass
             elif state == "alive":
+                comm = _COMPONENT_COMM.get(comp_name, comp_name)
                 ok = stop_component(pidpath, comm)
                 if not ok:
                     return (False, {
@@ -2307,37 +2308,40 @@ def self_test_command_impl(tier: str) -> int:
             if os.path.exists(lock_path) or os.path.exists(socket_path):
                 continue
 
-            # Create temporary config to check offset ports
+            # Create temporary state dir; clean up on any failure path
             tmp_state = tempfile.mkdtemp(
                 prefix=f".x11ctl-selftest-{display_num}-",
                 dir="/tmp",
             )
-            if os.path.isdir(tmp_state):
-                os.chmod(tmp_state, 0o700)
-            cfg = Config.for_self_test(display_num, state_dir=tmp_state)
+            try:
+                if os.path.isdir(tmp_state):
+                    os.chmod(tmp_state, 0o700)
+                cfg = Config.for_self_test(display_num, state_dir=tmp_state)
 
-            # Check port availability for requested tier
-            ports_ok = True
-            if needs_xpra_port:
-                if not check_port_available("127.0.0.1", cfg.xpra_port):
-                    ports_ok = False
-            if needs_vnc_ports and ports_ok:
-                if not check_port_available("127.0.0.1", cfg.vnc_port):
-                    ports_ok = False
-                if not check_port_available("127.0.0.1", cfg.novnc_port):
-                    ports_ok = False
+                # Check port availability for requested tier
+                ports_ok = True
+                if needs_xpra_port:
+                    if not check_port_available("127.0.0.1", cfg.xpra_port):
+                        ports_ok = False
+                if needs_vnc_ports and ports_ok:
+                    if not check_port_available("127.0.0.1", cfg.vnc_port):
+                        ports_ok = False
+                    if not check_port_available("127.0.0.1", cfg.novnc_port):
+                        ports_ok = False
 
-            if not ports_ok:
-                # Clean up the temp dir we just created
-                try:
-                    shutil.rmtree(tmp_state)
-                except OSError:
-                    pass
-                continue
+                if not ports_ok:
+                    continue  # finally cleans up tmp_state
 
-            selected_display = display_num
-            selected_cfg = cfg
-            break
+                selected_display = display_num
+                selected_cfg = cfg
+                tmp_state = ""  # prevent finally from cleaning the selected dir
+                break
+            finally:
+                if tmp_state:
+                    try:
+                        shutil.rmtree(tmp_state, ignore_errors=True)
+                    except Exception:
+                        pass
 
         if selected_display is None or selected_cfg is None:
             print(
@@ -2443,7 +2447,7 @@ def _run_self_test_tier(cfg: Config, tier: str) -> int:
 
         print(f"  ✓ headless: Xvfb started on {cfg.display}", file=sys.stderr)
 
-    if tier == "tier1" or tier == "all":
+    if tier in ("tier1", "all"):
         # Tier 1: screenshot test
         screenshot_path = os.path.join(cfg.state_dir, "selftest-screenshot.png")
         rc = screenshot_command_impl(cfg, screenshot_path)
