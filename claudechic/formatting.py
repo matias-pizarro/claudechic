@@ -18,6 +18,12 @@ MIN_CWD_LENGTH = 10  # Below this budget, hide cwd entirely
 MAX_CWD_LENGTH = 80  # Cap to prevent cwd from dominating the bar
 MIN_SESSION_LENGTH = 8  # Below this budget, hide session_id entirely
 
+# Matches only the token-injection system-reminder at the start of a string.
+# Anchored to ^ so mid-message user content is never stripped.
+TOKEN_REMINDER_PATTERN = re.compile(
+    r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
+)
+
 
 def format_session_id(session_id: str, budget: int) -> str:
     """Format session ID with adaptive truncation.
@@ -55,7 +61,7 @@ def format_cwd(path: str, max_length: int) -> str:
     # Home substitution
     home = os.path.expanduser("~")
     if path.startswith(home + "/") or path == home:
-        path = "~" + path[len(home):]
+        path = "~" + path[len(home) :]
 
     if len(path) <= max_length:
         return path
@@ -85,7 +91,7 @@ def format_cwd(path: str, max_length: int) -> str:
     # Last-segment fallback: even the last segment alone exceeds budget
     last = segments[-1]
     # Character-level front-truncation of last segment
-    return "\u2026" + last[-(max_length - 1):]
+    return "\u2026" + last[-(max_length - 1) :]
 
 
 def format_tokens(n: int) -> str:

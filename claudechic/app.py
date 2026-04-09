@@ -979,13 +979,12 @@ class ChatApp(App):
             try:
                 usage = await agent.client.get_context_usage()
                 if usage:
-                    agent.tokens = usage.get("totalTokens", 0)
-                    # Try rawMaxTokens first (raw model window), fall back to
-                    # maxTokens (effective limit after autocompact buffer)
+                    tokens = usage.get("totalTokens", 0)
                     raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens", 0)
                     if raw_max and raw_max > 0:
-                        agent.max_tokens = raw_max
+                        agent.update_context(tokens, raw_max)
                     else:
+                        agent.update_context(tokens)
                         log.debug(
                             "refresh_context: no max_tokens in response, keys=%s",
                             list(usage.keys()),
@@ -993,6 +992,7 @@ class ChatApp(App):
                     self.context_bar.tokens = agent.tokens
                     self.context_bar.max_tokens = agent.max_tokens
                     self._update_sidebar_agent_context(agent)
+                    self.call_after_refresh(self.status_footer.refresh_cwd_label)
                     return
                 log.warning("refresh_context: get_context_usage returned empty/None")
             except Exception:
@@ -1000,10 +1000,11 @@ class ChatApp(App):
         # Fallback: read from session file (works before SDK is fully connected)
         tokens = await get_context_from_session(agent.session_id, cwd=agent.cwd)
         if tokens is not None:
-            agent.tokens = tokens
-            self.context_bar.tokens = tokens
+            agent.update_context(tokens)
+            self.context_bar.tokens = agent.tokens
             self.context_bar.max_tokens = agent.max_tokens
             self._update_sidebar_agent_context(agent)
+            self.call_after_refresh(self.status_footer.refresh_cwd_label)
 
     def _send_initial_prompt(self) -> None:
         """Send the initial prompt from CLI args."""
@@ -2981,7 +2982,7 @@ class ChatApp(App):
                 # Try description (e.g., "Opus 4.6 · 1M context")
                 context_size = parse_context_size(desc)
             if context_size and context_size > 0:
-                agent.max_tokens = context_size
+                agent.update_context(agent.tokens, context_size)
                 self.context_bar.max_tokens = context_size
                 self._update_sidebar_agent_context(agent)
 

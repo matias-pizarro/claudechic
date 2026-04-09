@@ -93,7 +93,17 @@ Parameters:
 
 **Important**: Requires client restart to take effect (SDK caches messages in memory).
 
+## Token Reminder Stripping
+
+When prompts are sent to the SDK, claudechic prepends a `<system-reminder>` with token usage (see `Agent._prepare_prompt()`). The SDK persists this in the wire-format JSONL. On session resume, `TOKEN_REMINDER_PATTERN` (a start-anchored regex in `formatting.py`) strips these injected tags so they don't appear in user messages. Stripping happens in:
+- `agent.py` `load_history()` — cleans user messages for in-memory history
+- `sessions.py` `load_session_messages()` — cleans user messages before command filtering
+- `sessions.py` `_extract_session_info()` — cleans user messages before title extraction (both string and list-content-block paths)
+
+Plan-mode `<system-reminder>` tags and user-authored content are preserved (the regex only matches `^\s*<system-reminder>\d+/\d+ tokens</system-reminder>`).
+
 ## Related Code
 
-- `claudechic/sessions.py`: Session listing, loading, context extraction
+- `claudechic/sessions.py`: Session listing, loading, context extraction, token tag stripping
 - `claudechic/compact.py`: Compaction logic, token estimation
+- `claudechic/formatting.py`: `TOKEN_REMINDER_PATTERN` regex for session cleanup

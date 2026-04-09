@@ -19,7 +19,7 @@ Requires Claude Code to be logged in with a Max/Pro subscription (`claude /login
 claudechic/
 ├── __init__.py        # Package entry, exports ChatApp
 ├── __main__.py        # CLI entry point
-├── agent.py           # Agent class - SDK connection, history, permissions, state
+├── agent.py           # Agent class - SDK connection, history, permissions, context tracking, prompt augmentation
 ├── analytics.py       # PostHog analytics - fire-and-forget event tracking
 ├── agent_manager.py   # AgentManager - coordinates multiple concurrent agents
 ├── app.py             # ChatApp - main application, event handlers
@@ -27,7 +27,7 @@ claudechic/
 ├── compact.py         # Session compaction - shrink old tool uses to save context
 ├── errors.py          # Logging infrastructure, error handling
 ├── file_index.py      # Fuzzy file search using git ls-files
-├── formatting.py      # Tool formatting, diff rendering (pure functions)
+├── formatting.py      # Tool formatting, diff rendering, token reminder pattern (pure functions)
 ├── history.py         # Global history loading from ~/.claude/history.jsonl
 ├── mcp.py             # In-process MCP server for agent control tools
 ├── messages.py        # Custom Textual Message types for SDK events
@@ -36,7 +36,7 @@ claudechic/
 ├── profiling.py       # Lightweight profiling utilities (@profile decorator)
 ├── sampling.py        # CPU-conditional sampling profiler for high-CPU investigation
 ├── protocols.py       # Observer protocols (AgentObserver, AgentManagerObserver)
-├── sessions.py        # Session file loading and listing (pure functions)
+├── sessions.py        # Session file loading, listing, token tag stripping (pure functions)
 ├── styles.tcss        # Textual CSS - visual styling
 ├── theme.py           # Textual theme definition
 ├── usage.py           # OAuth usage API fetching (rate limits)
@@ -91,7 +91,8 @@ tests/
 ├── test_app_ui.py     # App UI tests without SDK
 ├── test_autocomplete.py # Autocomplete widget tests
 ├── test_file_index.py # Fuzzy file search tests
-└── test_widgets.py    # Pure widget tests
+├── test_widgets.py    # Pure widget tests
+└── test_agent.py      # Agent unit tests (update_context, _prepare_prompt, session resume)
 ```
 
 ## Architecture
@@ -99,14 +100,14 @@ tests/
 ### Module Boundaries
 
 **Pure functions (no UI dependencies):**
-- `formatting.py` - Tool header formatting, diff rendering, language detection
-- `sessions.py` - Session file I/O, listing, filtering
+- `formatting.py` - Tool header formatting, diff rendering, language detection, `TOKEN_REMINDER_PATTERN`
+- `sessions.py` - Session file I/O, listing, filtering, token tag stripping on resume
 - `file_index.py` - Fuzzy file search, git ls-files integration
 - `compact.py` - Session compaction to reduce context window usage
 - `usage.py` - OAuth API for rate limit info
 
 **Agent layer (no UI dependencies):**
-- `agent.py` - `Agent` class owns SDK client, message history, permissions, state
+- `agent.py` - `Agent` class owns SDK client, message history, permissions, state, context tracking (`update_context`), prompt augmentation (`_prepare_prompt`)
 - `agent_manager.py` - Coordinates multiple agents, switching, lifecycle
 - `protocols.py` - Observer protocols (`AgentObserver`, `AgentManagerObserver`, `PermissionHandler`)
 
@@ -180,6 +181,26 @@ When SDK needs tool approval:
 
 For `AskUserQuestion` tool: `QuestionPrompt` handles multi-question flow.
 
+### Context Awareness
+
+Every prompt sent to the SDK is augmented by `Agent._prepare_prompt()` with a system-reminder containing the current token usage:
+
+```
+<system-reminder>14000/200000 tokens</system-reminder>
+{user prompt}
+```
+
+Key details:
+- Raw integers (not human-formatted) for unambiguous machine consumption
+- Gated by `_context_initialized` flag (set via `update_context()`, reset in `disconnect()`)
+- Values are one turn stale (reflect previous response's token count)
+- Ordering: token reminder → plan-mode instructions → user prompt
+- `_prepare_prompt()` also centralizes the plan-mode instruction prepend
+
+**Context lifecycle:** `app.py`'s `refresh_context()` calls `agent.update_context(tokens, max_tokens)` after each response completes. The model-metadata path also calls `update_context()` when context window size is parsed from the model name. `disconnect()` resets `_context_initialized` to prevent stale data across lifecycle events.
+
+**Session resume:** Injected `<system-reminder>` tags are stripped from persisted session files during resume via `TOKEN_REMINDER_PATTERN` (start-anchored regex in `formatting.py`). Stripping occurs in `load_history()`, `load_session_messages()`, and `_extract_session_info()`. Plan-mode tags and user-authored content are preserved.
+
 ### Styling
 
 Visual language uses left border bars to indicate content type:
@@ -188,7 +209,7 @@ Visual language uses left border bars to indicate content type:
 - **Gray** (`#333333`) - Tool uses (brightens on hover)
 - **Blue-gray** (`#445566`) - Task widgets
 
-Context/CPU bars color-code by threshold (dim → yellow → red).
+ContextBar displays token counts as text (`32% [14.0K/200.0K]`) with a 4-point gradient background: green (`#117733`) → orange (`#CC7700`) → red (`#CC3333`) → dark crimson (`#661111`). CPU bar color-codes by threshold (dim → yellow → red).
 
 Copy buttons appear on hover. Collapsibles auto-collapse older tool uses.
 

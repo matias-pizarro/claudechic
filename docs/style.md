@@ -7,6 +7,7 @@ Claude Chic uses basic visual design to deliver a Claude experience that is easy
 -  **Collapsible Elements:** to keep noise down while providing you access to more information
 -  **Markdown Rendering:** because layout and tables are nice
 -  **Streaming support:** so that you get results immediately, rather than wait minutes while Claude is "Thinking..."
+-  **Context bar:** token usage displayed as text with a green→orange→red→crimson gradient background
 
 ## Comparison
 
