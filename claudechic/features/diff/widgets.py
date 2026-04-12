@@ -1,6 +1,7 @@
 """Diff view widgets - sidebar, main view, and file panels."""
 
 import difflib
+import re
 
 from pathlib import Path
 
@@ -553,5 +554,19 @@ class DiffView(VerticalScroll):
 
 
 def _sanitize_id(path: str) -> str:
-    """Convert a file path to a valid CSS ID."""
-    return path.replace("/", "-").replace(".", "-").replace(" ", "-")
+    """Convert a file path to a valid Textual CSS ID.
+
+    Textual identifiers must match [a-zA-Z_-][a-zA-Z0-9_-]*.
+    Replace any invalid character (e.g. $, @, ~, +) with a hyphen,
+    collapse runs of hyphens, and ensure the result starts with a letter.
+    """
+    # Replace any character that isn't alphanumeric, underscore, or hyphen
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "-", path)
+    # Collapse consecutive hyphens
+    sanitized = re.sub(r"-{2,}", "-", sanitized)
+    # Strip leading/trailing hyphens
+    sanitized = sanitized.strip("-")
+    # Ensure it starts with a letter (prefix if it starts with digit or is empty)
+    if not sanitized or sanitized[0].isdigit():
+        sanitized = f"f-{sanitized}"
+    return sanitized
