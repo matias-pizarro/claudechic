@@ -1,4 +1,4 @@
-<!-- Generated: 2026-04-07 | Files scanned: 78 | Token estimate: ~700 -->
+<!-- Generated: 2026-04-11 | Files scanned: 78 | Token estimate: ~700 -->
 
 # Internal Dependencies
 
@@ -54,6 +54,12 @@ widgets/layout/sidebar.py
 | `psutil` | CPU usage monitoring (CPUBar) |
 | `aiofiles` | Async file I/O for session loading |
 | `posthog` | Optional analytics (opt-in) |
+
+## Standard Library
+
+| Module | Used by |
+|--------|---------|
+| `re` | `features/diff/widgets.py` — sanitize widget IDs for paths with special chars |
 
 ## Shared Constants
 

@@ -1,4 +1,4 @@
-<!-- Generated: 2026-04-07 | Files scanned: 30 | Token estimate: ~800 -->
+<!-- Generated: 2026-04-11 | Files scanned: 30 | Token estimate: ~800 -->
 
 # Widget Map
 
@@ -63,3 +63,21 @@ Renders token usage as text with gradient background:
 | `reports/` | In-page reports | `ContextReport` (2D grid), `UsageReport`, `UsageBar` |
 | `modals/` | Modal overlays | `ProfileModal`, `ProcessModal`, `ProcessDetailModal` |
 | `prompts.py` | Prompt overlays | `SelectionPrompt`, `QuestionPrompt`, `ModelPrompt`, `WorktreePrompt` |
+
+## Diff Screen Widgets
+
+`features/diff/widgets.py` — Diff review UI components
+
+| Widget | Purpose |
+|--------|---------|
+| `DiffSidebar` | Left sidebar listing changed files with status indicators |
+| `DiffFileItem` | Single file entry in sidebar (clickable, shows mod/add/delete status) |
+| `DiffView` | Main scrollable container for file diff panels with hunk navigation (j/k for prev/next) |
+| `FileDiffPanel` | All hunks for one file with header and separators |
+| `HunkWidget` | Single hunk with syntax-highlighted diff, focusable, supports comments |
+| `CommentInput` | Multi-line editor for hunk comments (Enter submits, Ctrl+J newline) |
+| `CommentLabel` | Display saved comment on hunk |
+| `FileHeaderLabel` | Clickable file header (opens in editor) |
+| `EditIcon` | Small edit button for opening files in editor |
+
+**ID sanitization:** `_sanitize_id()` converts file paths to valid Textual CSS IDs by replacing special chars ($, @, ~, etc.) with hyphens, collapsing runs, and ensuring letter-prefix for numeric paths.
