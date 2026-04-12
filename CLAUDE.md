@@ -42,6 +42,10 @@ claudechic/
 ├── usage.py           # OAuth usage API fetching (rate limits)
 ├── features/
 │   ├── __init__.py    # Feature module exports
+│   ├── diff/
+│   │   ├── __init__.py   # Public API (DiffScreen exports)
+│   │   ├── git.py        # Git diff operations (get_uncommitted_changes)
+│   │   └── widgets.py    # DiffWidget, FileDiffPanel, DiffFileItem (includes _sanitize_id for widget IDs)
 │   └── worktree/
 │       ├── __init__.py   # Public API (list_worktrees, handle_worktree_command)
 │       ├── commands.py   # /worktree command handlers
