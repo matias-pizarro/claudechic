@@ -460,23 +460,34 @@ class ChatApp(App):
         (SDK stderr, log messages, exception text) containing ANSI escape
         codes or literal square brackets that Textual parses as Rich tags.
 
-        **Non-goal:** Rendering Rich markup styles in notifications. No
-        existing call site uses Rich markup (audit: all ~45 ``notify()``
-        calls across ``app.py``, ``commands.py``, ``worktree/commands.py``
-        pass plain strings or f-strings with safe interpolations).
+        **Non-goal:** Rendering Rich markup styles in notifications.
+        Callers needing markup can pass ``markup=True`` explicitly.
+
+        **Audit:** All ``notify()`` calls across ``app.py``,
+        ``commands.py``, and ``worktree/commands.py`` pass plain strings
+        or f-strings with safe interpolations — none require Rich markup.
 
         **Defense layers:**
+
         1. This override — prevents markup parsing errors globally.
         2. ``strip_ansi()`` at data entry points (``_handle_sdk_stderr``,
            ``_show_system_info``) — removes escape codes so toasts and
            Markdown widgets display clean text.
 
+        **Success criteria** (enforced by tests):
+
+        - Notifications containing ANSI codes do not raise ``MarkupError``.
+        - Notifications containing literal brackets render safely.
+        - Visible text is preserved after ANSI stripping.
+        - All widget-originated ``self.notify()`` calls pass
+          ``markup=False`` (enforced by ``test_widget_notify_calls_use_markup_false``).
+
         **Widget caveat:** Textual's ``Widget.notify()`` has its own
         ``markup=True`` default and passes it explicitly to
         ``self.app.notify()``, bypassing this override's default.
-        Widget-originated ``self.notify()`` calls (4 total in
-        ``profile.py`` and ``rewind.py``) pass ``markup=False``
-        explicitly to maintain the safety contract.
+        Widget-originated ``self.notify()`` calls must pass
+        ``markup=False`` explicitly — the enforcement test above
+        catches regressions.
         """
         super().notify(
             message, title=title, severity=severity, timeout=timeout, markup=markup

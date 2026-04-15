@@ -200,6 +200,14 @@ class TestStripAnsi:
         """Bracketed paste mode (DEC private 2004) is stripped."""
         assert strip_ansi("\x1b[?2004hpasted\x1b[?2004l") == "pasted"
 
+    def test_true_color_sgr_colon_params(self):
+        """True-color SGR with colon-separated params (ECMA-48) is stripped."""
+        assert strip_ansi("\x1b[38:2::255:0:0mred text\x1b[0m") == "red text"
+
+    def test_device_private_mode_greater(self):
+        """CSI with > private parameter prefix is stripped."""
+        assert strip_ansi("\x1b[>4;2mtext") == "text"
+
     # --- OSC (Operating System Command) ---
 
     def test_osc_terminal_title_bel(self):

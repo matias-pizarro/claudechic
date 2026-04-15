@@ -31,7 +31,7 @@ TOKEN_REMINDER_PATTERN = re.compile(
 _ANSI_ESCAPE_RE = re.compile(
     r"\x1b"
     r"(?:"
-    r"\[[0-9;?]*[ -/]*[A-Za-z@-~]"  # CSI sequences (SGR, cursor, DEC private)
+    r"\[[0-?]*[ -/]*[A-Za-z@-~]"  # CSI sequences (ECMA-48 parameter range)
     r"|"
     r"\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC sequences (title, hyperlink)
     r"|"
@@ -39,7 +39,7 @@ _ANSI_ESCAPE_RE = re.compile(
     r"|"
     r"[A-Za-z0-9=<>]"  # Two-character escape sequences
     r")"
-    r"|\x9b[0-9;?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI
+    r"|\x9b[0-?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI
 )
 
 

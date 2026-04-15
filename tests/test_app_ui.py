@@ -1102,5 +1102,62 @@ async def test_notify_defaults_markup_false(mock_sdk):
         app.notify("Error [code 42]")
         app.notify("\x1b[31m[ERROR]\x1b[0m fail")
         await pilot.pause()
-        # All three should succeed without MarkupError
+        # Success criteria: all three render without MarkupError,
+        # visible text preserved, no crash from brackets or ANSI codes
         assert len(app._notifications) == 3
+
+
+def test_widget_notify_calls_use_markup_false():
+    """Enforce that all widget/screen self.notify() calls pass markup=False.
+
+    Textual's Widget.notify() defaults markup=True and passes it explicitly
+    to self.app.notify(), bypassing ChatApp's markup=False override.  Every
+    widget-originated self.notify() call must include markup=False to
+    maintain the safety contract.  This test prevents regressions when new
+    widgets are added.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent / "claudechic"
+    violations: list[str] = []
+
+    for py_file in sorted(root.rglob("*.py")):
+        # Only check widget and screen files (not app.py which has the override)
+        rel = py_file.relative_to(root)
+        parts = rel.parts
+        if not any(p in ("widgets", "screens") for p in parts):
+            continue
+
+        source = py_file.read_text()
+        try:
+            tree = ast.parse(source, filename=str(py_file))
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # Match self.notify(...) calls
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == "notify"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "self"
+            ):
+                continue
+            # Check that markup=False is passed as a keyword
+            has_markup_false = any(
+                kw.arg == "markup"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is False
+                for kw in node.keywords
+            )
+            if not has_markup_false:
+                violations.append(f"{rel}:{node.lineno}")
+
+    assert not violations, (
+        "Widget/screen self.notify() calls missing markup=False "
+        f"(bypasses ChatApp override): {violations}"
+    )
