@@ -223,6 +223,25 @@ class TestStripAnsi:
         text = "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\"
         assert strip_ansi(text) == "click here"
 
+    # --- DCS / PM / APC (string sequences) ---
+
+    def test_dcs_sequence(self):
+        """DCS (Device Control String) sequences are stripped."""
+        assert strip_ansi("\x1bPmalicious\x1b\\text") == "text"
+
+    def test_pm_sequence(self):
+        """PM (Privacy Message) sequences are stripped."""
+        assert strip_ansi("\x1b^private\x1b\\text") == "text"
+
+    def test_apc_sequence(self):
+        """APC (Application Program Command) sequences are stripped."""
+        assert strip_ansi("\x1b_command\x1b\\text") == "text"
+
+    def test_unterminated_osc_preserved(self):
+        """Unterminated OSC is preserved (not greedily consumed)."""
+        result = strip_ansi("\x1b]0;unterminated")
+        assert "unterminated" in result
+
     # --- Character set designation ---
 
     def test_charset_designation(self):

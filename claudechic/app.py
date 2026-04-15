@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from claude_agent_sdk.types import HookEvent
     from claudechic.screens.chat import ChatScreen
+    from textual.app import SeverityLevel
     from textual.timer import Timer
 
 from textual.app import App

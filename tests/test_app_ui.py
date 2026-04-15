@@ -1108,16 +1108,39 @@ async def test_notify_defaults_markup_false(mock_sdk):
 
 
 def test_widget_notify_calls_use_markup_false():
-    """Enforce that all widget/screen self.notify() calls pass markup=False.
+    """Enforce that all widget/screen notify() calls pass markup=False.
 
     Textual's Widget.notify() defaults markup=True and passes it explicitly
-    to self.app.notify(), bypassing ChatApp's markup=False override.  Every
-    widget-originated self.notify() call must include markup=False to
-    maintain the safety contract.  This test prevents regressions when new
-    widgets are added.
+    to self.app.notify(), bypassing ChatApp's markup=False override.
+
+    This test catches TWO patterns in widget/screen files:
+    1. self.notify(...) — Widget-originated, bypasses ChatApp default
+    2. self.app.notify(...) — Direct app call; ChatApp default protects
+       these, but we enforce markup=False explicitly for defense-in-depth
+
+    Covered patterns: self.notify(), self.app.notify()
+    Not covered (none exist): super().notify(), aliased notify
     """
     import ast
     from pathlib import Path
+
+    def _is_notify_call(func: ast.expr) -> bool:
+        """Match self.notify(...) and self.app.notify(...) patterns."""
+        if not isinstance(func, ast.Attribute) or func.attr != "notify":
+            return False
+        val = func.value
+        # self.notify(...)
+        if isinstance(val, ast.Name) and val.id == "self":
+            return True
+        # self.app.notify(...)
+        if (
+            isinstance(val, ast.Attribute)
+            and val.attr == "app"
+            and isinstance(val.value, ast.Name)
+            and val.value.id == "self"
+        ):
+            return True
+        return False
 
     root = Path(__file__).parent.parent / "claudechic"
     violations: list[str] = []
@@ -1138,14 +1161,7 @@ def test_widget_notify_calls_use_markup_false():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            # Match self.notify(...) calls
-            func = node.func
-            if not (
-                isinstance(func, ast.Attribute)
-                and func.attr == "notify"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "self"
-            ):
+            if not _is_notify_call(node.func):
                 continue
             # Check that markup=False is passed as a keyword
             has_markup_false = any(
@@ -1158,6 +1174,6 @@ def test_widget_notify_calls_use_markup_false():
                 violations.append(f"{rel}:{node.lineno}")
 
     assert not violations, (
-        "Widget/screen self.notify() calls missing markup=False "
+        "Widget/screen notify() calls missing markup=False "
         f"(bypasses ChatApp override): {violations}"
     )

@@ -24,16 +24,20 @@ TOKEN_REMINDER_PATTERN = re.compile(
     r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 
-# Comprehensive ANSI/terminal escape sequence pattern.
-# Covers CSI (including DEC private modes like ?25h), OSC (terminated by
-# BEL or ST), character-set designation (e.g. \x1b(B), two-character
-# sequences (e.g. \x1b7), and 8-bit C1 CSI (\x9b).
+# Comprehensive ANSI/terminal escape sequence pattern per ECMA-48.
+# Covers CSI (including DEC private modes), OSC, DCS, PM, APC (all
+# terminated by BEL or ST), character-set designation, two-character
+# sequences, and 8-bit C1 CSI.
+#
+# Malformed/unterminated sequences: only well-formed sequences are
+# stripped.  A lone ESC or an unterminated OSC/DCS is preserved rather
+# than greedily consuming text — this is the safe default for display.
 _ANSI_ESCAPE_RE = re.compile(
     r"\x1b"
     r"(?:"
     r"\[[0-?]*[ -/]*[A-Za-z@-~]"  # CSI sequences (ECMA-48 parameter range)
     r"|"
-    r"\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC sequences (title, hyperlink)
+    r"[\]P^_][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC / DCS / PM / APC (] P ^ _)
     r"|"
     r"[()][A-Za-z0-9]"  # Character-set designation
     r"|"
@@ -46,9 +50,15 @@ _ANSI_ESCAPE_RE = re.compile(
 def strip_ansi(text: str) -> str:
     """Strip ANSI/terminal escape sequences from text.
 
-    Handles CSI (including DEC private modes), OSC (terminal title,
-    hyperlinks), character-set designation, two-character sequences,
-    and 8-bit C1 codes.  Returns the visible text content only.
+    Handles CSI (including DEC private modes and ECMA-48 parameter bytes),
+    OSC, DCS, PM, APC (all string-type sequences), character-set
+    designation, two-character sequences, and 8-bit C1 CSI codes.
+
+    **Malformed sequences:** Only well-formed, terminated sequences are
+    removed.  Unterminated OSC/DCS (missing BEL or ST), partial CSI
+    (e.g. a lone ``\\x1b[``), and trailing ``\\x1b`` are preserved
+    rather than greedily consuming subsequent text.  This is the safe
+    default — garbled display is preferable to eaten content.
     """
     return _ANSI_ESCAPE_RE.sub("", text)
 
