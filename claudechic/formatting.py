@@ -38,7 +38,7 @@ _ANSI_ESCAPE_RE = re.compile(
     r"(?:"
     r"\[[0-?]*[ -/]*[A-Za-z@-~]"  # 7-bit CSI (ECMA-48 parameter range)
     r"|"
-    r"[\]P^_][^\x07\x1b]*(?:\x07|\x1b\\)"  # 7-bit OSC/DCS/PM/APC (] P ^ _)
+    r"[\]P^_][^\x07\x9c\x1b]*(?:\x07|\x9c|\x1b\\)"  # 7-bit OSC/DCS/PM/APC
     r"|"
     r"[()][A-Za-z0-9]"  # Character-set designation
     r"|"
@@ -49,6 +49,12 @@ _ANSI_ESCAPE_RE = re.compile(
 )
 
 
+# After stripping well-formed sequences, remove lone ESC bytes and
+# 8-bit C1 control introducers.  These are never part of visible text
+# and neutralize unterminated escape sequences without eating content.
+_CONTROL_BYTE_RE = re.compile(r"[\x1b\x90\x9b\x9c\x9d\x9e\x9f]")
+
+
 def strip_ansi(text: str) -> str:
     """Strip ANSI/terminal escape sequences from text.
 
@@ -56,13 +62,13 @@ def strip_ansi(text: str) -> str:
     OSC, DCS, PM, APC (all string-type sequences), character-set
     designation, two-character sequences, and 8-bit C1 CSI codes.
 
-    **Malformed sequences:** Only well-formed, terminated sequences are
-    removed.  Unterminated OSC/DCS (missing BEL or ST), partial CSI
-    (e.g. a lone ``\\x1b[``), and trailing ``\\x1b`` are preserved
-    rather than greedily consuming subsequent text.  This is the safe
-    default — garbled display is preferable to eaten content.
+    After removing well-formed sequences, remaining ESC bytes and 8-bit
+    C1 control introducers (``\\x90``-``\\x9f``) are stripped to
+    neutralize unterminated/malformed sequences.  The payload text of
+    malformed sequences is preserved — only the control bytes are removed.
     """
-    return _ANSI_ESCAPE_RE.sub("", text)
+    cleaned = _ANSI_ESCAPE_RE.sub("", text)
+    return _CONTROL_BYTE_RE.sub("", cleaned)
 
 
 def format_session_id(session_id: str, budget: int) -> str:

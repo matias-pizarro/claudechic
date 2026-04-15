@@ -214,9 +214,13 @@ class TestStripAnsi:
         """OSC 0 (set title) terminated by BEL is stripped."""
         assert strip_ansi("\x1b]0;My Title\x07text after") == "text after"
 
-    def test_osc_terminal_title_st(self):
-        """OSC 0 (set title) terminated by ST is stripped."""
+    def test_osc_terminal_title_7bit_st(self):
+        """OSC 0 (set title) terminated by 7-bit ST (ESC \\\\) is stripped."""
         assert strip_ansi("\x1b]0;My Title\x1b\\text after") == "text after"
+
+    def test_osc_terminal_title_8bit_st(self):
+        """OSC 0 (set title) terminated by 8-bit ST (\\x9c) is stripped."""
+        assert strip_ansi("\x1b]0;My Title\x9ctext after") == "text after"
 
     def test_osc8_hyperlink(self):
         """OSC 8 hyperlink sequences are stripped."""
@@ -237,10 +241,11 @@ class TestStripAnsi:
         """APC (Application Program Command) sequences are stripped."""
         assert strip_ansi("\x1b_command\x1b\\text") == "text"
 
-    def test_unterminated_osc_preserved(self):
-        """Unterminated OSC is preserved (not greedily consumed)."""
+    def test_unterminated_osc_text_preserved(self):
+        """Unterminated OSC: payload text preserved, control byte stripped."""
         result = strip_ansi("\x1b]0;unterminated")
         assert "unterminated" in result
+        assert "\x1b" not in result
 
     # --- Character set designation ---
 
@@ -301,6 +306,18 @@ class TestStripAnsi:
         """Nested brackets are preserved."""
         assert strip_ansi("data[[0]]") == "data[[0]]"
 
-    def test_lone_escape_at_end(self):
-        """Trailing \\x1b without following character is preserved."""
-        assert strip_ansi("text\x1b") == "text\x1b"
+    def test_lone_escape_stripped(self):
+        """Lone ESC bytes are stripped (neutralizes unterminated sequences)."""
+        assert strip_ansi("text\x1b") == "text"
+
+    def test_unterminated_osc52_neutralized(self):
+        """Unterminated OSC 52 clipboard sequence is neutralized."""
+        # The ESC introducer is stripped; payload text is preserved
+        result = strip_ansi("\x1b]52;c;payload")
+        assert "\x1b" not in result
+        assert "payload" in result
+
+    def test_remaining_c1_bytes_stripped(self):
+        """Lone 8-bit C1 control bytes are stripped after regex pass."""
+        # \x9d and \x9e are C1 string introducers without terminators
+        assert strip_ansi("text\x9d\x9eend") == "textend"
