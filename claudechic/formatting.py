@@ -24,6 +24,25 @@ TOKEN_REMINDER_PATTERN = re.compile(
     r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 
+# Matches ANSI escape sequences (SGR, cursor movement, etc.)
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def sanitize_for_notify(text: str) -> str:
+    """Sanitize text for use in Textual's notify() toast.
+
+    Textual parses notification messages as Rich markup, so raw ANSI
+    escape codes (e.g. ``\\x1b[0m``) and literal square brackets cause
+    ``MarkupError``.  This function strips ANSI codes and escapes
+    brackets so the text renders safely as a plain toast.
+    """
+    # Strip ANSI escape sequences
+    cleaned = _ANSI_ESCAPE_RE.sub("", text)
+    # Escape Rich markup brackets: [ → \[
+    cleaned = cleaned.replace("[", r"\[")
+    # Remove trailing whitespace / newlines (common in stderr)
+    return cleaned.strip()
+
 
 def format_session_id(session_id: str, budget: int) -> str:
     """Format session ID with adaptive truncation.

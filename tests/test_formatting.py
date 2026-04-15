@@ -3,7 +3,12 @@
 import os
 from unittest.mock import patch
 
-from claudechic.formatting import format_cwd, format_tokens, parse_context_size
+from claudechic.formatting import (
+    format_cwd,
+    format_tokens,
+    parse_context_size,
+    sanitize_for_notify,
+)
 
 
 class TestFormatTokens:
@@ -156,3 +161,47 @@ class TestFormatCwd:
         assert len(result_15) <= 15
         # Larger budgets show more
         assert len(result_35) >= len(result_25) >= len(result_15)
+
+
+class TestSanitizeForNotify:
+    """Tests for sanitize_for_notify() — safe text for Textual toasts."""
+
+    def test_strips_ansi_reset(self):
+        """ANSI reset code \x1b[0m is stripped."""
+        assert sanitize_for_notify("=> Checking PostgreSQL\x1b[0m\n") == (
+            r"=> Checking PostgreSQL"
+        )
+
+    def test_strips_ansi_color(self):
+        """ANSI color codes are stripped."""
+        assert sanitize_for_notify("\x1b[32mOK\x1b[0m") == "OK"
+
+    def test_escapes_brackets(self):
+        """Square brackets are escaped for Rich markup."""
+        assert sanitize_for_notify("Error [code 42]") == r"Error \[code 42]"
+
+    def test_combined_ansi_and_brackets(self):
+        """ANSI codes stripped and brackets escaped together."""
+        assert sanitize_for_notify("\x1b[31m[ERROR]\x1b[0m fail") == (
+            r"\[ERROR] fail"
+        )
+
+    def test_clean_input_unchanged(self):
+        """Normal text passes through without modification."""
+        assert sanitize_for_notify("Normal message") == "Normal message"
+
+    def test_strips_trailing_whitespace(self):
+        """Trailing whitespace and newlines are stripped."""
+        assert sanitize_for_notify("  hello  \n") == "hello"
+
+    def test_empty_string(self):
+        assert sanitize_for_notify("") == ""
+
+    def test_multiple_ansi_sequences(self):
+        """Multiple ANSI sequences in one string are all removed."""
+        text = "\x1b[1m\x1b[33mWarning:\x1b[0m something"
+        assert sanitize_for_notify(text) == "Warning: something"
+
+    def test_ansi_cursor_movement(self):
+        """Non-SGR ANSI sequences (cursor movement) are stripped."""
+        assert sanitize_for_notify("text\x1b[2Amore") == "textmore"

@@ -58,7 +58,7 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
-from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size
+from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size, sanitize_for_notify
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.history import append_to_history
@@ -443,7 +443,7 @@ class ChatApp(App):
             chat_view.mount(error_widget)
             self.call_after_refresh(chat_view.scroll_if_tailing)
         # Also show toast for visibility
-        self.notify(message, severity="error")
+        self.notify(sanitize_for_notify(message), severity="error")
 
     async def _replace_client(self, options: ClaudeAgentOptions) -> None:
         """Safely replace current client with a new one."""
@@ -656,7 +656,9 @@ class ChatApp(App):
 
         # Set up notification callback for log messages (warnings and errors)
         set_log_notify_callback(
-            lambda msg, severity: self.notify(msg, severity=severity, timeout=5)
+            lambda msg, severity: self.notify(
+                sanitize_for_notify(msg), severity=severity, timeout=5
+            )
         )
 
         # Start CPU sampling profiler + event loop lag monitor
@@ -1218,7 +1220,7 @@ class ChatApp(App):
         if not chat_view:
             # Fallback to notify if no chat view
             notify_map = {"warning": "warning", "error": "error"}
-            self.notify(message[:100], severity=notify_map.get(severity, "information"))  # type: ignore[arg-type]
+            self.notify(sanitize_for_notify(message[:100]), severity=notify_map.get(severity, "information"))  # type: ignore[arg-type]
             return
 
         chat_view.append_system_info(message, severity)
