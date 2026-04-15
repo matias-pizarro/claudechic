@@ -1067,3 +1067,19 @@ async def test_check_and_copy_selection_clipboard_failure_shows_warning(mock_sdk
             n.message == "Copy failed" and n.severity == "warning"
             for n in app._notifications
         )
+
+
+@pytest.mark.asyncio
+async def test_notify_defaults_markup_false(mock_sdk):
+    """ChatApp.notify() defaults to markup=False, preventing MarkupError on
+    messages containing ANSI codes or literal brackets."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        # These would crash with markup=True because [0m and [code 42]
+        # are parsed as Rich markup tags
+        app.notify("=> Checking PostgreSQL\x1b[0m")
+        app.notify("Error [code 42]")
+        app.notify("\x1b[31m[ERROR]\x1b[0m fail")
+        await pilot.pause()
+        # All three should succeed without MarkupError
+        assert len(app._notifications) == 3

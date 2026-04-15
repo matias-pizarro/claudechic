@@ -24,24 +24,33 @@ TOKEN_REMINDER_PATTERN = re.compile(
     r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 
-# Matches ANSI escape sequences (SGR, cursor movement, etc.)
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Comprehensive ANSI/terminal escape sequence pattern.
+# Covers CSI (including DEC private modes like ?25h), OSC (terminated by
+# BEL or ST), character-set designation (e.g. \x1b(B), two-character
+# sequences (e.g. \x1b7), and 8-bit C1 CSI (\x9b).
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b"
+    r"(?:"
+    r"\[[0-9;?]*[ -/]*[A-Za-z@-~]"  # CSI sequences (SGR, cursor, DEC private)
+    r"|"
+    r"\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC sequences (title, hyperlink)
+    r"|"
+    r"[()][A-Za-z0-9]"  # Character-set designation
+    r"|"
+    r"[A-Za-z0-9=<>]"  # Two-character escape sequences
+    r")"
+    r"|\x9b[0-9;?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI
+)
 
 
-def sanitize_for_notify(text: str) -> str:
-    """Sanitize text for use in Textual's notify() toast.
+def strip_ansi(text: str) -> str:
+    """Strip ANSI/terminal escape sequences from text.
 
-    Textual parses notification messages as Rich markup, so raw ANSI
-    escape codes (e.g. ``\\x1b[0m``) and literal square brackets cause
-    ``MarkupError``.  This function strips ANSI codes and escapes
-    brackets so the text renders safely as a plain toast.
+    Handles CSI (including DEC private modes), OSC (terminal title,
+    hyperlinks), character-set designation, two-character sequences,
+    and 8-bit C1 codes.  Returns the visible text content only.
     """
-    # Strip ANSI escape sequences
-    cleaned = _ANSI_ESCAPE_RE.sub("", text)
-    # Escape Rich markup brackets: [ → \[
-    cleaned = cleaned.replace("[", r"\[")
-    # Remove trailing whitespace / newlines (common in stderr)
-    return cleaned.strip()
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def format_session_id(session_id: str, budget: int) -> str:

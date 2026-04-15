@@ -7,7 +7,7 @@ from claudechic.formatting import (
     format_cwd,
     format_tokens,
     parse_context_size,
-    sanitize_for_notify,
+    strip_ansi,
 )
 
 
@@ -163,45 +163,97 @@ class TestFormatCwd:
         assert len(result_35) >= len(result_25) >= len(result_15)
 
 
-class TestSanitizeForNotify:
-    """Tests for sanitize_for_notify() — safe text for Textual toasts."""
+class TestStripAnsi:
+    """Tests for strip_ansi() — comprehensive ANSI/terminal escape removal."""
 
-    def test_strips_ansi_reset(self):
+    # --- SGR (Select Graphic Rendition) ---
+
+    def test_strips_sgr_reset(self):
         """ANSI reset code \x1b[0m is stripped."""
-        assert sanitize_for_notify("=> Checking PostgreSQL\x1b[0m\n") == (
-            r"=> Checking PostgreSQL"
-        )
+        assert strip_ansi("=> Checking PostgreSQL\x1b[0m") == "=> Checking PostgreSQL"
 
-    def test_strips_ansi_color(self):
+    def test_strips_sgr_color(self):
         """ANSI color codes are stripped."""
-        assert sanitize_for_notify("\x1b[32mOK\x1b[0m") == "OK"
+        assert strip_ansi("\x1b[32mOK\x1b[0m") == "OK"
 
-    def test_escapes_brackets(self):
-        """Square brackets are escaped for Rich markup."""
-        assert sanitize_for_notify("Error [code 42]") == r"Error \[code 42]"
-
-    def test_combined_ansi_and_brackets(self):
-        """ANSI codes stripped and brackets escaped together."""
-        assert sanitize_for_notify("\x1b[31m[ERROR]\x1b[0m fail") == (
-            r"\[ERROR] fail"
+    def test_multiple_sgr_sequences(self):
+        """Multiple SGR sequences in one string are all removed."""
+        assert strip_ansi("\x1b[1m\x1b[33mWarning:\x1b[0m something") == (
+            "Warning: something"
         )
+
+    def test_sgr_with_many_params(self):
+        """SGR with many semicolon-separated parameters."""
+        assert strip_ansi("\x1b[1;2;3;4;5;6;7;8;9mtext\x1b[0m") == "text"
+
+    # --- CSI (Control Sequence Introducer) ---
+
+    def test_cursor_movement(self):
+        """CSI cursor movement sequences are stripped."""
+        assert strip_ansi("text\x1b[2Amore") == "textmore"
+
+    def test_dec_private_mode(self):
+        """DEC private mode sequences (with ?) are stripped."""
+        assert strip_ansi("\x1b[?25hvisible\x1b[?25l") == "visible"
+
+    def test_bracketed_paste_mode(self):
+        """Bracketed paste mode (DEC private 2004) is stripped."""
+        assert strip_ansi("\x1b[?2004hpasted\x1b[?2004l") == "pasted"
+
+    # --- OSC (Operating System Command) ---
+
+    def test_osc_terminal_title_bel(self):
+        """OSC 0 (set title) terminated by BEL is stripped."""
+        assert strip_ansi("\x1b]0;My Title\x07text after") == "text after"
+
+    def test_osc_terminal_title_st(self):
+        """OSC 0 (set title) terminated by ST is stripped."""
+        assert strip_ansi("\x1b]0;My Title\x1b\\text after") == "text after"
+
+    def test_osc8_hyperlink(self):
+        """OSC 8 hyperlink sequences are stripped."""
+        text = "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\"
+        assert strip_ansi(text) == "click here"
+
+    # --- Character set designation ---
+
+    def test_charset_designation(self):
+        """Character set designation sequences (e.g. \\x1b(B) are stripped."""
+        assert strip_ansi("\x1b(Btext") == "text"
+
+    # --- Two-character sequences ---
+
+    def test_two_char_save_cursor(self):
+        """Two-character escape sequences (DEC save/restore) are stripped."""
+        assert strip_ansi("\x1b7saved\x1b8") == "saved"
+
+    # --- 8-bit C1 CSI ---
+
+    def test_c1_csi(self):
+        """8-bit C1 CSI (\\x9b) sequences are stripped."""
+        assert strip_ansi("\x9b31mred\x9b0m") == "red"
+
+    # --- Edge cases ---
 
     def test_clean_input_unchanged(self):
         """Normal text passes through without modification."""
-        assert sanitize_for_notify("Normal message") == "Normal message"
-
-    def test_strips_trailing_whitespace(self):
-        """Trailing whitespace and newlines are stripped."""
-        assert sanitize_for_notify("  hello  \n") == "hello"
+        assert strip_ansi("Normal message") == "Normal message"
 
     def test_empty_string(self):
-        assert sanitize_for_notify("") == ""
+        assert strip_ansi("") == ""
 
-    def test_multiple_ansi_sequences(self):
-        """Multiple ANSI sequences in one string are all removed."""
-        text = "\x1b[1m\x1b[33mWarning:\x1b[0m something"
-        assert sanitize_for_notify(text) == "Warning: something"
+    def test_brackets_preserved(self):
+        """Literal square brackets are NOT stripped (just ANSI codes)."""
+        assert strip_ansi("Error [code 42]") == "Error [code 42]"
 
-    def test_ansi_cursor_movement(self):
-        """Non-SGR ANSI sequences (cursor movement) are stripped."""
-        assert sanitize_for_notify("text\x1b[2Amore") == "textmore"
+    def test_combined_ansi_and_brackets(self):
+        """ANSI codes stripped but brackets preserved."""
+        assert strip_ansi("\x1b[31m[ERROR]\x1b[0m fail") == "[ERROR] fail"
+
+    def test_nested_brackets(self):
+        """Nested brackets are preserved."""
+        assert strip_ansi("data[[0]]") == "data[[0]]"
+
+    def test_lone_escape_at_end(self):
+        """Trailing \\x1b without following character is preserved."""
+        assert strip_ansi("text\x1b") == "text\x1b"

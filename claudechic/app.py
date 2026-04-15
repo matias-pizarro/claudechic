@@ -58,7 +58,7 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
-from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size, sanitize_for_notify
+from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size, strip_ansi
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.history import append_to_history
@@ -443,7 +443,28 @@ class ChatApp(App):
             chat_view.mount(error_widget)
             self.call_after_refresh(chat_view.scroll_if_tailing)
         # Also show toast for visibility
-        self.notify(sanitize_for_notify(message), severity="error")
+        self.notify(message, severity="error")
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: "SeverityLevel" = "information",
+        timeout: float | None = None,
+        markup: bool = False,
+    ) -> None:
+        """Override to default markup=False for all toast notifications.
+
+        Textual's ``notify()`` defaults to ``markup=True``, parsing messages
+        via ``Content.from_markup()``.  External text (SDK stderr, log output,
+        exception messages) can contain ANSI escape codes or literal square
+        brackets that trigger ``MarkupError``.  Defaulting to ``markup=False``
+        protects all ~45 call sites without per-site sanitization.
+        """
+        super().notify(
+            message, title=title, severity=severity, timeout=timeout, markup=markup
+        )
 
     async def _replace_client(self, options: ClaudeAgentOptions) -> None:
         """Safely replace current client with a new one."""
@@ -568,8 +589,13 @@ class ChatApp(App):
         return ChatScreen(slash_commands=self.LOCAL_COMMANDS)
 
     def _handle_sdk_stderr(self, message: str) -> None:
-        """Handle SDK stderr output by showing in chat."""
-        message = message.strip()
+        """Handle SDK stderr output by showing in chat.
+
+        Strips ANSI escape codes at the source so downstream renderers
+        (both notify() toasts and SystemInfo Markdown widgets) receive
+        clean text.
+        """
+        message = strip_ansi(message).strip()
         if not message:
             return
         self._show_system_info(message, "warning", None)
@@ -656,9 +682,7 @@ class ChatApp(App):
 
         # Set up notification callback for log messages (warnings and errors)
         set_log_notify_callback(
-            lambda msg, severity: self.notify(
-                sanitize_for_notify(msg), severity=severity, timeout=5
-            )
+            lambda msg, severity: self.notify(msg, severity=severity, timeout=5)
         )
 
         # Start CPU sampling profiler + event loop lag monitor
@@ -1209,8 +1233,14 @@ class ChatApp(App):
     def _show_system_info(
         self, message: str, severity: str, agent_id: str | None
     ) -> None:
-        """Show system info message in chat view (not stored in history)."""
+        """Show system info message in chat view (not stored in history).
+
+        ANSI codes are stripped so both the Markdown widget and the
+        notify() fallback receive clean text.
+        """
         from claudechic.filters import should_filter_message
+
+        message = strip_ansi(message)
 
         if should_filter_message(message):
             log.debug("Filtered system message: %s", message[:100])
@@ -1218,9 +1248,9 @@ class ChatApp(App):
 
         chat_view = self._get_chat_view(agent_id)
         if not chat_view:
-            # Fallback to notify if no chat view
+            # Fallback to notify if no chat view (markup=False via override)
             notify_map = {"warning": "warning", "error": "error"}
-            self.notify(sanitize_for_notify(message[:100]), severity=notify_map.get(severity, "information"))  # type: ignore[arg-type]
+            self.notify(message[:100], severity=notify_map.get(severity, "information"))  # type: ignore[arg-type]
             return
 
         chat_view.append_system_info(message, severity)
