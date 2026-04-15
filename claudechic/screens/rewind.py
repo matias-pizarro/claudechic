@@ -157,7 +157,7 @@ class RewindScreen(Screen[tuple[int, str] | None]):
 
         if not checkpoints:
             # No checkpoints - show message and dismiss
-            self.notify("No checkpoints available", severity="warning")
+            self.notify("No checkpoints available", severity="warning", markup=False)
             self.dismiss(None)
             return
 

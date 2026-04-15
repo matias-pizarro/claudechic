@@ -306,9 +306,9 @@ class ProfileModal(ModalScreen):
             import pyperclip
 
             pyperclip.copy(text)
-            self.notify("Copied to clipboard")
+            self.notify("Copied to clipboard", markup=False)
         except Exception as e:
-            self.notify(f"Copy failed: {e}", severity="error")
+            self.notify(f"Copy failed: {e}", severity="error", markup=False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "copy-all-btn":
@@ -330,7 +330,7 @@ class ProfileModal(ModalScreen):
             sampler = get_sampler()
             if sampler:
                 sampler.reset()
-            self.notify("Profiling stats reset")
+            self.notify("Profiling stats reset", markup=False)
             self.dismiss()
         elif event.button.id == "close-btn":
             self.dismiss()

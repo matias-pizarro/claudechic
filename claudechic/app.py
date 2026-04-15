@@ -454,13 +454,29 @@ class ChatApp(App):
         timeout: float | None = None,
         markup: bool = False,
     ) -> None:
-        """Override to default markup=False for all toast notifications.
+        """Override to default ``markup=False`` for all toast notifications.
 
-        Textual's ``notify()`` defaults to ``markup=True``, parsing messages
-        via ``Content.from_markup()``.  External text (SDK stderr, log output,
-        exception messages) can contain ANSI escape codes or literal square
-        brackets that trigger ``MarkupError``.  Defaulting to ``markup=False``
-        protects all ~45 call sites without per-site sanitization.
+        **Goal:** Prevent ``MarkupError`` crashes from untrusted output
+        (SDK stderr, log messages, exception text) containing ANSI escape
+        codes or literal square brackets that Textual parses as Rich tags.
+
+        **Non-goal:** Rendering Rich markup styles in notifications. No
+        existing call site uses Rich markup (audit: all ~45 ``notify()``
+        calls across ``app.py``, ``commands.py``, ``worktree/commands.py``
+        pass plain strings or f-strings with safe interpolations).
+
+        **Defense layers:**
+        1. This override — prevents markup parsing errors globally.
+        2. ``strip_ansi()`` at data entry points (``_handle_sdk_stderr``,
+           ``_show_system_info``) — removes escape codes so toasts and
+           Markdown widgets display clean text.
+
+        **Widget caveat:** Textual's ``Widget.notify()`` has its own
+        ``markup=True`` default and passes it explicitly to
+        ``self.app.notify()``, bypassing this override's default.
+        Widget-originated ``self.notify()`` calls (4 total in
+        ``profile.py`` and ``rewind.py``) pass ``markup=False``
+        explicitly to maintain the safety contract.
         """
         super().notify(
             message, title=title, severity=severity, timeout=timeout, markup=markup

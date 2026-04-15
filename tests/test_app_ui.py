@@ -575,6 +575,27 @@ async def test_sdk_stderr_ignores_empty(mock_sdk):
 
 
 @pytest.mark.asyncio
+async def test_sdk_stderr_strips_ansi(mock_sdk):
+    """SDK stderr with ANSI escape codes is cleaned before display."""
+    from claudechic.widgets import SystemInfo
+
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        chat_view = app._chat_view
+        assert chat_view is not None
+
+        # Simulate ANSI-laden SDK stderr (the original crash trigger)
+        app._handle_sdk_stderr("=> Checking PostgreSQL\x1b[0m\n")
+        await pilot.pause()
+
+        info_widgets = list(chat_view.query(SystemInfo))
+        assert len(info_widgets) == 1
+        # ANSI codes should be stripped, visible text preserved
+        assert "Checking PostgreSQL" in info_widgets[0]._message
+        assert "\x1b" not in info_widgets[0]._message
+
+
+@pytest.mark.asyncio
 async def test_bang_command_inline_shell(mock_sdk):
     """'!cmd' runs shell command and displays output inline."""
     from claudechic.widgets import ShellOutputWidget
