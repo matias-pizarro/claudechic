@@ -15,7 +15,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from claude_agent_sdk.types import HookEvent
     from claudechic.screens.chat import ChatScreen
-    from textual.app import SeverityLevel
+    from textual.notifications import SeverityLevel
     from textual.timer import Timer
 
 from textual.app import App
@@ -458,11 +458,20 @@ class ChatApp(App):
         """Override to default ``markup=False`` for all toast notifications.
 
         **Goal:** Prevent ``MarkupError`` crashes from untrusted output
-        (SDK stderr, log messages, exception text) containing ANSI escape
-        codes or literal square brackets that Textual parses as Rich tags.
+        containing ANSI escape codes or literal square brackets that
+        Textual parses as Rich tags.
 
-        **Non-goal:** Rendering Rich markup styles in notifications.
-        Callers needing markup can pass ``markup=True`` explicitly.
+        **Trust boundary:** All notification text is treated as
+        untrusted.  Sources include SDK stderr, log messages, exception
+        text, subprocess errors, file paths, git output, and any
+        future notification content.  The ``markup=False`` default
+        ensures none of these can trigger ``MarkupError``.
+
+        **``markup=True`` usage:** Allowed only for static,
+        application-authored strings with no interpolated values.
+        Dynamic content (f-strings with ``{e}``, ``{path}``, etc.)
+        must never use ``markup=True``.  No existing call site needs
+        markup; this constraint is for future additions.
 
         **Audit:** All ``notify()`` calls across ``app.py``,
         ``commands.py``, and ``worktree/commands.py`` pass plain strings
@@ -480,15 +489,15 @@ class ChatApp(App):
         - Notifications containing ANSI codes do not raise ``MarkupError``.
         - Notifications containing literal brackets render safely.
         - Visible text is preserved after ANSI stripping.
-        - All widget-originated ``self.notify()`` calls pass
-          ``markup=False`` (enforced by ``test_widget_notify_calls_use_markup_false``).
+        - All widget/screen ``notify()`` calls pass ``markup=False``
+          (enforced by ``test_widget_notify_calls_use_markup_false``).
 
         **Widget caveat:** Textual's ``Widget.notify()`` has its own
         ``markup=True`` default and passes it explicitly to
         ``self.app.notify()``, bypassing this override's default.
         Widget-originated ``self.notify()`` calls must pass
-        ``markup=False`` explicitly — the enforcement test above
-        catches regressions.
+        ``markup=False`` explicitly — the enforcement test catches
+        regressions.
         """
         super().notify(
             message, title=title, severity=severity, timeout=timeout, markup=markup

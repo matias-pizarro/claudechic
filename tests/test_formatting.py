@@ -254,11 +254,27 @@ class TestStripAnsi:
         """Two-character escape sequences (DEC save/restore) are stripped."""
         assert strip_ansi("\x1b7saved\x1b8") == "saved"
 
-    # --- 8-bit C1 CSI ---
+    # --- 8-bit C1 sequences ---
 
     def test_c1_csi(self):
         """8-bit C1 CSI (\\x9b) sequences are stripped."""
         assert strip_ansi("\x9b31mred\x9b0m") == "red"
+
+    def test_c1_osc(self):
+        """8-bit C1 OSC (\\x9d) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x9d0;title\x9ctext") == "text"
+
+    def test_c1_dcs(self):
+        """8-bit C1 DCS (\\x90) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x90payload\x9ctext") == "text"
+
+    def test_c1_pm(self):
+        """8-bit C1 PM (\\x9e) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x9eprivate\x9ctext") == "text"
+
+    def test_c1_apc(self):
+        """8-bit C1 APC (\\x9f) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x9fcommand\x9ctext") == "text"
 
     # --- Edge cases ---
 

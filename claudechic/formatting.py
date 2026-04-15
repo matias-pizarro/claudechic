@@ -25,9 +25,10 @@ TOKEN_REMINDER_PATTERN = re.compile(
 )
 
 # Comprehensive ANSI/terminal escape sequence pattern per ECMA-48.
-# Covers CSI (including DEC private modes), OSC, DCS, PM, APC (all
-# terminated by BEL or ST), character-set designation, two-character
-# sequences, and 8-bit C1 CSI.
+# Covers both 7-bit (ESC-prefixed) and 8-bit (C1) forms:
+#   CSI (including DEC private modes), OSC, DCS, PM, APC (all string
+#   types terminated by BEL or ST), character-set designation, and
+#   two-character sequences.
 #
 # Malformed/unterminated sequences: only well-formed sequences are
 # stripped.  A lone ESC or an unterminated OSC/DCS is preserved rather
@@ -35,15 +36,16 @@ TOKEN_REMINDER_PATTERN = re.compile(
 _ANSI_ESCAPE_RE = re.compile(
     r"\x1b"
     r"(?:"
-    r"\[[0-?]*[ -/]*[A-Za-z@-~]"  # CSI sequences (ECMA-48 parameter range)
+    r"\[[0-?]*[ -/]*[A-Za-z@-~]"  # 7-bit CSI (ECMA-48 parameter range)
     r"|"
-    r"[\]P^_][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC / DCS / PM / APC (] P ^ _)
+    r"[\]P^_][^\x07\x1b]*(?:\x07|\x1b\\)"  # 7-bit OSC/DCS/PM/APC (] P ^ _)
     r"|"
     r"[()][A-Za-z0-9]"  # Character-set designation
     r"|"
     r"[A-Za-z0-9=<>]"  # Two-character escape sequences
     r")"
-    r"|\x9b[0-?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI
+    r"|\x9b[0-?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI (\x9b)
+    r"|[\x90\x9d\x9e\x9f][^\x07\x9c]*(?:\x07|\x9c)"  # 8-bit C1 string types
 )
 
 
