@@ -464,20 +464,16 @@ class ChatApp(App):
         **Non-goals:**
 
         - Rendering Rich markup styles in notifications.
-        - Stripping ANSI from all notification text (only known-dirty
-          paths — ``_handle_sdk_stderr`` and ``_show_system_info`` —
-          apply ``strip_ansi()``; other paths rely on ``markup=False``
-          alone to prevent crashes).
-        - Sanitizing all terminal control bytes (malformed/unterminated
-          sequences may appear as garbled text; this is acceptable).
+        - Sanitizing malformed/unterminated escape sequences (these
+          are preserved by ``strip_ansi()`` to avoid eating content;
+          garbled display is acceptable).
 
-        **Trust boundary:** All notification text is untrusted for
-        Rich markup parsing — the ``markup=False`` default prevents
-        ``MarkupError`` on any input.  ANSI escape codes are
-        additionally stripped only at known-dirty entry points
-        (``_handle_sdk_stderr``, ``_show_system_info``) where SDK
-        output is the source; other notification paths may display raw
-        control characters but will not crash.
+        **Trust boundary:** All notification text is untrusted.
+        This override strips ANSI/terminal escape sequences centrally
+        (via ``strip_ansi()``) and disables Rich markup parsing
+        (via ``markup=False``).  No notification path can trigger
+        ``MarkupError`` or inject terminal control sequences (OSC 52
+        clipboard, OSC 8 hyperlinks, title changes, etc.).
 
         **``markup=True`` usage:** Allowed only for static,
         application-authored strings with no interpolated values.
@@ -494,10 +490,11 @@ class ChatApp(App):
 
         **Defense layers:**
 
-        1. This override — prevents markup parsing errors globally.
-        2. ``strip_ansi()`` at known-dirty data entry points
-           (``_handle_sdk_stderr``, ``_show_system_info``) — removes
-           escape codes for clean display in toasts and Markdown widgets.
+        1. This override — strips ANSI centrally and disables markup
+           parsing, protecting all notification paths.
+        2. ``strip_ansi()`` at data entry points
+           (``_handle_sdk_stderr``, ``_show_system_info``) — also
+           removes escape codes for Markdown widgets (not just toasts).
 
         **Success criteria** (enforced by tests):
 
@@ -516,8 +513,11 @@ class ChatApp(App):
         ``markup=False`` explicitly — the enforcement test catches
         regressions.
         """
+        # Centrally strip terminal escape sequences so no notification path
+        # can inject OSC 52 (clipboard), OSC 8 (hyperlink), title changes, etc.
         super().notify(
-            message, title=title, severity=severity, timeout=timeout, markup=markup
+            strip_ansi(message), title=strip_ansi(title),
+            severity=severity, timeout=timeout, markup=markup
         )
 
     async def _replace_client(self, options: ClaudeAgentOptions) -> None:
