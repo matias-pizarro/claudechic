@@ -1152,7 +1152,7 @@ def test_widget_notify_calls_use_markup_false():
         if not any(p in ("widgets", "screens") for p in parts):
             continue
 
-        source = py_file.read_text()
+        source = py_file.read_text(encoding="utf-8")
         try:
             tree = ast.parse(source, filename=str(py_file))
         except SyntaxError:
@@ -1193,7 +1193,7 @@ def test_no_markup_true_with_dynamic_content():
     violations: list[str] = []
 
     for py_file in sorted(root.rglob("*.py")):
-        source = py_file.read_text()
+        source = py_file.read_text(encoding="utf-8")
         try:
             tree = ast.parse(source, filename=str(py_file))
         except SyntaxError:
@@ -1215,8 +1215,13 @@ def test_no_markup_true_with_dynamic_content():
             )
             if not has_markup_true:
                 continue
-            # markup=True found — check if message arg is dynamic
+            # markup=True found — check if message arg is dynamic.
+            # Resolve from positional args[0] or keyword message=.
             msg_arg = node.args[0] if node.args else None
+            if msg_arg is None:
+                msg_kw = [kw for kw in node.keywords if kw.arg == "message"]
+                if msg_kw:
+                    msg_arg = msg_kw[0].value
             if msg_arg and not isinstance(msg_arg, ast.Constant):
                 violations.append(f"{rel}:{node.lineno}")
 

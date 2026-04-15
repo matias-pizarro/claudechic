@@ -471,11 +471,13 @@ class ChatApp(App):
         - Sanitizing all terminal control bytes (malformed/unterminated
           sequences may appear as garbled text; this is acceptable).
 
-        **Trust boundary:** All notification text is treated as
-        untrusted for markup parsing.  The ``markup=False`` default
-        prevents ``MarkupError`` on any content.  ANSI escape codes are
-        additionally stripped at known-dirty entry points for clean
-        display.
+        **Trust boundary:** All notification text is untrusted for
+        Rich markup parsing — the ``markup=False`` default prevents
+        ``MarkupError`` on any input.  ANSI escape codes are
+        additionally stripped only at known-dirty entry points
+        (``_handle_sdk_stderr``, ``_show_system_info``) where SDK
+        output is the source; other notification paths may display raw
+        control characters but will not crash.
 
         **``markup=True`` usage:** Allowed only for static,
         application-authored strings with no interpolated values.
@@ -484,9 +486,11 @@ class ChatApp(App):
         markup; this constraint is for future additions (enforced by
         ``test_no_markup_true_with_dynamic_content``).
 
-        **Audit:** All ``notify()`` calls across ``app.py``,
-        ``commands.py``, and ``worktree/commands.py`` pass plain strings
-        or f-strings with safe interpolations — none use ``markup=True``.
+        **Audit:** All ``notify()`` calls were manually reviewed —
+        none use ``markup=True``.  Widget/screen calls are enforced
+        by ``test_widget_notify_calls_use_markup_false``.  App-level
+        and command calls are protected by this override's default
+        and verified by ``test_no_markup_true_with_dynamic_content``.
 
         **Defense layers:**
 
