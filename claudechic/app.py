@@ -463,17 +463,17 @@ class ChatApp(App):
 
         **Non-goals:**
 
-        - Rendering Rich markup styles in notifications.
-        - Sanitizing malformed/unterminated escape sequences (these
-          are preserved by ``strip_ansi()`` to avoid eating content;
-          garbled display is acceptable).
+        - Rendering Rich markup styles in notifications (callers
+          needing markup can pass ``markup=True`` with static strings
+          only — see constraint below).
 
         **Trust boundary:** All notification text is untrusted.
-        This override strips ANSI/terminal escape sequences centrally
-        (via ``strip_ansi()``) and disables Rich markup parsing
-        (via ``markup=False``).  No notification path can trigger
-        ``MarkupError`` or inject terminal control sequences (OSC 52
-        clipboard, OSC 8 hyperlinks, title changes, etc.).
+        This override strips ANSI/terminal escape sequences and
+        non-printable control bytes centrally (via ``strip_ansi()``)
+        and defaults Rich markup parsing off (via ``markup=False``).
+        Default notification paths cannot trigger ``MarkupError``
+        or inject terminal control sequences.  Callers explicitly
+        opting into ``markup=True`` must use only static strings.
 
         **``markup=True`` usage:** Allowed only for static,
         application-authored strings with no interpolated values.

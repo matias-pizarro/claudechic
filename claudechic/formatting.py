@@ -49,10 +49,12 @@ _ANSI_ESCAPE_RE = re.compile(
 )
 
 
-# After stripping well-formed sequences, remove lone ESC bytes and
-# 8-bit C1 control introducers.  These are never part of visible text
-# and neutralize unterminated escape sequences without eating content.
-_CONTROL_BYTE_RE = re.compile(r"[\x1b\x90\x9b\x9c\x9d\x9e\x9f]")
+# After stripping well-formed sequences, remove all remaining non-
+# printable C0/C1 control bytes (except tab, newline, carriage return
+# which are valid whitespace).  This neutralizes unterminated escape
+# sequences (lone ESC, partial CSI), BEL, SOS, and any other control
+# characters that could cause terminal side-effects.
+_CONTROL_BYTE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 def strip_ansi(text: str) -> str:
@@ -62,10 +64,10 @@ def strip_ansi(text: str) -> str:
     OSC, DCS, PM, APC (all string-type sequences), character-set
     designation, two-character sequences, and 8-bit C1 CSI codes.
 
-    After removing well-formed sequences, remaining ESC bytes and 8-bit
-    C1 control introducers (``\\x90``-``\\x9f``) are stripped to
-    neutralize unterminated/malformed sequences.  The payload text of
-    malformed sequences is preserved — only the control bytes are removed.
+    After removing well-formed sequences, all remaining non-printable
+    C0/C1 control bytes are stripped (except ``\\t``, ``\\n``, ``\\r``).
+    This neutralizes unterminated sequences (lone ESC, partial CSI,
+    BEL, SOS, etc.) while preserving payload text.
     """
     cleaned = _ANSI_ESCAPE_RE.sub("", text)
     return _CONTROL_BYTE_RE.sub("", cleaned)
