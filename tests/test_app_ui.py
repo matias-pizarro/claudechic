@@ -1177,3 +1177,50 @@ def test_widget_notify_calls_use_markup_false():
         "Widget/screen notify() calls missing markup=False "
         f"(bypasses ChatApp override): {violations}"
     )
+
+
+def test_no_markup_true_with_dynamic_content():
+    """Enforce that no notify(markup=True) call uses dynamic (interpolated) content.
+
+    markup=True is only safe with static, application-authored strings.
+    f-strings, format(), or variable references with markup=True would
+    re-introduce the MarkupError risk this fix addresses.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent / "claudechic"
+    violations: list[str] = []
+
+    for py_file in sorted(root.rglob("*.py")):
+        source = py_file.read_text()
+        try:
+            tree = ast.parse(source, filename=str(py_file))
+        except SyntaxError:
+            continue
+
+        rel = py_file.relative_to(root)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "notify"):
+                continue
+            # Check if markup=True is explicitly passed
+            has_markup_true = any(
+                kw.arg == "markup"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in node.keywords
+            )
+            if not has_markup_true:
+                continue
+            # markup=True found — check if message arg is dynamic
+            msg_arg = node.args[0] if node.args else None
+            if msg_arg and not isinstance(msg_arg, ast.Constant):
+                violations.append(f"{rel}:{node.lineno}")
+
+    assert not violations, (
+        "notify(markup=True) with dynamic content is unsafe "
+        f"(can cause MarkupError): {violations}"
+    )

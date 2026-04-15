@@ -45,7 +45,7 @@ _ANSI_ESCAPE_RE = re.compile(
     r"[A-Za-z0-9=<>]"  # Two-character escape sequences
     r")"
     r"|\x9b[0-?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI (\x9b)
-    r"|[\x90\x9d\x9e\x9f][^\x07\x9c]*(?:\x07|\x9c)"  # 8-bit C1 string types
+    r"|[\x90\x9d\x9e\x9f][^\x07\x9c\x1b]*(?:\x07|\x9c|\x1b\\)"  # 8-bit C1 string types
 )
 
 

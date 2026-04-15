@@ -461,28 +461,39 @@ class ChatApp(App):
         containing ANSI escape codes or literal square brackets that
         Textual parses as Rich tags.
 
+        **Non-goals:**
+
+        - Rendering Rich markup styles in notifications.
+        - Stripping ANSI from all notification text (only known-dirty
+          paths — ``_handle_sdk_stderr`` and ``_show_system_info`` —
+          apply ``strip_ansi()``; other paths rely on ``markup=False``
+          alone to prevent crashes).
+        - Sanitizing all terminal control bytes (malformed/unterminated
+          sequences may appear as garbled text; this is acceptable).
+
         **Trust boundary:** All notification text is treated as
-        untrusted.  Sources include SDK stderr, log messages, exception
-        text, subprocess errors, file paths, git output, and any
-        future notification content.  The ``markup=False`` default
-        ensures none of these can trigger ``MarkupError``.
+        untrusted for markup parsing.  The ``markup=False`` default
+        prevents ``MarkupError`` on any content.  ANSI escape codes are
+        additionally stripped at known-dirty entry points for clean
+        display.
 
         **``markup=True`` usage:** Allowed only for static,
         application-authored strings with no interpolated values.
         Dynamic content (f-strings with ``{e}``, ``{path}``, etc.)
         must never use ``markup=True``.  No existing call site needs
-        markup; this constraint is for future additions.
+        markup; this constraint is for future additions (enforced by
+        ``test_no_markup_true_with_dynamic_content``).
 
         **Audit:** All ``notify()`` calls across ``app.py``,
         ``commands.py``, and ``worktree/commands.py`` pass plain strings
-        or f-strings with safe interpolations — none require Rich markup.
+        or f-strings with safe interpolations — none use ``markup=True``.
 
         **Defense layers:**
 
         1. This override — prevents markup parsing errors globally.
-        2. ``strip_ansi()`` at data entry points (``_handle_sdk_stderr``,
-           ``_show_system_info``) — removes escape codes so toasts and
-           Markdown widgets display clean text.
+        2. ``strip_ansi()`` at known-dirty data entry points
+           (``_handle_sdk_stderr``, ``_show_system_info``) — removes
+           escape codes for clean display in toasts and Markdown widgets.
 
         **Success criteria** (enforced by tests):
 
@@ -491,6 +502,8 @@ class ChatApp(App):
         - Visible text is preserved after ANSI stripping.
         - All widget/screen ``notify()`` calls pass ``markup=False``
           (enforced by ``test_widget_notify_calls_use_markup_false``).
+        - No ``markup=True`` call uses dynamic/interpolated content
+          (enforced by ``test_no_markup_true_with_dynamic_content``).
 
         **Widget caveat:** Textual's ``Widget.notify()`` has its own
         ``markup=True`` default and passes it explicitly to

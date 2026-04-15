@@ -276,6 +276,10 @@ class TestStripAnsi:
         """8-bit C1 APC (\\x9f) terminated by ST (\\x9c) is stripped."""
         assert strip_ansi("\x9fcommand\x9ctext") == "text"
 
+    def test_c1_osc_with_7bit_st(self):
+        """8-bit C1 OSC terminated by 7-bit ST (ESC \\\\) is stripped."""
+        assert strip_ansi("\x9d0;title\x1b\\text") == "text"
+
     # --- Edge cases ---
 
     def test_clean_input_unchanged(self):
