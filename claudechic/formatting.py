@@ -24,6 +24,54 @@ TOKEN_REMINDER_PATTERN = re.compile(
     r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 
+# Comprehensive ANSI/terminal escape sequence pattern per ECMA-48.
+# Covers both 7-bit (ESC-prefixed) and 8-bit (C1) forms:
+#   CSI (including DEC private modes), OSC, DCS, PM, APC (all string
+#   types terminated by BEL or ST), character-set designation, and
+#   two-character sequences.
+#
+# Malformed/unterminated sequences: only well-formed sequences are
+# stripped.  A lone ESC or an unterminated OSC/DCS is preserved rather
+# than greedily consuming text — this is the safe default for display.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b"
+    r"(?:"
+    r"\[[0-?]*[ -/]*[A-Za-z@-~]"  # 7-bit CSI (ECMA-48 parameter range)
+    r"|"
+    r"[\]P^_][^\x07\x9c\x1b]*(?:\x07|\x9c|\x1b\\)"  # 7-bit OSC/DCS/PM/APC
+    r"|"
+    r"[()][A-Za-z0-9]"  # Character-set designation
+    r"|"
+    r"[A-Za-z0-9=<>]"  # Two-character escape sequences
+    r")"
+    r"|\x9b[0-?]*[ -/]*[A-Za-z@-~]"  # 8-bit C1 CSI (\x9b)
+    r"|[\x90\x9d\x9e\x9f][^\x07\x9c\x1b]*(?:\x07|\x9c|\x1b\\)"  # 8-bit C1 string types
+)
+
+
+# After stripping well-formed sequences, remove all remaining non-
+# printable C0/C1 control bytes (except tab, newline, carriage return
+# which are valid whitespace).  This neutralizes unterminated escape
+# sequences (lone ESC, partial CSI), BEL, SOS, and any other control
+# characters that could cause terminal side-effects.
+_CONTROL_BYTE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def strip_ansi(text: str) -> str:
+    """Strip ANSI/terminal escape sequences from text.
+
+    Handles CSI (including DEC private modes and ECMA-48 parameter bytes),
+    OSC, DCS, PM, APC (all string-type sequences), character-set
+    designation, two-character sequences, and 8-bit C1 CSI codes.
+
+    After removing well-formed sequences, all remaining non-printable
+    C0/C1 control bytes are stripped (except ``\\t``, ``\\n``, ``\\r``).
+    This neutralizes unterminated sequences (lone ESC, partial CSI,
+    BEL, SOS, etc.) while preserving payload text.
+    """
+    cleaned = _ANSI_ESCAPE_RE.sub("", text)
+    return _CONTROL_BYTE_RE.sub("", cleaned)
+
 
 def format_session_id(session_id: str, budget: int) -> str:
     """Format session ID with adaptive truncation.

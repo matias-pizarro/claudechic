@@ -3,7 +3,12 @@
 import os
 from unittest.mock import patch
 
-from claudechic.formatting import format_cwd, format_tokens, parse_context_size
+from claudechic.formatting import (
+    format_cwd,
+    format_tokens,
+    parse_context_size,
+    strip_ansi,
+)
 
 
 class TestFormatTokens:
@@ -156,3 +161,163 @@ class TestFormatCwd:
         assert len(result_15) <= 15
         # Larger budgets show more
         assert len(result_35) >= len(result_25) >= len(result_15)
+
+
+class TestStripAnsi:
+    """Tests for strip_ansi() — comprehensive ANSI/terminal escape removal."""
+
+    # --- SGR (Select Graphic Rendition) ---
+
+    def test_strips_sgr_reset(self):
+        """ANSI reset code \x1b[0m is stripped."""
+        assert strip_ansi("=> Checking PostgreSQL\x1b[0m") == "=> Checking PostgreSQL"
+
+    def test_strips_sgr_color(self):
+        """ANSI color codes are stripped."""
+        assert strip_ansi("\x1b[32mOK\x1b[0m") == "OK"
+
+    def test_multiple_sgr_sequences(self):
+        """Multiple SGR sequences in one string are all removed."""
+        assert strip_ansi("\x1b[1m\x1b[33mWarning:\x1b[0m something") == (
+            "Warning: something"
+        )
+
+    def test_sgr_with_many_params(self):
+        """SGR with many semicolon-separated parameters."""
+        assert strip_ansi("\x1b[1;2;3;4;5;6;7;8;9mtext\x1b[0m") == "text"
+
+    # --- CSI (Control Sequence Introducer) ---
+
+    def test_cursor_movement(self):
+        """CSI cursor movement sequences are stripped."""
+        assert strip_ansi("text\x1b[2Amore") == "textmore"
+
+    def test_dec_private_mode(self):
+        """DEC private mode sequences (with ?) are stripped."""
+        assert strip_ansi("\x1b[?25hvisible\x1b[?25l") == "visible"
+
+    def test_bracketed_paste_mode(self):
+        """Bracketed paste mode (DEC private 2004) is stripped."""
+        assert strip_ansi("\x1b[?2004hpasted\x1b[?2004l") == "pasted"
+
+    def test_true_color_sgr_colon_params(self):
+        """True-color SGR with colon-separated params (ECMA-48) is stripped."""
+        assert strip_ansi("\x1b[38:2::255:0:0mred text\x1b[0m") == "red text"
+
+    def test_device_private_mode_greater(self):
+        """CSI with > private parameter prefix is stripped."""
+        assert strip_ansi("\x1b[>4;2mtext") == "text"
+
+    # --- OSC (Operating System Command) ---
+
+    def test_osc_terminal_title_bel(self):
+        """OSC 0 (set title) terminated by BEL is stripped."""
+        assert strip_ansi("\x1b]0;My Title\x07text after") == "text after"
+
+    def test_osc_terminal_title_7bit_st(self):
+        """OSC 0 (set title) terminated by 7-bit ST (ESC \\\\) is stripped."""
+        assert strip_ansi("\x1b]0;My Title\x1b\\text after") == "text after"
+
+    def test_osc_terminal_title_8bit_st(self):
+        """OSC 0 (set title) terminated by 8-bit ST (\\x9c) is stripped."""
+        assert strip_ansi("\x1b]0;My Title\x9ctext after") == "text after"
+
+    def test_osc8_hyperlink(self):
+        """OSC 8 hyperlink sequences are stripped."""
+        text = "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\"
+        assert strip_ansi(text) == "click here"
+
+    # --- DCS / PM / APC (string sequences) ---
+
+    def test_dcs_sequence(self):
+        """DCS (Device Control String) sequences are stripped."""
+        assert strip_ansi("\x1bPmalicious\x1b\\text") == "text"
+
+    def test_pm_sequence(self):
+        """PM (Privacy Message) sequences are stripped."""
+        assert strip_ansi("\x1b^private\x1b\\text") == "text"
+
+    def test_apc_sequence(self):
+        """APC (Application Program Command) sequences are stripped."""
+        assert strip_ansi("\x1b_command\x1b\\text") == "text"
+
+    def test_unterminated_osc_text_preserved(self):
+        """Unterminated OSC: payload text preserved, control byte stripped."""
+        result = strip_ansi("\x1b]0;unterminated")
+        assert "unterminated" in result
+        assert "\x1b" not in result
+
+    # --- Character set designation ---
+
+    def test_charset_designation(self):
+        """Character set designation sequences (e.g. \\x1b(B) are stripped."""
+        assert strip_ansi("\x1b(Btext") == "text"
+
+    # --- Two-character sequences ---
+
+    def test_two_char_save_cursor(self):
+        """Two-character escape sequences (DEC save/restore) are stripped."""
+        assert strip_ansi("\x1b7saved\x1b8") == "saved"
+
+    # --- 8-bit C1 sequences ---
+
+    def test_c1_csi(self):
+        """8-bit C1 CSI (\\x9b) sequences are stripped."""
+        assert strip_ansi("\x9b31mred\x9b0m") == "red"
+
+    def test_c1_osc(self):
+        """8-bit C1 OSC (\\x9d) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x9d0;title\x9ctext") == "text"
+
+    def test_c1_dcs(self):
+        """8-bit C1 DCS (\\x90) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x90payload\x9ctext") == "text"
+
+    def test_c1_pm(self):
+        """8-bit C1 PM (\\x9e) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x9eprivate\x9ctext") == "text"
+
+    def test_c1_apc(self):
+        """8-bit C1 APC (\\x9f) terminated by ST (\\x9c) is stripped."""
+        assert strip_ansi("\x9fcommand\x9ctext") == "text"
+
+    def test_c1_osc_with_7bit_st(self):
+        """8-bit C1 OSC terminated by 7-bit ST (ESC \\\\) is stripped."""
+        assert strip_ansi("\x9d0;title\x1b\\text") == "text"
+
+    # --- Edge cases ---
+
+    def test_clean_input_unchanged(self):
+        """Normal text passes through without modification."""
+        assert strip_ansi("Normal message") == "Normal message"
+
+    def test_empty_string(self):
+        assert strip_ansi("") == ""
+
+    def test_brackets_preserved(self):
+        """Literal square brackets are NOT stripped (just ANSI codes)."""
+        assert strip_ansi("Error [code 42]") == "Error [code 42]"
+
+    def test_combined_ansi_and_brackets(self):
+        """ANSI codes stripped but brackets preserved."""
+        assert strip_ansi("\x1b[31m[ERROR]\x1b[0m fail") == "[ERROR] fail"
+
+    def test_nested_brackets(self):
+        """Nested brackets are preserved."""
+        assert strip_ansi("data[[0]]") == "data[[0]]"
+
+    def test_lone_escape_stripped(self):
+        """Lone ESC bytes are stripped (neutralizes unterminated sequences)."""
+        assert strip_ansi("text\x1b") == "text"
+
+    def test_unterminated_osc52_neutralized(self):
+        """Unterminated OSC 52 clipboard sequence is neutralized."""
+        # The ESC introducer is stripped; payload text is preserved
+        result = strip_ansi("\x1b]52;c;payload")
+        assert "\x1b" not in result
+        assert "payload" in result
+
+    def test_remaining_c1_bytes_stripped(self):
+        """Lone 8-bit C1 control bytes are stripped after regex pass."""
+        # \x9d and \x9e are C1 string introducers without terminators
+        assert strip_ansi("text\x9d\x9eend") == "textend"

@@ -575,6 +575,27 @@ async def test_sdk_stderr_ignores_empty(mock_sdk):
 
 
 @pytest.mark.asyncio
+async def test_sdk_stderr_strips_ansi(mock_sdk):
+    """SDK stderr with ANSI escape codes is cleaned before display."""
+    from claudechic.widgets import SystemInfo
+
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        chat_view = app._chat_view
+        assert chat_view is not None
+
+        # Simulate ANSI-laden SDK stderr (the original crash trigger)
+        app._handle_sdk_stderr("=> Checking PostgreSQL\x1b[0m\n")
+        await pilot.pause()
+
+        info_widgets = list(chat_view.query(SystemInfo))
+        assert len(info_widgets) == 1
+        # ANSI codes should be stripped, visible text preserved
+        assert "Checking PostgreSQL" in info_widgets[0]._message
+        assert "\x1b" not in info_widgets[0]._message
+
+
+@pytest.mark.asyncio
 async def test_bang_command_inline_shell(mock_sdk):
     """'!cmd' runs shell command and displays output inline."""
     from claudechic.widgets import ShellOutputWidget
@@ -1067,3 +1088,144 @@ async def test_check_and_copy_selection_clipboard_failure_shows_warning(mock_sdk
             n.message == "Copy failed" and n.severity == "warning"
             for n in app._notifications
         )
+
+
+@pytest.mark.asyncio
+async def test_notify_defaults_markup_false(mock_sdk):
+    """ChatApp.notify() defaults to markup=False, preventing MarkupError on
+    messages containing ANSI codes or literal brackets."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        # These would crash with markup=True because [0m and [code 42]
+        # are parsed as Rich markup tags
+        app.notify("=> Checking PostgreSQL\x1b[0m")
+        app.notify("Error [code 42]")
+        app.notify("\x1b[31m[ERROR]\x1b[0m fail")
+        await pilot.pause()
+        # Success criteria: all three render without MarkupError,
+        # visible text preserved, no crash from brackets or ANSI codes
+        assert len(app._notifications) == 3
+
+
+def test_widget_notify_calls_use_markup_false():
+    """Enforce that all widget/screen notify() calls pass markup=False.
+
+    Textual's Widget.notify() defaults markup=True and passes it explicitly
+    to self.app.notify(), bypassing ChatApp's markup=False override.
+
+    This test catches TWO patterns in widget/screen files:
+    1. self.notify(...) — Widget-originated, bypasses ChatApp default
+    2. self.app.notify(...) — Direct app call; ChatApp default protects
+       these, but we enforce markup=False explicitly for defense-in-depth
+
+    Covered patterns: self.notify(), self.app.notify()
+    Not covered (none exist): super().notify(), aliased notify
+    """
+    import ast
+    from pathlib import Path
+
+    def _is_notify_call(func: ast.expr) -> bool:
+        """Match self.notify(...) and self.app.notify(...) patterns."""
+        if not isinstance(func, ast.Attribute) or func.attr != "notify":
+            return False
+        val = func.value
+        # self.notify(...)
+        if isinstance(val, ast.Name) and val.id == "self":
+            return True
+        # self.app.notify(...)
+        if (
+            isinstance(val, ast.Attribute)
+            and val.attr == "app"
+            and isinstance(val.value, ast.Name)
+            and val.value.id == "self"
+        ):
+            return True
+        return False
+
+    root = Path(__file__).parent.parent / "claudechic"
+    violations: list[str] = []
+
+    for py_file in sorted(root.rglob("*.py")):
+        # Only check widget and screen files (not app.py which has the override)
+        rel = py_file.relative_to(root)
+        parts = rel.parts
+        if not any(p in ("widgets", "screens") for p in parts):
+            continue
+
+        source = py_file.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=str(py_file))
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not _is_notify_call(node.func):
+                continue
+            # Check that markup=False is passed as a keyword
+            has_markup_false = any(
+                kw.arg == "markup"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is False
+                for kw in node.keywords
+            )
+            if not has_markup_false:
+                violations.append(f"{rel}:{node.lineno}")
+
+    assert not violations, (
+        "Widget/screen notify() calls missing markup=False "
+        f"(bypasses ChatApp override): {violations}"
+    )
+
+
+def test_no_markup_true_with_dynamic_content():
+    """Enforce that no notify(markup=True) call uses dynamic (interpolated) content.
+
+    markup=True is only safe with static, application-authored strings.
+    f-strings, format(), or variable references with markup=True would
+    re-introduce the MarkupError risk this fix addresses.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent / "claudechic"
+    violations: list[str] = []
+
+    for py_file in sorted(root.rglob("*.py")):
+        source = py_file.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=str(py_file))
+        except SyntaxError:
+            continue
+
+        rel = py_file.relative_to(root)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "notify"):
+                continue
+            # Check if markup=True is explicitly passed
+            has_markup_true = any(
+                kw.arg == "markup"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in node.keywords
+            )
+            if not has_markup_true:
+                continue
+            # markup=True found — check if message arg is dynamic.
+            # Resolve from positional args[0] or keyword message=.
+            msg_arg = node.args[0] if node.args else None
+            if msg_arg is None:
+                msg_kw = [kw for kw in node.keywords if kw.arg == "message"]
+                if msg_kw:
+                    msg_arg = msg_kw[0].value
+            if msg_arg and not isinstance(msg_arg, ast.Constant):
+                violations.append(f"{rel}:{node.lineno}")
+
+    assert not violations, (
+        "notify(markup=True) with dynamic content is unsafe "
+        f"(can cause MarkupError): {violations}"
+    )
