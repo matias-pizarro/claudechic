@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from claude_agent_sdk.types import HookEvent
     from claudechic.screens.chat import ChatScreen
+    from textual.notifications import SeverityLevel
     from textual.timer import Timer
 
 from textual.app import App
@@ -58,7 +59,7 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
-from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size
+from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size, strip_ansi
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.history import append_to_history
@@ -445,6 +446,80 @@ class ChatApp(App):
         # Also show toast for visibility
         self.notify(message, severity="error")
 
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: "SeverityLevel" = "information",
+        timeout: float | None = None,
+        markup: bool = False,
+    ) -> None:
+        """Override to default ``markup=False`` for all toast notifications.
+
+        **Goal:** Prevent ``MarkupError`` crashes from untrusted output
+        containing ANSI escape codes or literal square brackets that
+        Textual parses as Rich tags.
+
+        **Non-goals:**
+
+        - Rendering Rich markup styles in notifications (callers
+          needing markup can pass ``markup=True`` with static strings
+          only — see constraint below).
+
+        **Trust boundary:** All notification text is untrusted.
+        This override strips ANSI/terminal escape sequences and
+        non-printable control bytes centrally (via ``strip_ansi()``)
+        and defaults Rich markup parsing off (via ``markup=False``).
+        Default notification paths cannot trigger ``MarkupError``
+        or inject terminal control sequences.  Callers explicitly
+        opting into ``markup=True`` must use only static strings.
+
+        **``markup=True`` usage:** Allowed only for static,
+        application-authored strings with no interpolated values.
+        Dynamic content (f-strings with ``{e}``, ``{path}``, etc.)
+        must never use ``markup=True``.  No existing call site needs
+        markup; this constraint is for future additions (enforced by
+        ``test_no_markup_true_with_dynamic_content``).
+
+        **Audit:** All ``notify()`` calls were manually reviewed —
+        none use ``markup=True``.  Widget/screen calls are enforced
+        by ``test_widget_notify_calls_use_markup_false``.  App-level
+        and command calls are protected by this override's default
+        and verified by ``test_no_markup_true_with_dynamic_content``.
+
+        **Defense layers:**
+
+        1. This override — strips ANSI centrally and disables markup
+           parsing, protecting all notification paths.
+        2. ``strip_ansi()`` at data entry points
+           (``_handle_sdk_stderr``, ``_show_system_info``) — also
+           removes escape codes for Markdown widgets (not just toasts).
+
+        **Success criteria** (enforced by tests):
+
+        - Notifications containing ANSI codes do not raise ``MarkupError``.
+        - Notifications containing literal brackets render safely.
+        - Visible text is preserved after ANSI stripping.
+        - All widget/screen ``notify()`` calls pass ``markup=False``
+          (enforced by ``test_widget_notify_calls_use_markup_false``).
+        - No ``markup=True`` call uses dynamic/interpolated content
+          (enforced by ``test_no_markup_true_with_dynamic_content``).
+
+        **Widget caveat:** Textual's ``Widget.notify()`` has its own
+        ``markup=True`` default and passes it explicitly to
+        ``self.app.notify()``, bypassing this override's default.
+        Widget-originated ``self.notify()`` calls must pass
+        ``markup=False`` explicitly — the enforcement test catches
+        regressions.
+        """
+        # Centrally strip terminal escape sequences so no notification path
+        # can inject OSC 52 (clipboard), OSC 8 (hyperlink), title changes, etc.
+        super().notify(
+            strip_ansi(message), title=strip_ansi(title),
+            severity=severity, timeout=timeout, markup=markup
+        )
+
     async def _replace_client(self, options: ClaudeAgentOptions) -> None:
         """Safely replace current client with a new one."""
         # Cancel any permission prompts waiting for user input
@@ -568,8 +643,13 @@ class ChatApp(App):
         return ChatScreen(slash_commands=self.LOCAL_COMMANDS)
 
     def _handle_sdk_stderr(self, message: str) -> None:
-        """Handle SDK stderr output by showing in chat."""
-        message = message.strip()
+        """Handle SDK stderr output by showing in chat.
+
+        Strips ANSI escape codes at the source so downstream renderers
+        (both notify() toasts and SystemInfo Markdown widgets) receive
+        clean text.
+        """
+        message = strip_ansi(message).strip()
         if not message:
             return
         self._show_system_info(message, "warning", None)
@@ -1207,8 +1287,14 @@ class ChatApp(App):
     def _show_system_info(
         self, message: str, severity: str, agent_id: str | None
     ) -> None:
-        """Show system info message in chat view (not stored in history)."""
+        """Show system info message in chat view (not stored in history).
+
+        ANSI codes are stripped so both the Markdown widget and the
+        notify() fallback receive clean text.
+        """
         from claudechic.filters import should_filter_message
+
+        message = strip_ansi(message)
 
         if should_filter_message(message):
             log.debug("Filtered system message: %s", message[:100])
@@ -1216,7 +1302,7 @@ class ChatApp(App):
 
         chat_view = self._get_chat_view(agent_id)
         if not chat_view:
-            # Fallback to notify if no chat view
+            # Fallback to notify if no chat view (markup=False via override)
             notify_map = {"warning": "warning", "error": "error"}
             self.notify(message[:100], severity=notify_map.get(severity, "information"))  # type: ignore[arg-type]
             return
