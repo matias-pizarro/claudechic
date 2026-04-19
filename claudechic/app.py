@@ -2303,13 +2303,14 @@ class ChatApp(App):
             )
         )
         if agent.client:
-            self.notify(f"Switching effort to {effort}...")
+            label = effort if effort != "default" else "auto"
+            self.notify(f"Switching effort to {label}...")
             await agent.disconnect()
             options = self._make_options(
                 cwd=agent.cwd,
                 agent_name=agent.name,
                 model=agent.model,
-                effort=effort,
+                effort=agent.effort,
             )
             await agent.connect(options)
 
