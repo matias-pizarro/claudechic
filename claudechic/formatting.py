@@ -213,6 +213,9 @@ def strip_mcp_prefix(name: str) -> str:
     return re.sub(r"^mcp__[^_]+__", "", name)
 
 
+_TOOL_SEARCH_MAX_SIZE = 65_536  # 64 KB limit for ast.literal_eval input
+
+
 def extract_tool_search_names(content) -> list[str] | None:
     """Extract tool names from a ToolSearch result.
 
@@ -223,11 +226,13 @@ def extract_tool_search_names(content) -> list[str] | None:
     if isinstance(content, str):
         if not content.strip().startswith("[{"):
             return None
+        if len(content) > _TOOL_SEARCH_MAX_SIZE:
+            return None
         try:
             import ast
 
             items = ast.literal_eval(content)
-        except (ValueError, SyntaxError):
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
             return None
     if not isinstance(items, list):
         return None
