@@ -952,7 +952,9 @@ Key Rules:
         """Update permission mode via SDK and emit event.
 
         Args:
-            mode: One of 'default', 'acceptEdits', 'plan'
+            mode: One of 'default', 'acceptEdits', 'plan', 'planSwarm'.
+                  'planSwarm' is claudechic-specific; the SDK is set to
+                  'plan' (closest safe enforceable mode).
         """
         assert mode in self.PERMISSION_MODES, f"Invalid permission mode: {mode}"
         if self.permission_mode != mode:
