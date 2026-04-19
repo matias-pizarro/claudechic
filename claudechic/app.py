@@ -1076,7 +1076,7 @@ class ChatApp(App):
         tokens = usage.get("totalTokens", 0)
         if not isinstance(tokens, int):
             tokens = 0
-        raw_max = usage.get("rawMaxTokens")
+        raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens")
         max_tokens = raw_max if isinstance(raw_max, int) and raw_max > 0 else None
         # Update UI bar
         if max_tokens:
@@ -2287,11 +2287,13 @@ class ChatApp(App):
         if not agent:
             self.notify("No active agent", severity="warning")
             return
-        if effort == agent.effort:
+        # "default" resets to SDK auto (None)
+        effective = None if effort == "default" else effort
+        if effective == agent.effort:
             return
         old_effort = agent.effort or "default"
-        agent.effort = effort
-        self.status_footer.effort = effort or ""
+        agent.effort = effective
+        self.status_footer.effort = effective or ""
         self.run_worker(
             capture(
                 "effort_changed",

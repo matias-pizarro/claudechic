@@ -244,10 +244,10 @@ async def test_effort_prompt_selection():
     app = WidgetTestApp(lambda: EffortPrompt(current_value="medium"))
     async with app.run_test() as pilot:
         prompt = app.query_one(EffortPrompt)
-        # medium is index 1
-        assert prompt.selected_idx == 1
-        # Navigate to high (index 2) and select via number key
-        await pilot.press("3")
+        # medium is index 2 (after "default" at 0, "low" at 1)
+        assert prompt.selected_idx == 2
+        # Navigate to high (index 3) and select via number key
+        await pilot.press("4")
         result = await prompt.wait()
     assert result == "high"
 
@@ -262,9 +262,21 @@ async def test_effort_prompt_xhigh_initial():
     app = WidgetTestApp(lambda: EffortPrompt(current_value="xhigh"))
     async with app.run_test():
         prompt = app.query_one(EffortPrompt)
-        # xhigh is the 4th option (index 3)
-        assert prompt.selected_idx == 3
+        # xhigh is the 5th option (index 4, after "default" at 0)
+        assert prompt.selected_idx == 4
         assert prompt.OPTIONS[prompt.selected_idx][0] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_effort_prompt_default_reset():
+    """EffortPrompt can reset to SDK default."""
+    app = WidgetTestApp(lambda: EffortPrompt(current_value="high"))
+    async with app.run_test() as pilot:
+        prompt = app.query_one(EffortPrompt)
+        # Select "default" (index 0)
+        await pilot.press("1")
+        result = await prompt.wait()
+    assert result == "default"
 
 
 @pytest.mark.asyncio

@@ -97,7 +97,7 @@ COMMANDS: list[tuple[str, str, list[str]]] = [
     ("/compactish", "Compact session to reduce context", []),
     ("/usage", "Show API rate limit usage", []),
     ("/model", "Change model", []),
-    ("/effort", "Change effort level (low/medium/high/xhigh/max)", []),
+    ("/effort", "Change effort level (default/low/medium/high/xhigh/max)", []),
     ("/vim", "Toggle vi mode for input", []),
     ("/processes", "Show background processes", []),
     ("/reviews", "Show roborev reviews", []),
