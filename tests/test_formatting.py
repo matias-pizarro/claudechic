@@ -370,6 +370,13 @@ class TestParseContextMarkdown:
         assert data["tokens_used"] == 500_000
         assert data["tokens_total"] == 1_000_000
 
+    def test_used_no_unit_suffix(self):
+        """Used tokens without unit suffix (e.g. '950') default to raw value."""
+        md = "**Model:** claude-sonnet-4-6\n**Tokens:** 950 / 1.0M"
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 950
+        assert data["tokens_total"] == 1_000_000
+
     def test_no_tokens_line_uses_default(self):
         """Missing tokens line falls back to DEFAULT_CONTEXT_WINDOW."""
         md = "**Model:** claude-sonnet-4-6\nNo token info here."

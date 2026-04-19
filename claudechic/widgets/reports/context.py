@@ -35,7 +35,7 @@ def parse_context_markdown(content: str) -> dict:
     )
     if tokens_match:
         used_str, used_unit, total_str, total_unit = tokens_match.groups()
-        used_mult = 1_000_000 if used_unit == "M" else 1000
+        used_mult = 1_000_000 if used_unit == "M" else (1000 if used_unit == "k" else 1)
         total_mult = 1_000_000 if total_unit == "M" else 1000
         data["tokens_used"] = int(float(used_str) * used_mult)
         data["tokens_total"] = int(float(total_str) * total_mult)
