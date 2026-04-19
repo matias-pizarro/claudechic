@@ -1078,12 +1078,14 @@ class ChatApp(App):
             tokens = 0
         raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens")
         max_tokens = raw_max if isinstance(raw_max, int) and raw_max > 0 else None
+        # Update agent for prompt injection (use agent's own max_tokens as
+        # fallback, not the shared context_bar which may reflect another agent)
+        effective_max = max_tokens or agent.max_tokens
+        agent.update_context(tokens, effective_max)
         # Update UI bar
         if max_tokens:
             self.context_bar.max_tokens = max_tokens
         self.context_bar.tokens = tokens
-        # Update agent for prompt injection
-        agent.update_context(tokens, max_tokens or self.context_bar.max_tokens)
         # Keep sidebar and footer in sync
         self._update_sidebar_agent_context(agent)
         self.call_after_refresh(self.status_footer.refresh_cwd_label)
