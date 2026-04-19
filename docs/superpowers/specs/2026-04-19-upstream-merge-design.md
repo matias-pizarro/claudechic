@@ -36,7 +36,7 @@ sanitization, toast MarkupError fix).  The two branches must be reconciled.
 | `claudechic/app.py` (`_update_footer_model`) | Upstream changes `self.status_footer.model = model_name` to `trim_model_name(model_name)`; local uses the original line as anchor for `parse_context_size()` fallback code | Keep upstream's `trim_model_name()` change. Append local's `parse_context_size()` fallback after the modified line. |
 | `claudechic/widgets/layout/indicators.py` | Import conflict (`DEFAULT_CONTEXT_WINDOW` vs `MAX_CONTEXT_TOKENS`) + local's complete `ContextBar` rewrite | Adopt upstream's `DEFAULT_CONTEXT_WINDOW` rename. Apply it to local's rewritten `ContextBar` (gradient colors, text format). Local's `format_tokens` import stays. |
 | `tests/test_formatting.py` | Add/add conflict — upstream creates 22-line file, local creates 323-line file | Merge both: unify import blocks (local's `format_cwd`, `format_tokens`, `parse_context_size`, `strip_ansi` + upstream's `trim_model_name`), concatenate test classes. No name collisions. |
-| `tests/test_widgets.py` (context_bar area) | Upstream inserts `test_context_bar_scales_with_max_tokens` after base's `test_context_bar_rendering`; local rewrites `test_context_bar_rendering` entirely | Place upstream's scaling test after local's rewritten test class. Update upstream's test to use `DEFAULT_CONTEXT_WINDOW` consistently. |
+| `tests/test_widgets.py` (context_bar area) | Upstream inserts `test_context_bar_scales_with_max_tokens` after base's `test_context_bar_rendering`; local rewrites `test_context_bar_rendering` entirely | Place upstream's scaling test after local's rewritten test class |
 | `tests/test_widgets.py` (footer area) | Both insert tests after `test_status_footer_permission_mode` | Keep both: upstream's `test_status_footer_effort_label` + local's 200+ lines of cwd/session footer tests, sequentially |
 | `tests/test_app_ui.py` | Import line: upstream adds `AsyncMock`, local adds `patch` and `make_fake_pty` | Combine: `from unittest.mock import AsyncMock, MagicMock, patch` + keep local's `from tests.conftest import ..., make_fake_pty` |
 
@@ -74,6 +74,8 @@ async def refresh_context(self) -> None:
     except Exception as e:
         log.debug(f"get_context_usage failed: {e}")
         return
+    if not isinstance(usage, dict):
+        return
     tokens = usage.get("totalTokens", 0)
     if not isinstance(tokens, int):
         tokens = 0
@@ -92,6 +94,7 @@ async def refresh_context(self) -> None:
 
 **Key decisions:**
 - SDK's `get_context_usage()` is the sole source of truth (no session-file fallback)
+- `usage` is guarded against `None` return (SDK may return `None` on error)
 - `totalTokens` is validated as int with default 0
 - `rawMaxTokens` is validated as positive int; if missing, falls back to bar's current value
 - `agent.update_context()` feeds the prompt-injection system
@@ -112,28 +115,44 @@ This function is **not needed for correctness** — the context bar would show 2
 
 Post-merge, verify these behaviors:
 
-1. **Context bar:** Shows live token usage from SDK; updates `max_tokens` per-model (Opus 1M shows as 1M, not 200K)
-2. **Prompt injection:** `<system-reminder>N/M tokens</system-reminder>` appears in every prompt with SDK-sourced values
-3. **Sidebar:** Per-agent token counts update after each response
-4. **Footer cwd:** Recomputes budget after context changes
-5. **Effort command:** `/effort` sets thinking depth, persists across reconnects
-6. **ToolSearch:** Compact rendering with tool names (not raw JSON)
-7. **Session-ID:** Clears on `/clear`, shows on `/session-id`
-8. **Auto-copy:** No crash on copy selection
-9. **Toast notifications:** No `MarkupError` from ANSI codes or brackets
-10. **All tests pass:** `uv run python -m pytest tests/ -n auto -q`
+| # | Criterion | Verification |
+|---|-----------|--------------|
+| 1 | Context bar shows live SDK token usage; `max_tokens` updates per-model | `test_refresh_context_reads_sdk_usage`, `test_context_bar_scales_with_max_tokens` |
+| 2 | Prompt injection uses SDK-sourced values | `test_prepare_prompt_*` (local agent tests) |
+| 3 | Sidebar per-agent token counts update | `test_sidebar_*` (local sidebar tests) |
+| 4 | Footer cwd recomputes after context changes | `test_status_footer_cwd_*` (local footer tests) |
+| 5 | `/effort` sets thinking depth, persists across reconnects | `test_effort_prompt_*` (upstream widget tests) |
+| 6 | ToolSearch compact rendering | Visual: invoke ToolSearch, verify tool list not raw JSON |
+| 7 | Session-ID clears on `/clear`, shows on `/session-id` | `test_session_id_*` (local app tests) |
+| 8 | Auto-copy no crash | `test_copy_*` (local app tests) |
+| 9 | Toast notifications safe from ANSI/brackets | `test_notify_defaults_markup_false`, `test_sdk_stderr_strips_ansi` |
+| 10 | All tests pass | `uv run python -m pytest tests/ -n auto -q` |
+
+**UI smoke checks** (manual, post-merge):
+- Launch `uv run claudechic`, verify footer shows model name (trimmed), effort level, cwd, session-id
+- Send a message, verify context bar updates with SDK values
+- Run `/effort medium`, verify effort label changes
+- Run `/session-id`, verify ID displayed and copied
 
 ## Execution Steps
 
-1. `git checkout integration`
-2. `git merge a6624cf` — will report conflicts in ~7 files
-3. Resolve textual conflicts per the table above
-4. Fix semantic conflicts — update all `MAX_CONTEXT_TOKENS` → `DEFAULT_CONTEXT_WINDOW` references in `agent.py`, `app.py`, `indicators.py`, `sidebar.py`; remove stale `get_context_from_session` import
-5. Run `uv run python -m pytest tests/ -n auto -q` — verify all tests pass
-6. Stage resolved files explicitly: `git add <file1> <file2> ...` (do not use `git add .` — review `git status` first to avoid staging secrets or untracked files)
-7. `git commit` (merge commit)
+1. **Checkout:** `git checkout integration`
+2. **Verify SDK version:** `uv run python -c "from claude_agent_sdk import ClaudeSDKClient; assert hasattr(ClaudeSDKClient, 'get_context_usage'), 'SDK too old'"` — confirms the method exists before merging
+3. **Merge:** `git merge a6624cf` — will report conflicts in ~7 files
+4. **Resolve textual conflicts** per the table above (agent.py, app.py ×3, indicators.py, test_formatting.py, test_widgets.py ×2, test_app_ui.py)
+5. **Fix semantic conflicts:**
+   - Update `MAX_CONTEXT_TOKENS` → `DEFAULT_CONTEXT_WINDOW` in `agent.py`, `app.py`, `indicators.py`, `sidebar.py`
+   - Remove stale `get_context_from_session` import from `app.py`
+6. **Verify no stale references:** `rg "MAX_CONTEXT_TOKENS|get_context_from_session" claudechic/` — must return zero matches
+7. **Run targeted tests first:**
+   - `uv run python -m pytest tests/test_formatting.py -v` — verify merged test file
+   - `uv run python -m pytest tests/test_widgets.py -v` — verify merged widget tests
+   - `uv run python -m pytest tests/test_app_ui.py -v` — verify merged app tests
+8. **Run full suite:** `uv run python -m pytest tests/ -n auto -q` — verify all tests pass
+9. **Review staging:** `git status --short` — review changed files, verify no secrets or untracked files
+10. **Stage and commit:** `git add <resolved files>` then `git commit`
 
-**Note:** Semantic fixes (step 4) MUST happen before the test run (step 5). The renamed constant causes `ImportError` at import time, so tests cannot even start until all references are updated.
+**Note:** Semantic fixes (step 5) MUST happen before any test run (steps 7-8). The renamed constant causes `ImportError` at import time, so tests cannot even start until all references are updated.
 
 ## Non-goals
 
