@@ -25,7 +25,6 @@ from claudechic.features.worktree.git import (
     FinishPhase,
     FinishState,
     ResolutionAction,
-    _validate_base_branch,
     clean_gitignored_files,
     determine_resolution_action,
     diagnose_worktree,
@@ -200,13 +199,9 @@ def _make_spawn_worktree(caller_name: str | None = None):
         # calls that omit it.
         base_branch = args["base_branch"]
 
-        # Validate base_branch before passing to git (prevents option injection
-        # and catches typos early with a clear error message).
-        valid, err = _validate_base_branch(base_branch)
-        if not valid:
-            return _error_response(err)
-
-        # Create the worktree
+        # Create the worktree (start_worktree validates base_branch
+        # internally: rejects '-' prefixes and resolves against the
+        # main worktree with explicit cwd for deterministic ref lookup)
         success, message, wt_path = start_worktree(name, base=base_branch)
         if not success or wt_path is None:
             return _error_response(f"Error creating worktree: {message}")

@@ -1082,9 +1082,9 @@ class ChatApp(App):
         # fallback, not the shared context_bar which may reflect another agent)
         effective_max = max_tokens or agent.max_tokens
         agent.update_context(tokens, effective_max)
-        # Update UI bar
-        if max_tokens:
-            self.context_bar.max_tokens = max_tokens
+        # Update UI bar (always sync max from agent state so switching
+        # agents doesn't leave a stale max from the previous agent/model)
+        self.context_bar.max_tokens = effective_max
         self.context_bar.tokens = tokens
         # Keep sidebar and footer in sync
         self._update_sidebar_agent_context(agent)
