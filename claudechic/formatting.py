@@ -12,7 +12,10 @@ from claudechic.enums import ToolName
 
 
 # Constants
-MAX_CONTEXT_TOKENS = 200_000  # Claude's context window
+# Pre-connect fallback only. The authoritative per-model window comes from
+# ClaudeSDKClient.get_context_usage()'s ``rawMaxTokens``, fetched live by
+# ``ChatApp.refresh_context``.
+DEFAULT_CONTEXT_WINDOW = 200_000
 MAX_HEADER_WIDTH = 70  # Max width for tool headers
 MIN_CWD_LENGTH = 10  # Below this budget, hide cwd entirely
 MAX_CWD_LENGTH = 80  # Cap to prevent cwd from dominating the bar
@@ -193,6 +196,7 @@ def parse_context_size(display_name: str) -> int | None:
     return None
 
 
+
 # Inter-agent message patterns
 # Matches ask_agent: [Question from agent 'X' - please respond...]
 _AGENT_QUESTION_RE = re.compile(
@@ -202,6 +206,39 @@ _AGENT_QUESTION_RE = re.compile(
 _AGENT_MESSAGE_RE = re.compile(r"^\[Message from agent '([^']+)'\]\n\n")
 # Matches spawn_agent/spawn_worktree: [Spawned by agent 'X']
 _AGENT_SPAWNED_RE = re.compile(r"^\[Spawned by agent '([^']+)'\]\n\n")
+
+
+def strip_mcp_prefix(name: str) -> str:
+    """Strip 'mcp__<server>__' prefix for compact display."""
+    return re.sub(r"^mcp__[^_]+__", "", name)
+
+
+def extract_tool_search_names(content) -> list[str] | None:
+    """Extract tool names from a ToolSearch result.
+
+    Content is a list of {'type': 'tool_reference', 'tool_name': '...'} dicts,
+    or a stringified repr of same. Returns None if the shape doesn't match.
+    """
+    items = content
+    if isinstance(content, str):
+        if not content.strip().startswith("[{"):
+            return None
+        try:
+            import ast
+
+            items = ast.literal_eval(content)
+        except (ValueError, SyntaxError):
+            return None
+    if not isinstance(items, list):
+        return None
+    names = [
+        item["tool_name"]
+        for item in items
+        if isinstance(item, dict)
+        and item.get("type") == "tool_reference"
+        and item.get("tool_name")
+    ]
+    return names or None
 
 
 def format_agent_prompt(prompt: str) -> tuple[str, bool]:
@@ -229,6 +266,23 @@ def format_agent_prompt(prompt: str) -> tuple[str, bool]:
         rest = prompt[match.end() :]
         return f"Spawned by **{agent_name}**:\n\n{rest}", True
     return prompt, False
+
+
+def trim_model_name(name: str) -> str:
+    """Strip trailing qualifiers from a model display name.
+
+    Examples:
+        "Opus 4.7 with 1M context" -> "Opus 4.7"
+        "Sonnet 4.5 (beta)" -> "Sonnet 4.5"
+        "Haiku" -> "Haiku"
+    """
+    if not name:
+        return name
+    # Drop anything from " with " onwards (case-insensitive)
+    trimmed = re.split(r"\s+with\s+", name, maxsplit=1, flags=re.IGNORECASE)[0]
+    # Drop trailing parenthesized qualifiers like "(beta)" or "(experimental)"
+    trimmed = re.sub(r"\s*\([^)]*\)\s*$", "", trimmed)
+    return trimmed.strip()
 
 
 def make_relative(path: str, cwd: Path | None) -> str:
@@ -325,6 +379,11 @@ def format_result_summary(name: str, content: str, is_error: bool = False) -> st
     elif name == ToolName.WRITE:
         return "(done)"
 
+    elif name == ToolName.TOOL_SEARCH:
+        names = extract_tool_search_names(content)
+        count = len(names) if names else content.count("<function>")
+        return f"({count} tools)" if count else ""
+
     return ""
 
 
@@ -378,6 +437,14 @@ def format_tool_header(name: str, input: dict, cwd: Path | None = None) -> str:
         return "AskUserQuestion"
     elif name == ToolName.SKILL:
         return f"Skill: {input.get('skill', '?')}"
+    elif name == ToolName.TOOL_SEARCH:
+        query = input.get("query", "?")
+        if query.startswith("select:"):
+            names = (n.strip() for n in query[len("select:") :].split(","))
+            query = ", ".join(strip_mcp_prefix(n) for n in names if n)
+        max_results = input.get("max_results")
+        suffix = f" (max {max_results})" if max_results and max_results != 5 else ""
+        return f"ToolSearch: {query}{suffix}"
     elif name == ToolName.ENTER_PLAN_MODE:
         return "EnterPlanMode"
     elif name == ToolName.EXIT_PLAN_MODE:

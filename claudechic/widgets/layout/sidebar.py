@@ -14,7 +14,7 @@ from textual.widgets import Static, Label, ListItem
 from rich.text import Text
 
 from claudechic.enums import AgentStatus
-from claudechic.formatting import MAX_CONTEXT_TOKENS, format_cwd, format_tokens
+from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, format_cwd, format_tokens
 from claudechic.widgets.primitives.button import Button
 
 
@@ -483,7 +483,7 @@ class AgentItem(SidebarItem):
         self.status = status
         self._cwd: str = ""
         self._tokens: int = 0
-        self._max_tokens: int = MAX_CONTEXT_TOKENS
+        self._max_tokens: int = DEFAULT_CONTEXT_WINDOW
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="agent-top-row"):

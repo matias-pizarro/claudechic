@@ -16,7 +16,9 @@ from claudechic.widgets import (
     ProcessPanel,
     BackgroundProcess,
     ModelPrompt,
+    EffortPrompt,
     StatusFooter,
+    EffortLabel,
     ContextBar,
 )
 from claudechic.widgets.content.todo import TodoItem
@@ -237,6 +239,46 @@ async def test_model_prompt_escape():
 
 
 @pytest.mark.asyncio
+async def test_effort_prompt_selection():
+    """EffortPrompt selects an effort level by number key."""
+    app = WidgetTestApp(lambda: EffortPrompt(current_value="medium"))
+    async with app.run_test() as pilot:
+        prompt = app.query_one(EffortPrompt)
+        # medium is index 1
+        assert prompt.selected_idx == 1
+        # Navigate to high (index 2) and select via number key
+        await pilot.press("3")
+        result = await prompt.wait()
+    assert result == "high"
+
+
+@pytest.mark.asyncio
+async def test_effort_prompt_xhigh_initial():
+    """EffortPrompt lands on xhigh when that's the current value.
+
+    Guards against a future 'fix' that drops xhigh from OPTIONS because
+    the SDK's Literal type doesn't list it.
+    """
+    app = WidgetTestApp(lambda: EffortPrompt(current_value="xhigh"))
+    async with app.run_test():
+        prompt = app.query_one(EffortPrompt)
+        # xhigh is the 4th option (index 3)
+        assert prompt.selected_idx == 3
+        assert prompt.OPTIONS[prompt.selected_idx][0] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_effort_prompt_escape():
+    """EffortPrompt returns None on escape."""
+    app = WidgetTestApp(lambda: EffortPrompt(current_value="high"))
+    async with app.run_test() as pilot:
+        prompt = app.query_one(EffortPrompt)
+        await pilot.press("escape")
+        result = await prompt.wait()
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_question_prompt_multi_question():
     """Handles multiple questions."""
     questions = [
@@ -445,6 +487,31 @@ async def test_context_bar_bracket_muted():
 
 
 @pytest.mark.asyncio
+async def test_context_bar_scales_with_max_tokens():
+    """ContextBar percentage scales with max_tokens (per-model window).
+
+    950k out of a 1M window should read 95% (red), not max out as if the
+    bar were still hardcoded to 200k.
+    """
+    app = WidgetTestApp(lambda: ContextBar(id="ctx"))
+    async with app.run_test():
+        bar = app.query_one(ContextBar)
+
+        # 950k / 1M -> 95% (red zone, ≥ 0.8)
+        bar.max_tokens = 1_000_000
+        bar.tokens = 950_000
+        rendered = bar.render()
+        assert hasattr(rendered, "plain")
+        assert "95%" in rendered.plain  # type: ignore[union-attr]
+
+        # 180k / 1M -> 18% (low/dim zone, < 0.5), not 90%
+        bar.tokens = 180_000
+        rendered = bar.render()
+        assert hasattr(rendered, "plain")
+        assert "18%" in rendered.plain  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_todo_panel_updates():
     """TodoPanel displays and updates todos."""
     app = WidgetTestApp(lambda: TodoPanel(id="panel"))
@@ -496,6 +563,38 @@ async def test_status_footer_permission_mode():
         rendered = label.render()
         assert hasattr(rendered, "plain")
         assert "plan mode" in rendered.plain.lower()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_status_footer_effort_label():
+    """Footer effort label shows 'default' muted when unset, value elevated when set."""
+    app = WidgetTestApp(lambda: StatusFooter())
+    async with app.run_test():
+        footer = app.query_one(StatusFooter)
+        label = footer.query_one("#effort-label", EffortLabel)
+
+        # Empty = shows "default", muted (no elevated class), visible
+        rendered = label.render()
+        assert "default" in rendered.plain  # type: ignore[union-attr]
+        assert not label.has_class("hidden")
+        assert not label.has_class("elevated")
+
+        # Any explicit value = elevated
+        footer.effort = "medium"
+        rendered = label.render()
+        assert "medium" in rendered.plain  # type: ignore[union-attr]
+        assert label.has_class("elevated")
+
+        footer.effort = "xhigh"
+        rendered = label.render()
+        assert "xhigh" in rendered.plain  # type: ignore[union-attr]
+        assert label.has_class("elevated")
+
+        # Reset to empty = back to muted "default"
+        footer.effort = ""
+        rendered = label.render()
+        assert "default" in rendered.plain  # type: ignore[union-attr]
+        assert not label.has_class("elevated")
 
 
 @pytest.mark.asyncio

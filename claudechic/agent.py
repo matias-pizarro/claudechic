@@ -36,7 +36,7 @@ from claude_agent_sdk.types import (
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
 from claudechic.features.worktree.git import FinishState
 from claudechic.file_index import FileIndex
-from claudechic.formatting import MAX_CONTEXT_TOKENS, TOKEN_REMINDER_PATTERN
+from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, TOKEN_REMINDER_PATTERN
 from claudechic.permissions import PermissionRequest
 from claudechic.sessions import get_plan_path_for_session
 from claudechic.tasks import create_safe_task
@@ -185,9 +185,10 @@ class Agent:
         self.session_allowed_tools: set[str] = set()  # Tools allowed for this session
         self._pending_followup: str | None = None  # Auto-send after current response
         self.model: str | None = None  # Model override (None = SDK default)
+        self.effort: str | None = None  # Effort level (low/medium/high/xhigh/max)
         self.tokens: int = 0  # Current context token usage
         self.max_tokens: int = (
-            MAX_CONTEXT_TOKENS  # Context window size (updated from model info)
+            DEFAULT_CONTEXT_WINDOW  # Context window size (updated from model info)
         )
         self._context_initialized: bool = False  # Set by update_context()
 
@@ -959,9 +960,11 @@ Key Rules:
             # Fetch plan path when entering plan mode
             if mode == "plan":
                 await self.ensure_plan_path()
-            # Only call SDK if connected (client exists and has active connection)
-            if self.client and self.session_id:
-                await self.client.set_permission_mode(mode)
+            # Only call SDK if connected (client exists and has active connection).
+            # "planSwarm" is claudechic-specific; skip SDK call for it since the
+            # SDK's PermissionMode Literal doesn't include it.
+            if self.client and self.session_id and mode != "planSwarm":
+                await self.client.set_permission_mode(mode)  # type: ignore[arg-type]
             if self.observer:
                 self.observer.on_permission_mode_changed(self)
 
