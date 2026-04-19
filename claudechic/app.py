@@ -2244,10 +2244,12 @@ class ChatApp(App):
         )
         self._update_footer_model(model)
         if agent.client:
+            session_id = agent.session_id
             self.notify(f"Switching to {model}...")
             await agent.disconnect()
             options = self._make_options(
                 cwd=agent.cwd,
+                resume=session_id,
                 agent_name=agent.name,
                 model=model,
                 effort=agent.effort,
@@ -2304,10 +2306,12 @@ class ChatApp(App):
         )
         if agent.client:
             label = effort if effort != "default" else "auto"
+            session_id = agent.session_id
             self.notify(f"Switching effort to {label}...")
             await agent.disconnect()
             options = self._make_options(
                 cwd=agent.cwd,
+                resume=session_id,
                 agent_name=agent.name,
                 model=agent.model,
                 effort=agent.effort,
