@@ -289,6 +289,7 @@ class StatusFooter(Static):
         if label := self.query_one_optional("#effort-label", EffortLabel):
             label.update(value or "default")
             label.set_class(bool(value), "elevated")
+        self.call_after_refresh(self._render_cwd_label)
 
     def watch_permission_mode(self, value: str) -> None:
         """Update permission mode label when setting changes."""
