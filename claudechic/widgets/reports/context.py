@@ -29,12 +29,16 @@ def parse_context_markdown(content: str) -> dict:
         "categories": [],
     }
 
-    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%) or 184.2k / 1000.0k
-    tokens_match = re.search(r"\*\*Tokens:\*\*\s*([\d.]+)k?\s*/\s*([\d.]+)k", content)
+    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%) or 184.2k / 1.0M
+    tokens_match = re.search(
+        r"\*\*Tokens:\*\*\s*([\d.]+)(k|M)?\s*/\s*([\d.]+)(k|M)", content
+    )
     if tokens_match:
-        used_str, total_str = tokens_match.groups()
-        data["tokens_used"] = int(float(used_str) * 1000)
-        data["tokens_total"] = int(float(total_str) * 1000)
+        used_str, used_unit, total_str, total_unit = tokens_match.groups()
+        used_mult = 1_000_000 if used_unit == "M" else 1000
+        total_mult = 1_000_000 if total_unit == "M" else 1000
+        data["tokens_used"] = int(float(used_str) * used_mult)
+        data["tokens_total"] = int(float(total_str) * total_mult)
 
     # Parse category rows from markdown table
     # | System prompt | 2.9k | 1.5% |
