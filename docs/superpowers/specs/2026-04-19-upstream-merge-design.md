@@ -101,7 +101,7 @@ async def refresh_context(self) -> None:
 - Sidebar and cwd refresh calls are preserved from local (fire after every response)
 - `@work` decorator preserved for async scheduling
 
-**Error handling:** If `get_context_usage()` raises, the bar and agent keep their previous values. This is safe because `refresh_context()` is called after every response — a transient failure means one turn of stale data.
+**Error handling:** If `get_context_usage()` raises or returns a non-dict value (including `None`), the function returns early and the bar/agent keep their previous values. This is safe because `refresh_context()` is called after every response — a transient failure means one turn of stale data. Repeated failures preserve the last known good values indefinitely (no reset to zero).
 
 **SDK dependency:** Requires `claude-agent-sdk>=0.1.56` (already pinned in `pyproject.toml`). The `get_context_usage()` method is available in this version. No `hasattr` guard needed.
 
@@ -143,7 +143,7 @@ Post-merge, verify these behaviors:
 5. **Fix semantic conflicts:**
    - Update `MAX_CONTEXT_TOKENS` → `DEFAULT_CONTEXT_WINDOW` in `agent.py`, `app.py`, `indicators.py`, `sidebar.py`
    - Remove stale `get_context_from_session` import from `app.py`
-6. **Verify no stale references:** `rg "MAX_CONTEXT_TOKENS|get_context_from_session" claudechic/` — must return zero matches
+6. **Verify no stale references:** `rg "MAX_CONTEXT_TOKENS|get_context_from_session" claudechic/ tests/` — must return zero matches in both production and test code
 7. **Run targeted tests first:**
    - `uv run python -m pytest tests/test_formatting.py -v` — verify merged test file
    - `uv run python -m pytest tests/test_widgets.py -v` — verify merged widget tests
@@ -166,12 +166,12 @@ Post-merge, verify these behaviors:
 |------|-----------|
 | `refresh_context()` merge produces subtle bugs | Upstream's test (`test_refresh_context_reads_sdk_usage`) + local's context bar tests both run post-merge; sidebar/cwd refresh calls preserved |
 | `DEFAULT_CONTEXT_WINDOW` rename breaks imports | All 4 affected files listed explicitly; fixed before test run |
-| `get_context_from_session` import left dangling | Explicitly listed in semantic conflicts; removed in step 4 |
+| `get_context_from_session` import left dangling | Explicitly listed in semantic conflicts; removed in step 5 |
 | EffortLabel/EffortPrompt interact with local footer changes | Upstream's effort widgets are additive in different compose slots; local's cwd/session-id are separate widgets |
 | `_start_new_session` conflict drops session-id clearing | Conflict explicitly listed; resolution keeps local's `agent.session_id = None` |
 | `_update_footer_model` anchor line changed | Conflict explicitly listed; local's fallback code appended after upstream's modified line |
 | test_formatting.py add/add produces incomplete file | Import blocks unified; test classes concatenated; no name collisions |
 | test_widgets.py overlapping insertions | context_bar and footer areas both listed as separate conflicts with specific resolution |
-| Accidental staging of secrets | Step 6 requires explicit file staging with `git status` review |
+| Accidental staging of secrets | Step 9 requires `git status --short` review; step 10 uses explicit file staging |
 | `get_context_usage()` unavailable on older SDK | `pyproject.toml` pins `>=0.1.56` which includes the method |
 | `get_context_usage()` returns malformed data | Both `totalTokens` and `rawMaxTokens` validated with type checks and defaults |
