@@ -258,6 +258,28 @@ def _expand_worktree_path(template: str, repo_name: str, feature_name: str) -> P
     return path.resolve()
 
 
+def _validate_base_branch(name: str, cwd: Path | None = None) -> tuple[bool, str]:
+    """Validate a base branch name to prevent option injection and invalid refs.
+
+    Args:
+        name: Branch name to validate.
+        cwd: Directory to resolve the ref in (should be the main worktree).
+
+    Returns (is_valid, error_message).
+    """
+    if name.startswith("-"):
+        return False, f"Invalid base branch '{name}': must not start with '-'"
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", name],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, f"Invalid ref '{name}': not found in repository"
+    return True, ""
+
+
 def start_worktree(
     feature_name: str, base: str | None = None
 ) -> tuple[bool, str, Path | None]:
@@ -270,6 +292,10 @@ def start_worktree(
     Returns (success, message, worktree_path).
     """
     try:
+        # Reject option-injection attempts immediately (no git needed)
+        if base is not None and base.startswith("-"):
+            return False, f"Invalid base branch '{base}': must not start with '-'", None
+
         main_wt = get_main_worktree()
 
         # Prefer the main worktree's dir name over `git rev-parse --show-toplevel`
