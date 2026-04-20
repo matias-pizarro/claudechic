@@ -509,16 +509,16 @@ def determine_resolution_action(status: WorktreeStatus) -> ResolutionAction:
     if status.is_merged:
         return ResolutionAction.NONE
 
-    if WORKTREE_FINISH_MODE == "rebase":
+    if WORKTREE_FINISH_MODE == "no-ff":
+        # Merge back no-ff into base branch (Claude handles this)
+        return ResolutionAction.NO_FF
+    else:
         # Can fast-forward merge?
         if status.can_fast_forward:
             return ResolutionAction.FAST_FORWARD
 
         # Need rebase (Claude handles this)
         return ResolutionAction.REBASE
-    else:
-        # Merge back no-ff into base branch (Claude handles this)
-        return ResolutionAction.NO_FF
 
 
 def clean_gitignored_files(worktree_dir: Path) -> tuple[bool, str]:
