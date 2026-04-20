@@ -25,6 +25,7 @@ claudechic/
 ├── app.py             # ChatApp - main application, event handlers
 ├── commands.py        # Slash command routing (/agent, /shell, /clear, etc.)
 ├── compact.py         # Session compaction - shrink old tool uses to save context
+├── config.py          # Configuration via ~/.claude/.claudechic.yaml (loaded once at startup)
 ├── errors.py          # Logging infrastructure, error handling
 ├── file_index.py      # Fuzzy file search using git ls-files
 ├── formatting.py      # Tool formatting, diff rendering, token reminder pattern (pure functions)

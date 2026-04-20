@@ -233,6 +233,20 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
             )
             return
 
+        if action == ResolutionAction.MAIN_DIR_NOT_READY:
+            # Main dir is dirty or on wrong branch - cannot proceed with no-ff
+            issues = []
+            if not state.status.main_dir_clean:
+                issues.append("has uncommitted changes")
+            if not state.status.main_dir_on_branch:
+                issues.append(f"is not on '{state.info.base_branch}'")
+            app.notify(
+                f"Cannot merge: main worktree {' and '.join(issues)}",
+                severity="error",
+            )
+            agent.finish_state = None
+            return
+
         if action == ResolutionAction.NO_FF:
             # Claude handles merge back no-ff into base branch
             app._show_thinking(agent.id)

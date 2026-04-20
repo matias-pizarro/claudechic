@@ -20,6 +20,8 @@ def _make_status(
     uncommitted_files: list[str] | None = None,
     untracked_gitignored: list[str] | None = None,
     untracked_other: list[str] | None = None,
+    main_dir_clean: bool = True,
+    main_dir_on_branch: bool = True,
 ) -> WorktreeStatus:
     """Create a WorktreeStatus for testing."""
     return WorktreeStatus(
@@ -29,6 +31,8 @@ def _make_status(
         uncommitted_files=uncommitted_files or [],
         untracked_gitignored=untracked_gitignored or [],
         untracked_other=untracked_other or [],
+        main_dir_clean=main_dir_clean,
+        main_dir_on_branch=main_dir_on_branch,
     )
 
 
@@ -118,6 +122,20 @@ class TestDetermineResolutionActionNoFfMode:
     def test_cannot_fast_forward_returns_no_ff(self):
         status = _make_status(can_fast_forward=False)
         assert determine_resolution_action(status) == ResolutionAction.NO_FF
+
+    def test_main_dir_dirty_returns_not_ready(self):
+        """If main dir has uncommitted changes, block the merge."""
+        status = _make_status(main_dir_clean=False)
+        assert (
+            determine_resolution_action(status) == ResolutionAction.MAIN_DIR_NOT_READY
+        )
+
+    def test_main_dir_wrong_branch_returns_not_ready(self):
+        """If main dir is on wrong branch, block the merge."""
+        status = _make_status(main_dir_on_branch=False)
+        assert (
+            determine_resolution_action(status) == ResolutionAction.MAIN_DIR_NOT_READY
+        )
 
 
 class TestDetermineResolutionActionUnknownMode:

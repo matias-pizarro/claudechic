@@ -426,6 +426,18 @@ async def _process_finish_resolution(
                 + "\n\nAfter completing the rebase and merge, call finish_worktree again."
             )
 
+        if action == ResolutionAction.MAIN_DIR_NOT_READY:
+            issues = []
+            if not status.main_dir_clean:
+                issues.append("has uncommitted changes")
+            if not status.main_dir_on_branch:
+                issues.append(f"is not on '{info.base_branch}'")
+            agent.finish_state = None
+            return _error_response(
+                f"Cannot merge: main worktree {' and '.join(issues)}. "
+                "Resolve manually and try again."
+            )
+
         if action == ResolutionAction.NO_FF:
             return _text_response(
                 get_no_ff_finish_prompt(info)

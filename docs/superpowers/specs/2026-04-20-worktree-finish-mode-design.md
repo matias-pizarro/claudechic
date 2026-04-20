@@ -85,7 +85,7 @@ Both call `get_no_ff_finish_prompt(info)` for consistency.
 
 ## Test Coverage
 
-`tests/test_resolution_action.py` — 24 tests covering:
+`tests/test_resolution_action.py` — 26+ tests covering:
 - Rebase mode: 7 tests (all ResolutionAction values)
 - No-ff mode: 6 tests (including FF-eligible returning NO_FF)
 - Unknown mode: 7 parametrized (None, "", typos → rebase behavior)
@@ -94,7 +94,7 @@ Both call `get_no_ff_finish_prompt(info)` for consistency.
 ## Success Criteria
 
 - [x] `finish_mode: "rebase"` → existing behavior unchanged (fast-forward or rebase)
-- [x] `finish_mode: "no-ff"` → always creates merge commit via `--no-ff`
+- [x] `finish_mode: "no-ff"` → for clean branches with unmerged commits, integrates via `--no-ff`; branches with no unmerged commits skip merge and proceed to cleanup
 - [x] Invalid config → defaults to rebase
 - [x] Shell injection in branch names → quoted in prompt commands
 - [x] Dirty worktree in no-ff mode → prompts user before merge
