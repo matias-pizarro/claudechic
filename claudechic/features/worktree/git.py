@@ -453,20 +453,28 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
     main_clean = True
     main_on_branch = True
     if WORKTREE_FINISH_MODE == "no-ff" and commits_ahead > 0:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
+        # Check if a merge is already in progress (MERGE_HEAD exists)
+        merge_in_progress = subprocess.run(
+            ["git", "rev-parse", "--verify", "MERGE_HEAD"],
             cwd=info.main_dir,
             capture_output=True,
-            text=True,
-        )
-        main_clean = not bool(result.stdout.strip())
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=info.main_dir,
-            capture_output=True,
-            text=True,
-        )
-        main_on_branch = result.stdout.strip() == info.base_branch
+        ).returncode == 0
+        # If merge is in progress, main_dir is expected to be dirty (conflict resolution)
+        if not merge_in_progress:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=info.main_dir,
+                capture_output=True,
+                text=True,
+            )
+            main_clean = not bool(result.stdout.strip())
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=info.main_dir,
+                capture_output=True,
+                text=True,
+            )
+            main_on_branch = result.stdout.strip() == info.base_branch
 
     return WorktreeStatus(
         commits_ahead=commits_ahead,

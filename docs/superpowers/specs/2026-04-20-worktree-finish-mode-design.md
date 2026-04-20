@@ -67,9 +67,9 @@ In no-ff mode:
 
 | Scenario | Behavior |
 |----------|----------|
-| Main dir has uncommitted changes | Prompt instructs Claude to check `git status --porcelain` in main dir before merging; Claude stops and reports the error; finish flow retries |
-| Main dir on wrong branch | Prompt instructs Claude to verify `git branch --show-current` matches base_branch; Claude stops and reports mismatch |
-| Merge conflict during no-ff | Claude resolves or reports; `on_response_complete_finish` re-diagnoses and continues |
+| Main dir has uncommitted changes (pre-merge) | App-side check returns `MAIN_DIR_NOT_READY`; user sees error; finish aborted. No prompt sent to Claude. |
+| Main dir on wrong branch | App-side check returns `MAIN_DIR_NOT_READY`; user sees error; finish aborted. No prompt sent to Claude. |
+| Merge conflict during no-ff | `MERGE_HEAD` detected on re-diagnosis → main_dir check skipped (merge in progress is expected); Claude receives prompt to resolve conflicts; flow retries after Claude responds |
 | Already merged branch in no-ff mode | Returns NONE (merge already done), skips to cleanup |
 | 0 commits ahead, clean | Returns NONE regardless of mode |
 | Invalid config value ("noff", "merge") | Falls through to rebase behavior |
@@ -98,6 +98,7 @@ Both call `get_no_ff_finish_prompt(info)` for consistency.
 - [x] Invalid config → defaults to rebase
 - [x] Shell injection in branch names → quoted in prompt commands
 - [x] Dirty worktree in no-ff mode → prompts user before merge
-- [x] Dirty main dir → Claude verifies clean state before merging
+- [x] Dirty main dir (pre-merge) → app blocks with MAIN_DIR_NOT_READY error
+- [x] Merge conflict (post-merge) → MERGE_HEAD detected, Claude resolves
 - [x] Already-merged branch → skips to cleanup
 - [x] Tests pass: 24+ in `test_resolution_action.py`
