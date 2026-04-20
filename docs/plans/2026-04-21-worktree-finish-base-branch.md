@@ -81,12 +81,14 @@ Only the positional form is supported. A `--into` flag was considered and reject
 
 ### 6.2 Parsing Algorithm
 
-The existing `handle_worktree_command()` uses `command.split(maxsplit=2)`, producing `parts = ["/worktree", "finish", "<rest>"]`. The parsing for `/worktree finish` extracts `base_branch` from `parts[2]` if present:
+The existing `handle_worktree_command()` uses `command.split(maxsplit=2)`, producing `parts = ["/worktree", "finish", "<rest>"]`. The parsing for `/worktree finish` will extract `base_branch` from `parts[2]` if present:
 
 ```python
-# In _handle_finish():
+# In _handle_finish() — to be added:
 base_branch = parts[2].strip() if len(parts) > 2 else None
 ```
+
+> **Implementation note:** Currently `_handle_finish(app)` takes only `app` and `handle_worktree_command()` does not extract or pass `parts[2]`. The implementation must add `base_branch` as a parameter to `_handle_finish()` and thread it through from `handle_worktree_command()`. See Section 8.8 for the full list of required API changes.
 
 **Edge cases:**
 - `/worktree finish` → `base_branch = None` (auto-detect)
@@ -94,27 +96,33 @@ base_branch = parts[2].strip() if len(parts) > 2 else None
 - `/worktree finish main extra args` → `base_branch = "main extra args"` → fails validation (branch name with spaces does not exist)
 - `/worktree finish --into main` → `base_branch = "--into main"` → fails validation (starts with `-`)
 - `/worktree finish -mybranch` → `base_branch = "-mybranch"` → rejected: "Branch name must not start with '-'"
-- `/worktree finish ""` → `base_branch = ""` → rejected: empty after strip
+- `/worktree finish   ` → Python's default `split()` skips whitespace, producing only 2 parts → `base_branch = None` (auto-detect)
 
-All invalid inputs are caught by the validation rules in Section 7 before any git operations execute.
+> **Note on empty strings:** An empty `base_branch` can only arrive via the MCP path (`args.get("base_branch")` returning `""`), not from TUI parsing — Python's `str.split()` without a separator argument skips whitespace and never produces empty elements.
+
+All invalid inputs are caught by the validation rules in Section 7 before any git operations execute. All validation failures return `(False, error_message, None)`, consistent with the existing `get_finish_info()` early-return pattern.
 
 ### 6.3 MCP Tool Schema
 
-The `finish_worktree` tool adds an optional `base_branch` parameter. The tool currently uses the `@tool` decorator pattern with a Python dict for the schema:
+The `finish_worktree` tool adds optional `base_branch` support. **Critical constraint:** The `@tool` decorator's `_build_schema()` generates `"required": list(properties.keys())`, making all dict keys **required**. Therefore, the schema must remain `{}` (empty dict) to preserve backward compatibility. The `base_branch` parameter is extracted from raw args manually:
 
 ```python
 @tool(
     "finish_worktree",
     "When you're done working in a worktree, call this to clean it up. "
     "Handles committing, merging (rebase or no-ff per config), and removing the worktree. "
-    "Prefer this over manual git worktree commands.",
-    {"base_branch": str},  # Optional: branch to merge into (local branch, must exist)
+    "Prefer this over manual git worktree commands. "
+    "Optionally pass base_branch (string) to specify the target branch to merge into. "
+    "Must be a local branch name (not a remote ref like origin/main), must already exist, "
+    "and cannot be the current branch. If omitted, the target is auto-detected.",
+    {},  # Keep empty — base_branch extracted manually from args to stay optional
 )
+async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
+    base_branch = args.get("base_branch")  # None if not provided — auto-detect
+    # ... pass to get_finish_info()
 ```
 
-**Backward compatibility:** The `base_branch` field is optional. Existing calls with `{}` (no arguments) continue to work — `args.get("base_branch")` returns `None`, triggering auto-detection.
-
-**MCP tool description update:** The tool's `base_branch` parameter description should clarify constraints: "Optional target branch to merge into. Must be a local branch name (not a remote ref like `origin/main`). Must already exist. Cannot be the current branch."
+**Backward compatibility:** The schema stays `{}`. Existing calls with no arguments continue to work. `args.get("base_branch")` returns `None` for callers that don't provide it, triggering auto-detection. The parameter constraints are documented in the tool's description string (the only mechanism available since the `@tool` decorator does not support per-parameter descriptions).
 
 **Experimental flag:** The `finish_worktree` tool is gated behind `CONFIG.get("experimental", {}).get("finish_worktree", False)`. The `base_branch` parameter is added to this existing experimental tool — no additional gating is needed. Tests must enable the experimental flag.
 
@@ -122,11 +130,13 @@ The `finish_worktree` tool adds an optional `base_branch` parameter. The tool cu
 
 **Autocomplete** (static completion strings in `COMMANDS` list): Remains `/worktree finish` (unchanged). The autocomplete system provides literal completion strings for typing assistance, not dynamic branch suggestions.
 
-**Help display** (`get_help_commands()`): Updated to show the optional argument notation:
+**Help display** (`get_help_commands()`): Updated to show the optional argument:
 ```python
 elif name == "/worktree":
-    display_name = "/worktree <name> | finish [branch] | cleanup | discard"
+    display_name = "/worktree <name> | finish [branch]"
 ```
+
+This is concise and consistent with other help entries (e.g., `/resume [id]`, `/agent [name] [path]`). Subcommands `cleanup` and `discard` are already discoverable via autocomplete variants.
 
 ## 7. Validation Rules
 
@@ -140,9 +150,9 @@ Validation occurs in `get_finish_info()` before any git operations. All rules ar
 | V4 | `base_branch` matches `origin/` or `remotes/` prefix | Error | `"'{name}' appears to be a remote branch. Specify a local branch (e.g., '{suggestion}'). Run 'git checkout {suggestion}' to create a local branch first."` where `suggestion` strips the remote prefix |
 | V5 | `base_branch` does not exist as a local branch (`refs/heads/<name>`) | Error | `"Branch '{name}' does not exist. Local branches: {branch_list}"` — lists up to 5 local branches alphabetically, excluding the current feature branch |
 | V6 | `base_branch` equals current feature branch | Error | `"Cannot merge branch '{name}' into itself"` |
-| V7 | `base_branch` is valid but has no worktree and main worktree is on a different branch | Error (no-ff mode only) | `"Cannot merge into '{name}': no worktree is checked out to that branch. Create one with '/worktree {name}' or switch the main worktree to it."` |
-| V7b | `base_branch` is valid but has no worktree (rebase mode) | Proceed — merge in main worktree is valid because rebase mode does `git rebase <base>` in the feature worktree then `git merge` in main_dir. The generated prompt explicitly checks out the target branch first. | — |
-| V8 | `base_branch` is not an ancestor of feature branch (rebase mode) | Proceed with rebase prompt, which includes a note: `"Note: {base_branch} is not an ancestor of {branch}. Rebasing will rewrite commit history."` | — |
+| V7 | `base_branch` is valid but no worktree is checked out to it (no-ff mode only) | Error | `"Cannot merge into '{name}': no worktree is checked out to that branch. Create a worktree with '/worktree {name}', or check out the branch in an existing worktree."` |
+| V7b | `base_branch` is valid but no worktree is checked out to it (rebase mode) | Proceed with preflight checks — verify main worktree is clean and not in mid-rebase/merge state before falling back. The rebase prompt will include a `git checkout {base_branch}` step. | — |
+| V8 | `base_branch` is not an ancestor of feature branch (rebase mode) | Proceed — the non-ancestor condition is detected in `diagnose_worktree()` (via existing `needs_rebase()` / `can_fast_forward` check), not in `get_finish_info()`. When `can_fast_forward` is `False`, the rebase prompt is generated, which naturally handles the non-ancestor case. An informational note is added to the prompt: `"Note: {base_branch} is not an ancestor of {branch}. Rebasing will rewrite commit history."` | — |
 
 ### 7.1 `branch_exists()` Helper
 
@@ -172,7 +182,9 @@ def get_local_branches(cwd: Path | None = None, exclude: str | None = None, limi
         ["git", "branch", "--format=%(refname:short)"],
         cwd=cwd, capture_output=True, text=True,
     )
-    branches = sorted(result.stdout.strip().split("\n")) if result.returncode == 0 else []
+    if result.returncode != 0:
+        return []
+    branches = sorted(line for line in result.stdout.strip().split("\n") if line)
     if exclude:
         branches = [b for b in branches if b != exclude]
     return branches[:limit]
@@ -247,18 +259,34 @@ target_wt = next((wt for wt in worktrees if wt.branch == base_branch), None)
 if target_wt:
     # Target branch has an active worktree — use its directory
     main_dir = target_wt.path
+    needs_checkout = False
 elif WORKTREE_FINISH_MODE == "no-ff":
     # No-ff mode requires the target to have a worktree (merge happens there)
     return (False, f"Cannot merge into '{base_branch}': no worktree is checked out "
-            f"to that branch. Create one with '/worktree {base_branch}' or switch "
-            f"the main worktree to it.", None)
+            f"to that branch. Create a worktree with '/worktree {base_branch}', "
+            f"or check out the branch in an existing worktree.", None)
 else:
     # Rebase mode: merge happens in main worktree after rebase
-    # The rebase prompt instructs Claude to check out base_branch in main_dir first
+    # Preflight: verify main worktree is safe for checkout
+    main_status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=main_wt_path, capture_output=True, text=True
+    )
+    if main_status.stdout.strip():
+        return (False, f"Cannot use main worktree for merge: it has uncommitted changes. "
+                f"Clean it up first or create a worktree for '{base_branch}'.", None)
+    merge_head = subprocess.run(
+        ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+        cwd=main_wt_path, capture_output=True
+    )
+    if merge_head.returncode == 0:
+        return (False, f"Cannot use main worktree for merge: a merge is in progress.", None)
     main_dir = main_wt_path
+    needs_checkout = True
 ```
 
-**Rebase mode with non-worktree target:** When the target branch has no worktree and the finish mode is `rebase`, the rebase prompt is augmented to include a checkout step:
+**`needs_checkout` field on `FinishInfo`:** A new boolean field `needs_checkout: bool` is added to `FinishInfo` (default `False`). This signals to prompt generation functions and `fast_forward_merge()` that a `git checkout {base_branch}` must precede the merge in `main_dir`. This avoids merging into whatever branch the main worktree happens to be on.
+
+**Rebase mode with non-worktree target:** When `needs_checkout` is `True`, `get_rebase_finish_prompt()` will generate an augmented prompt:
 
 ```
 Steps:
@@ -269,14 +297,31 @@ Steps:
    cd {main_dir} && git checkout {base_branch} && git merge {branch}
 ```
 
+When `needs_checkout` is `False` (target has its own worktree or auto-detected), the existing prompt is used unchanged.
+
+**`fast_forward_merge()` with checkout:** When `needs_checkout` is `True`, `fast_forward_merge()` must also run `git checkout {base_branch}` in `main_dir` before `git merge --ff-only`. The function will accept `FinishInfo` (which it already does) and conditionally add the checkout step:
+
+```python
+def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
+    if info.needs_checkout:
+        checkout = subprocess.run(
+            ["git", "checkout", info.base_branch],
+            cwd=info.main_dir, capture_output=True, text=True,
+        )
+        if checkout.returncode != 0:
+            return False, f"Failed to check out '{info.base_branch}': {checkout.stderr.strip()}"
+    # ... existing merge logic
+```
+
 ### 8.5 Interaction with `finish_mode`
 
-| Finish Mode | Target has worktree? | Behavior |
-|-------------|---------------------|----------|
-| `rebase` | Yes | Standard: rebase in feature worktree, merge in target worktree (existing flow) |
-| `rebase` | No | Rebase in feature worktree, checkout target branch in main worktree, merge there |
-| `no-ff` | Yes | Standard: merge `--no-ff` in target worktree (existing flow) |
-| `no-ff` | No | **Error:** target must have a worktree for no-ff merges |
+| Finish Mode | Target has worktree? | `needs_checkout` | Behavior |
+|-------------|---------------------|-----------------|----------|
+| `rebase` | Yes | `False` | Standard: rebase in feature worktree, merge in target worktree (existing flow) |
+| `rebase` | No | `True` | Preflight checks on main worktree (clean, no mid-merge); rebase in feature worktree; checkout target + merge in main worktree |
+| `no-ff` | Yes | `False` | Standard: merge `--no-ff` in target worktree (existing flow) |
+| `no-ff` | No | N/A | **Error:** target must have a worktree for no-ff merges |
+| (auto-detect) | Always yes | `False` | Existing behavior unchanged — auto-detection always finds a worktree branch |
 
 ### 8.6 Persistence Across Retries
 
@@ -299,9 +344,32 @@ class FinishInfo:
     base_branch: str
     worktree_dir: Path
     main_dir: Path
+    needs_checkout: bool = False  # True when main_dir is a fallback, not already on base_branch
 ```
 
 This is a low-risk change: `FinishInfo` is already treated as immutable throughout the codebase — no code mutates its fields after construction.
+
+> **Note:** `FinishState` intentionally remains mutable (`@dataclass` without `frozen=True`). It tracks evolving process state — `phase`, `status`, `cleanup_attempts`, and `last_error` are all mutated during the finish flow. Only `FinishInfo` (a value object) gets frozen.
+
+### 8.8 Required API Changes (Current State → Target State)
+
+This section summarizes the specific code changes needed. The current codebase has none of this plumbing — all changes are new.
+
+| Component | Current Signature/State | Target Signature/State |
+|-----------|------------------------|----------------------|
+| `get_finish_info()` | `(cwd: Path \| None = None)` | `(cwd: Path \| None = None, base_branch: str \| None = None)` |
+| `_handle_finish()` | `(app: "ChatApp")` | `(app: "ChatApp", base_branch: str \| None = None)` |
+| `handle_worktree_command()` | Calls `_handle_finish(app)` | Extracts `parts[2]`, calls `_handle_finish(app, base_branch)` |
+| `finish_worktree()` MCP | Schema `{}`, ignores args | Schema `{}`, extracts `args.get("base_branch")`, passes to `get_finish_info()` |
+| `FinishInfo` | `@dataclass`, 4 fields | `@dataclass(frozen=True)`, 5 fields (adds `needs_checkout: bool = False`) |
+| `get_rebase_finish_prompt()` | No checkout step | Conditional checkout when `info.needs_checkout` is `True` |
+| `fast_forward_merge()` | No checkout step | Conditional checkout when `info.needs_checkout` is `True` |
+| `branch_exists()` | Does not exist | New helper in `git.py` |
+| `get_local_branches()` | Does not exist | New helper in `git.py` |
+| Analytics call | Fires before parsing, no `base_branch_override` | Moves inside `_handle_finish()` after parsing; adds `base_branch_override` property |
+| Help display | `"/worktree <name>"` | `"/worktree <name> \| finish [branch]"` |
+
+**Callers of `get_finish_info()` that are NOT affected:** `_handle_discard()` (at `commands.py:385`) also calls `get_finish_info(app.sdk_cwd)`. This caller continues using auto-detection (`base_branch=None` default). No changes needed.
 
 ## 9. Error Messages
 
@@ -312,8 +380,14 @@ This is a low-risk change: `FinishInfo` is already treated as immutable througho
 | Remote ref detected | `"'origin/main' appears to be a remote branch. Specify a local branch (e.g., 'main'). Run 'git checkout main' to create a local branch first."` |
 | Branch does not exist | `"Branch 'xyz' does not exist. Local branches: main, develop, feature-x"` (up to 5, alphabetical, excludes current branch) |
 | Self-merge | `"Cannot merge branch 'feature-a' into itself"` |
-| No worktree for target (no-ff) | `"Cannot merge into 'release/1.2': no worktree is checked out to that branch. Create one with '/worktree release/1.2' or switch the main worktree to it."` |
+| No worktree for target (no-ff) | `"Cannot merge into 'release/1.2': no worktree is checked out to that branch. Create a worktree with '/worktree release/1.2', or check out the branch in an existing worktree."` |
+| Main worktree dirty (rebase fallback) | `"Cannot use main worktree for merge: it has uncommitted changes. Clean it up first or create a worktree for 'release/1.2'."` |
+| Main worktree in mid-merge (rebase fallback) | `"Cannot use main worktree for merge: a merge is in progress."` |
 | Not in worktree | `"Not in a feature worktree. Switch to a worktree first."` (existing, unchanged) |
+
+> **Note on "main worktree" in error messages:** When using the rebase-mode fallback (target has no worktree), errors reference the "main worktree" because that is the worktree being used as a fallback merge directory. When a target worktree exists, errors from `diagnose_worktree()` reference the "target directory" (via `MAIN_DIR_NOT_READY`). The existing error message in `commands.py:243` says "main worktree" but `main_dir` may actually be a target worktree — this pre-existing inconsistency is out of scope but should be addressed in a follow-up.
+
+> **Note on V4 (remote ref detection):** V4 checks for `origin/` and `remotes/` prefixes. Other remote names (e.g., `upstream/main`) will fall through to V5 with a less specific error. This is an acceptable limitation — the V4 check is a UX shortcut for the most common case, not a correctness requirement.
 
 ## 10. Backward Compatibility
 
@@ -331,13 +405,23 @@ If the user specifies an incorrect `base_branch` and the merge/rebase proceeds:
 
 These are standard git recovery mechanisms — no claudechic-specific recovery is needed.
 
+> **Safety note:** `git reset --hard` destroys uncommitted changes. This is safe in the post-finish context because the finish process commits or discards all changes before merging. Users should verify they have no uncommitted work before running reset commands.
+
 ## 12. Analytics
 
-The existing `worktree_action` analytics event (action=`"finish"`) should include a `base_branch_override: bool` property to track adoption:
+The analytics event must move from `handle_worktree_command()` (where it currently fires before parsing) into `_handle_finish()` (after `base_branch` is parsed). This allows including the `base_branch_override` property:
 
 ```python
-capture("worktree_action", action="finish", agent_id=agent_id, base_branch_override=base_branch is not None)
+# Inside _handle_finish(), after parsing base_branch:
+app.run_worker(capture(
+    "worktree_action",
+    action="finish",
+    agent_id=agent_id,
+    base_branch_override=base_branch is not None,
+))
 ```
+
+The MCP path tracks tool usage generically via `_track_mcp_tool("finish_worktree")` — no additional MCP-specific analytics are needed.
 
 ## 13. Known Limitations
 
@@ -372,8 +456,10 @@ capture("worktree_action", action="finish", agent_id=agent_id, base_branch_overr
 - `origin/main` → remote ref error with suggestion
 - Non-existent branch → error with branch list
 - Self-merge → error
-- Valid branch with active worktree → `main_dir` points to that worktree
-- Valid branch without worktree (rebase mode) → `main_dir` falls back to main worktree
+- Valid branch with active worktree → `main_dir` points to that worktree, `needs_checkout = False`
+- Valid branch without worktree (rebase mode, main clean) → `main_dir` falls back to main worktree, `needs_checkout = True`
+- Valid branch without worktree (rebase mode, main dirty) → error "has uncommitted changes"
+- Valid branch without worktree (rebase mode, mid-merge) → error "merge is in progress"
 - Valid branch without worktree (no-ff mode) → error
 
 **Command parsing (`_handle_finish`):**
@@ -396,9 +482,14 @@ All integration tests use `tmp_path` fixtures for isolation, following the patte
 - Full `/worktree finish main` in a real git repo with a feature branch that can be fast-forwarded
 - Full `/worktree finish main` where rebase is needed (base branch has diverged)
 - Full `/worktree finish main` in no-ff mode
-- `base_branch` override pointing to a branch with no worktree (rebase mode) — verify checkout + merge
+- `base_branch` override pointing to a branch with no worktree (rebase mode, main clean) — verify `needs_checkout = True`, prompt includes checkout step
+- `base_branch` override pointing to a branch with no worktree (rebase mode, main dirty) — verify error
 - `base_branch` override pointing to a branch with no worktree (no-ff mode) — verify error
-- Verify `FinishInfo` is frozen (immutable)
+- `fast_forward_merge()` with `needs_checkout = True` — verify checkout + merge
+- `fast_forward_merge()` with `needs_checkout = False` — verify no checkout (existing behavior)
+- Verify `FinishInfo` is frozen (attempt attribute assignment raises `FrozenInstanceError`)
+
+> **Note:** `tests/test_worktree_finish.py` is a new file, distinct from `tests/test_worktree_config.py` (which covers path templates and `start_worktree`) and `tests/test_resolution_action.py` (which covers resolution logic). The new file focuses specifically on the `base_branch` override feature.
 
 ### 15.3 E2E Tests
 
@@ -417,10 +508,12 @@ All integration tests use `tmp_path` fixtures for isolation, following the patte
 
 - [ ] Zero regressions in existing `/worktree finish` behavior (auto-detection path)
 - [ ] Positional form `/worktree finish <branch>` works correctly
-- [ ] MCP tool accepts and uses the `base_branch` parameter
+- [ ] MCP tool accepts and uses the `base_branch` parameter (schema stays `{}`, extracted manually)
 - [ ] All validation rules (V1–V8) produce correct errors
 - [ ] Both finish modes (rebase, no-ff) work with explicit `base_branch`
-- [ ] `FinishInfo` is frozen
-- [ ] Analytics tracks `base_branch_override`
+- [ ] `needs_checkout` flag triggers `git checkout` in both `fast_forward_merge()` and rebase prompt
+- [ ] Rebase fallback path validates main worktree is clean before using it
+- [ ] `FinishInfo` is frozen; `FinishState` remains mutable
+- [ ] Analytics tracks `base_branch_override` (event moved inside `_handle_finish()`)
 - [ ] All existing tests continue to pass
-- [ ] New tests achieve 80%+ coverage on changed code
+- [ ] New tests achieve 80%+ coverage on changed code (measured via `pytest --cov`)
