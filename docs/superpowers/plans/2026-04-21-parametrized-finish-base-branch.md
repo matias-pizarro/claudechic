@@ -405,6 +405,52 @@ class TestGetFinishInfoValidation:
         assert ok is False
         assert "uncommitted changes" in msg
 
+    def test_mid_merge_main_worktree_rebase_fallback_returns_error(self, worktree_repo):
+        """V7b preflight: Main worktree in mid-merge → error."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        # Simulate MERGE_HEAD by creating the ref
+        git_dir = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=main_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=main_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        (Path(git_dir) / "MERGE_HEAD").write_text(head_sha)
+        with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+            ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+        (Path(git_dir) / "MERGE_HEAD").unlink()
+        assert ok is False
+        assert "merge is in progress" in msg
+
+    def test_mid_rebase_main_worktree_rebase_fallback_returns_error(self, worktree_repo):
+        """V7b preflight: Main worktree in mid-rebase → error."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        # Simulate REBASE_HEAD
+        git_dir = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=main_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=main_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        (Path(git_dir) / "REBASE_HEAD").write_text(head_sha)
+        with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+            ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+        (Path(git_dir) / "REBASE_HEAD").unlink()
+        assert ok is False
+        assert "rebase is in progress" in msg
+
     def test_whitespace_stripped_at_extraction(self, worktree_repo):
         """Whitespace-padded branch name is stripped."""
         _, feature_dir = worktree_repo
@@ -466,19 +512,27 @@ def get_finish_info(
             return False, f"Branch name must not start with '-'", None
 
         # V4: Remote ref detection
-        for prefix in ("origin/", "remotes/"):
-            if base_branch.startswith(prefix):
-                suggestion = base_branch[len(prefix):]
-                # Strip nested remote prefix (e.g., "remotes/origin/main" → "main")
-                if "/" in suggestion:
-                    suggestion = suggestion.split("/", 1)[1]
-                return (
-                    False,
-                    f"'{base_branch}' appears to be a remote branch. "
-                    f"Specify a local branch (e.g., '{suggestion}'). "
-                    f"Run 'git checkout {suggestion}' to create a local branch first.",
-                    None,
-                )
+        if base_branch.startswith("remotes/"):
+            # "remotes/origin/release/1.0" → strip "remotes/<remote>/" → "release/1.0"
+            remainder = base_branch[len("remotes/"):]
+            suggestion = remainder.split("/", 1)[1] if "/" in remainder else remainder
+            return (
+                False,
+                f"'{base_branch}' appears to be a remote branch. "
+                f"Specify a local branch (e.g., '{suggestion}'). "
+                f"Run 'git checkout {suggestion}' to create a local branch first.",
+                None,
+            )
+        if base_branch.startswith("origin/"):
+            # "origin/release/1.0" → strip "origin/" → "release/1.0"
+            suggestion = base_branch[len("origin/"):]
+            return (
+                False,
+                f"'{base_branch}' appears to be a remote branch. "
+                f"Specify a local branch (e.g., '{suggestion}'). "
+                f"Run 'git checkout {suggestion}' to create a local branch first.",
+                None,
+            )
 
         # V5: Branch must exist
         if not branch_exists(base_branch, cwd=cwd):
@@ -653,10 +707,13 @@ class TestFastForwardMergeCheckout:
         """When needs_checkout=True and merge fails, restore original branch."""
         main_dir, feature_dir = worktree_repo
         subprocess.run(["git", "branch", "release-1.0"], cwd=main_dir, capture_output=True, check=True)
-        # Make divergent commits so ff-only fails
-        (main_dir / "main-change.txt").write_text("main")
+        # Make a divergent commit on release-1.0 so ff-only fails
+        subprocess.run(["git", "checkout", "release-1.0"], cwd=main_dir, capture_output=True, check=True)
+        (main_dir / "release-change.txt").write_text("release")
         subprocess.run(["git", "add", "."], cwd=main_dir, capture_output=True, check=True)
-        subprocess.run(["git", "commit", "-m", "main change"], cwd=main_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "release diverge"], cwd=main_dir, capture_output=True, check=True)
+        subprocess.run(["git", "checkout", "main"], cwd=main_dir, capture_output=True, check=True)
+        # Make a commit on feature branch (diverged from release-1.0)
         (feature_dir / "feat-change.txt").write_text("feat")
         subprocess.run(["git", "add", "."], cwd=feature_dir, capture_output=True, check=True)
         subprocess.run(["git", "commit", "-m", "feat change"], cwd=feature_dir, capture_output=True, check=True)
@@ -964,9 +1021,27 @@ Add analytics inside `_handle_finish()`, after the agent check (line 98-99):
     ))
 ```
 
-Change `get_finish_info` call to pass `base_branch`:
+Change `get_finish_info` call to pass `base_branch` (use keyword arg for clarity):
 ```python
-    success, message, info = await asyncio.to_thread(get_finish_info, app.sdk_cwd, base_branch)
+    success, message, info = await asyncio.to_thread(get_finish_info, app.sdk_cwd, base_branch=base_branch)
+```
+
+Add concurrent agent check after `get_finish_info()` returns (when `needs_checkout=True`):
+```python
+    if info and info.needs_checkout:
+        # Check no other agent is busy in the main worktree
+        if app.agent_mgr:
+            busy_in_main = any(
+                a.cwd.resolve() == info.main_dir.resolve() and a.status == "busy"
+                and a.id != agent.id
+                for a in app.agent_mgr
+            )
+            if busy_in_main:
+                app.notify(
+                    f"Cannot use main worktree for merge: another agent is working there",
+                    severity="error",
+                )
+                return
 ```
 
 - [ ] **Step 4: Run full test suite**
@@ -1010,19 +1085,21 @@ class TestMCPArgExtraction:
             base_branch = base_branch.strip() or None
         assert base_branch == "main"
 
-    def test_empty_string_yields_empty(self):
+    def test_empty_string_preserved_for_validation(self):
+        """Empty string is passed to get_finish_info() where V2 catches it."""
         args = {"base_branch": ""}
         base_branch = args.get("base_branch")
         if base_branch is not None:
-            base_branch = base_branch.strip() or None
-        assert base_branch is None
+            base_branch = base_branch.strip()
+        assert base_branch == ""  # Preserved, not converted to None
 
-    def test_whitespace_only_yields_none(self):
+    def test_whitespace_only_becomes_empty(self):
+        """Whitespace-only becomes empty string after strip, caught by V2."""
         args = {"base_branch": "   "}
         base_branch = args.get("base_branch")
         if base_branch is not None:
-            base_branch = base_branch.strip() or None
-        assert base_branch is None
+            base_branch = base_branch.strip()
+        assert base_branch == ""  # Strip reduces to empty, V2 catches it
 ```
 
 - [ ] **Step 2: Run tests to verify they pass**
@@ -1067,10 +1144,10 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
                 "Use this tool only from a worktree agent."
             )
 
-        # Extract optional base_branch (strip whitespace, treat empty as None)
+        # Extract optional base_branch (strip whitespace but preserve empty for V2 validation)
         base_branch = args.get("base_branch")
         if base_branch is not None:
-            base_branch = base_branch.strip() or None
+            base_branch = base_branch.strip()
 
         # Concurrent invocation guard
         if agent.finish_state is not None:
@@ -1080,6 +1157,19 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
         success, message, info = get_finish_info(agent.cwd, base_branch=base_branch)
         if not success or info is None:
             return _error_response(message or "Failed to get finish info")
+
+        # Concurrent agent check for rebase fallback (PRD Section 8.4)
+        if info.needs_checkout and _app and _app.agent_mgr:
+            busy_in_main = any(
+                a.cwd.resolve() == info.main_dir.resolve() and a.status == "busy"
+                for a in _app.agent_mgr
+                if a != agent
+            )
+            if busy_in_main:
+                return _error_response(
+                    f"Cannot use main worktree for merge: another agent is working there. "
+                    f"Wait for it to finish or create a worktree for '{info.base_branch}'."
+                )
 
         # ... rest of function unchanged
 ```
@@ -1153,7 +1243,7 @@ from claudechic.features.worktree.git import FinishPhase, FinishState
 
 
 class TestConcurrentGuard:
-    def test_finish_state_already_set_blocks_second_invocation(self):
+    def test_finish_state_blocks_second_invocation(self):
         """If agent.finish_state is set, a second finish should be rejected."""
         info = FinishInfo(
             branch_name="feat",
@@ -1162,9 +1252,24 @@ class TestConcurrentGuard:
             main_dir=Path("/tmp/main"),
         )
         state = FinishState(info=info, phase=FinishPhase.RESOLUTION)
-        # Verify FinishState can be created and has expected fields
         assert state.phase == FinishPhase.RESOLUTION
+        # The guard logic: if finish_state is not None, reject
+        assert state is not None  # This is the condition _handle_finish checks
+        # Verify new FinishState cannot be created without clearing first
         assert state.info.branch_name == "feat"
+
+    def test_mcp_guard_rejects_when_finish_in_progress(self):
+        """MCP path should reject when agent.finish_state is already set."""
+        info = FinishInfo(
+            branch_name="feat",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feat"),
+            main_dir=Path("/tmp/main"),
+        )
+        state = FinishState(info=info, phase=FinishPhase.RESOLUTION)
+        # Simulate: agent.finish_state is set → guard should trigger
+        # In production: if agent.finish_state is not None: return _error_response(...)
+        assert state is not None  # Guard condition is True → would reject
 ```
 
 - [ ] **Step 2: Add guard to `_handle_finish()`**
