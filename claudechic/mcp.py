@@ -334,7 +334,7 @@ async def list_agents(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
 
 @tool(
     "finish_worktree",
-    "When you're done working in a worktree, call this to clean it up. Handles committing, rebasing onto the base branch, merging, and removing the worktree. Prefer this over manual git worktree commands.",
+    "When you're done working in a worktree, call this to clean it up. Handles committing, merging (rebase or no-ff per config), and removing the worktree. Prefer this over manual git worktree commands.",
     {},
 )
 async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001

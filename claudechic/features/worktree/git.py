@@ -1,5 +1,6 @@
 """Git worktree management for isolated feature work."""
 
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -261,27 +262,6 @@ def _expand_worktree_path(template: str, repo_name: str, feature_name: str) -> P
     return path.resolve()
 
 
-def _validate_base_branch(name: str, cwd: Path | None = None) -> tuple[bool, str]:
-    """Validate a base branch name to prevent option injection and invalid refs.
-
-    Args:
-        name: Branch name to validate.
-        cwd: Directory to resolve the ref in (should be the main worktree).
-
-    Returns (is_valid, error_message).
-    """
-    if name.startswith("-"):
-        return False, f"Invalid base branch '{name}': must not start with '-'"
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", name],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return False, f"Invalid ref '{name}': not found in repository"
-    return True, ""
-
 
 def start_worktree(
     feature_name: str, base: str | None = None
@@ -434,8 +414,11 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
     # Already merged?
     is_merged = is_branch_merged(info.branch_name, info.base_branch, cwd=info.main_dir)
 
-    # Can fast-forward? (only relevant if there are commits)
-    can_ff = not needs_rebase(info) if commits_ahead > 0 else True
+    # Can fast-forward? (skip subprocess when in no-ff mode or no commits)
+    if WORKTREE_FINISH_MODE == "no-ff" or commits_ahead == 0:
+        can_ff = True  # Not used in no-ff mode; trivially true when 0 commits
+    else:
+        can_ff = not needs_rebase(info)
 
     # Uncommitted changes (staged + unstaged)
     result = subprocess.run(
@@ -593,6 +576,9 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
 
 def get_rebase_finish_prompt(info: FinishInfo) -> str:
     """Generate the prompt for Claude to rebase and merge a feature branch."""
+    main_dir = shlex.quote(str(info.main_dir))
+    branch = shlex.quote(info.branch_name)
+    base = shlex.quote(info.base_branch)
     return f"""Rebase and merge this feature branch:
 
 Branch: {info.branch_name}
@@ -603,9 +589,9 @@ Main dir: {info.main_dir}
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
 2. Rebase {info.branch_name} onto the LOCAL {info.base_branch} branch (do NOT fetch from remote):
-   git rebase {info.base_branch}
+   git rebase {base}
 3. In the main dir ({info.main_dir}), merge {info.branch_name}:
-   cd {info.main_dir} && git merge {info.branch_name}
+   cd {main_dir} && git merge {branch}
 
 Do NOT remove the worktree or delete the branch - the app will handle cleanup.
 Do NOT interact with remotes (no fetch, no pull, no push)."""
@@ -613,6 +599,8 @@ Do NOT interact with remotes (no fetch, no pull, no push)."""
 
 def get_no_ff_finish_prompt(info: FinishInfo) -> str:
     """Generate the prompt for Claude to merge a feature branch back no-ff into its base branch."""
+    main_dir = shlex.quote(str(info.main_dir))
+    branch = shlex.quote(info.branch_name)
     return f"""Merge back this feature branch without fast-forward:
 
 Branch: {info.branch_name}
@@ -623,8 +611,9 @@ Main dir: {info.main_dir}
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
 2. In the main dir ({info.main_dir}), merge {info.branch_name} without fast-forward:
-   cd {info.main_dir} && git checkout {info.base_branch} && git merge --no-ff {info.branch_name}
+   cd {main_dir} && git merge --no-ff {branch}
 
+Do NOT rebase before merging - preserve the original commit history.
 Do NOT remove the worktree or delete the branch - the app will handle cleanup.
 Do NOT interact with remotes (no fetch, no pull, no push)."""
 
@@ -655,6 +644,7 @@ def get_cleanup_fix_prompt(error: str, worktree_dir: Path) -> str:
     except Exception:
         pass
 
+    quoted_dir = shlex.quote(str(worktree_dir))
     return f"""The worktree cleanup failed with this error:
 
 {error}
@@ -664,9 +654,9 @@ Worktree dir: {worktree_dir}{file_list}
 You MUST take action to fix this. The cleanup will be retried after you respond.
 
 If the error mentions untracked files or "contains modified or untracked files":
-- List the files with `ls {worktree_dir}` or `git status`
+- List the files with `ls {quoted_dir}` or `git status`
 - Determine if they are important (user work) or disposable (build artifacts, __pycache__, etc.)
-- For disposable files: `rm -rf {worktree_dir}/<file>` or `git clean -fd` in the worktree
+- For disposable files: `rm -rf {quoted_dir}/<file>` or `git clean -fd` in the worktree
 - For important files: commit them first
 
 If the error mentions branch not merged:

@@ -287,6 +287,24 @@ path_template: "$HOME/worktrees/${repo_name}-${branch_name}"       # Flat struct
 path_template: null                                                # Sibling dirs (default)
 ```
 
+### Worktree Finish Mode
+
+Control how `/worktree finish` integrates branches back:
+
+```yaml
+# Option A: rebase (default)
+worktree:
+  finish_mode: "rebase"
+
+# Option B: always create merge commits
+worktree:
+  finish_mode: "no-ff"
+```
+
+- `"rebase"` (default): Attempts fast-forward; falls back to interactive rebase via Claude.
+- `"no-ff"`: Skips rebase; always creates a merge commit preserving branch history.
+- Any other value defaults to `"rebase"` behavior.
+
 ## Testing
 
 ```bash

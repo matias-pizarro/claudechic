@@ -43,6 +43,7 @@ def _load() -> tuple[dict, bool]:
         # New install - create config with fresh ID and save
         config = {
             "analytics": {"enabled": True, "id": str(uuid.uuid4())},
+            "worktree": {"path_template": None, "finish_mode": "rebase"},
             "recent-tools-expanded": 2,
         }
         new_install = True
