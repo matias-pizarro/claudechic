@@ -29,14 +29,14 @@ def parse_context_markdown(content: str) -> dict:
         "categories": [],
     }
 
-    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%) or 184.2k / 1.0M
+    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%) or 184.2k / 1.0M or 950 / 1000000
     tokens_match = re.search(
-        r"\*\*Tokens:\*\*\s*([\d.]+)(k|M)?\s*/\s*([\d.]+)(k|M)", content
+        r"\*\*Tokens:\*\*\s*([\d.]+)(k|M)?\s*/\s*([\d.]+)(k|M)?", content
     )
     if tokens_match:
         used_str, used_unit, total_str, total_unit = tokens_match.groups()
         used_mult = 1_000_000 if used_unit == "M" else (1000 if used_unit == "k" else 1)
-        total_mult = 1_000_000 if total_unit == "M" else 1000
+        total_mult = 1_000_000 if total_unit == "M" else (1000 if total_unit == "k" else 1)
         data["tokens_used"] = int(float(used_str) * used_mult)
         data["tokens_total"] = int(float(total_str) * total_mult)
 

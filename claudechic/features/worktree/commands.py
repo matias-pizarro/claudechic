@@ -27,7 +27,8 @@ from claudechic.features.worktree.git import (
     finish_cleanup,
     get_cleanup_fix_prompt,
     get_finish_info,
-    get_finish_prompt,
+    get_no_ff_finish_prompt,
+    get_rebase_finish_prompt,
     is_git_repo,
     list_worktrees,
     remove_worktree,
@@ -219,7 +220,7 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
                 app._send_to_agent(
                     agent,
                     f"Fast-forward merge failed: {error}\n\n"
-                    + get_finish_prompt(state.info),
+                    + get_rebase_finish_prompt(state.info),
                     display_as="/worktree finish",
                 )
             return
@@ -228,7 +229,29 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
             # Claude handles rebase
             app._show_thinking(agent.id)
             app._send_to_agent(
-                agent, get_finish_prompt(state.info), display_as="/worktree finish"
+                agent, get_rebase_finish_prompt(state.info), display_as="/worktree finish"
+            )
+            return
+
+        if action == ResolutionAction.MAIN_DIR_NOT_READY:
+            # Main dir is dirty or on wrong branch - cannot proceed with no-ff
+            issues = []
+            if not state.status.main_dir_clean:
+                issues.append("has uncommitted changes")
+            if not state.status.main_dir_on_branch:
+                issues.append(f"is not on '{state.info.base_branch}'")
+            app.notify(
+                f"Cannot merge: main worktree {' and '.join(issues)}",
+                severity="error",
+            )
+            agent.finish_state = None
+            return
+
+        if action == ResolutionAction.NO_FF:
+            # Claude handles merge back no-ff into base branch
+            app._show_thinking(agent.id)
+            app._send_to_agent(
+                agent, get_no_ff_finish_prompt(state.info), display_as="/worktree finish"
             )
             return
 

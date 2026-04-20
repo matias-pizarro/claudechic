@@ -1,11 +1,23 @@
 """Git worktree management for isolated feature work."""
 
+import logging
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 
 from claudechic.config import CONFIG
+
+log = logging.getLogger(__name__)
+
+WORKTREE_FINISH_MODE = CONFIG.get("worktree", {}).get("finish_mode")
+_VALID_FINISH_MODES = {"rebase", "no-ff", None}
+if WORKTREE_FINISH_MODE not in _VALID_FINISH_MODES:
+    log.warning(
+        "Unknown worktree.finish_mode '%s' in config; defaulting to 'rebase'",
+        WORKTREE_FINISH_MODE,
+    )
 
 
 class FinishPhase(Enum):
@@ -24,6 +36,8 @@ class ResolutionAction(Enum):
     PROMPT_UNCOMMITTED = auto()  # Ask user: commit/discard/abort
     FAST_FORWARD = auto()  # git merge --ff-only in main_dir
     REBASE = auto()  # Claude does rebase
+    NO_FF = auto()  # Claude does merge no-ff
+    MAIN_DIR_NOT_READY = auto()  # Main dir dirty or on wrong branch
 
 
 @dataclass
@@ -63,6 +77,10 @@ class WorktreeStatus:
     # Untracked files (categorized)
     untracked_gitignored: list[str] = field(default_factory=list)  # Safe to delete
     untracked_other: list[str] = field(default_factory=list)  # Need user decision
+
+    # Main dir status (for no-ff mode verification)
+    main_dir_clean: bool = True  # Main worktree has no uncommitted changes
+    main_dir_on_branch: bool = True  # Main worktree is on the expected base branch
 
     @property
     def has_uncommitted(self) -> bool:
@@ -258,27 +276,6 @@ def _expand_worktree_path(template: str, repo_name: str, feature_name: str) -> P
     return path.resolve()
 
 
-def _validate_base_branch(name: str, cwd: Path | None = None) -> tuple[bool, str]:
-    """Validate a base branch name to prevent option injection and invalid refs.
-
-    Args:
-        name: Branch name to validate.
-        cwd: Directory to resolve the ref in (should be the main worktree).
-
-    Returns (is_valid, error_message).
-    """
-    if name.startswith("-"):
-        return False, f"Invalid base branch '{name}': must not start with '-'"
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", name],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return False, f"Invalid ref '{name}': not found in repository"
-    return True, ""
-
 
 def start_worktree(
     feature_name: str, base: str | None = None
@@ -292,9 +289,12 @@ def start_worktree(
     Returns (success, message, worktree_path).
     """
     try:
-        # Reject option-injection attempts immediately (no git needed)
-        if base is not None and base.startswith("-"):
-            return False, f"Invalid base branch '{base}': must not start with '-'", None
+        # Reject option-injection and empty base values immediately (no git needed)
+        if base is not None:
+            if not base.strip():
+                return False, "Invalid base branch: must not be empty", None
+            if base.startswith("-"):
+                return False, f"Invalid base branch '{base}': must not start with '-'", None
 
         main_wt = get_main_worktree()
 
@@ -431,8 +431,11 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
     # Already merged?
     is_merged = is_branch_merged(info.branch_name, info.base_branch, cwd=info.main_dir)
 
-    # Can fast-forward? (only relevant if there are commits)
-    can_ff = not needs_rebase(info) if commits_ahead > 0 else True
+    # Can fast-forward? (skip subprocess when in no-ff mode or no commits)
+    if WORKTREE_FINISH_MODE == "no-ff" or commits_ahead == 0:
+        can_ff = True  # Not used in no-ff mode; trivially true when 0 commits
+    else:
+        can_ff = not needs_rebase(info)
 
     # Uncommitted changes (staged + unstaged)
     result = subprocess.run(
@@ -446,6 +449,33 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
     # Categorize untracked files
     untracked_gitignored, untracked_other = get_untracked_files(cwd)
 
+    # Main dir status (for no-ff mode: verify merge target is ready)
+    main_clean = True
+    main_on_branch = True
+    if WORKTREE_FINISH_MODE == "no-ff" and commits_ahead > 0:
+        # Check if a merge is already in progress (MERGE_HEAD exists)
+        merge_in_progress = subprocess.run(
+            ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+            cwd=info.main_dir,
+            capture_output=True,
+        ).returncode == 0
+        # If merge is in progress, main_dir is expected to be dirty (conflict resolution)
+        if not merge_in_progress:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=info.main_dir,
+                capture_output=True,
+                text=True,
+            )
+            main_clean = not bool(result.stdout.strip())
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=info.main_dir,
+                capture_output=True,
+                text=True,
+            )
+            main_on_branch = result.stdout.strip() == info.base_branch
+
     return WorktreeStatus(
         commits_ahead=commits_ahead,
         is_merged=is_merged,
@@ -453,6 +483,8 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
         uncommitted_files=uncommitted,
         untracked_gitignored=untracked_gitignored,
         untracked_other=untracked_other,
+        main_dir_clean=main_clean,
+        main_dir_on_branch=main_on_branch,
     )
 
 
@@ -506,12 +538,18 @@ def determine_resolution_action(status: WorktreeStatus) -> ResolutionAction:
     if status.is_merged:
         return ResolutionAction.NONE
 
-    # Can fast-forward merge?
-    if status.can_fast_forward:
-        return ResolutionAction.FAST_FORWARD
+    if WORKTREE_FINISH_MODE == "no-ff":
+        # Verify main dir is ready before no-ff merge
+        if not status.main_dir_clean or not status.main_dir_on_branch:
+            return ResolutionAction.MAIN_DIR_NOT_READY
+        return ResolutionAction.NO_FF
+    else:
+        # Can fast-forward merge?
+        if status.can_fast_forward:
+            return ResolutionAction.FAST_FORWARD
 
-    # Need rebase (Claude handles this)
-    return ResolutionAction.REBASE
+        # Need rebase (Claude handles this)
+        return ResolutionAction.REBASE
 
 
 def clean_gitignored_files(worktree_dir: Path) -> tuple[bool, str]:
@@ -530,8 +568,13 @@ def discard_all_changes(worktree_dir: Path) -> tuple[bool, str]:
     Returns (success, error).
     """
     # Reset staged and unstaged changes
+    # Use "HEAD ." to restore both index and working tree to HEAD.
+    # Plain "." only restores working tree to match the index, leaving staged changes intact.
     result = subprocess.run(
-        ["git", "checkout", "."], cwd=worktree_dir, capture_output=True, text=True
+        ["git", "checkout", "HEAD", "."],
+        cwd=worktree_dir,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return False, f"checkout failed: {result.stderr.strip()}"
@@ -584,8 +627,11 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
     return True, ""
 
 
-def get_finish_prompt(info: FinishInfo) -> str:
+def get_rebase_finish_prompt(info: FinishInfo) -> str:
     """Generate the prompt for Claude to rebase and merge a feature branch."""
+    main_dir = shlex.quote(str(info.main_dir))
+    branch = shlex.quote(info.branch_name)
+    base = shlex.quote(info.base_branch)
     return f"""Rebase and merge this feature branch:
 
 Branch: {info.branch_name}
@@ -596,10 +642,36 @@ Main dir: {info.main_dir}
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
 2. Rebase {info.branch_name} onto the LOCAL {info.base_branch} branch (do NOT fetch from remote):
-   git rebase {info.base_branch}
+   git rebase {base}
 3. In the main dir ({info.main_dir}), merge {info.branch_name}:
-   cd {info.main_dir} && git merge {info.branch_name}
+   cd {main_dir} && git merge {branch}
 
+Do NOT remove the worktree or delete the branch - the app will handle cleanup.
+Do NOT interact with remotes (no fetch, no pull, no push)."""
+
+
+def get_no_ff_finish_prompt(info: FinishInfo) -> str:
+    """Generate the prompt for Claude to merge a feature branch back no-ff into its base branch."""
+    main_dir = shlex.quote(str(info.main_dir))
+    branch = shlex.quote(info.branch_name)
+    base = shlex.quote(info.base_branch)
+    return f"""Merge back this feature branch without fast-forward:
+
+Branch: {info.branch_name}
+Base branch: {info.base_branch}
+Worktree dir: {info.worktree_dir}
+Main dir: {info.main_dir}
+
+Steps:
+1. Check for uncommitted changes in the worktree (fail if any)
+2. Verify the main dir is on the correct branch and clean:
+   cd {main_dir} && git status --porcelain
+   The output must be empty (no uncommitted changes) and `git branch --show-current` must show {base}.
+   If the main dir has uncommitted changes or is on the wrong branch, STOP and report the error.
+3. Merge {info.branch_name} without fast-forward (non-interactive):
+   cd {main_dir} && git merge --no-ff --no-edit {branch}
+
+Do NOT rebase before merging - preserve the original commit history.
 Do NOT remove the worktree or delete the branch - the app will handle cleanup.
 Do NOT interact with remotes (no fetch, no pull, no push)."""
 
@@ -630,6 +702,7 @@ def get_cleanup_fix_prompt(error: str, worktree_dir: Path) -> str:
     except Exception:
         pass
 
+    quoted_dir = shlex.quote(str(worktree_dir))
     return f"""The worktree cleanup failed with this error:
 
 {error}
@@ -639,9 +712,9 @@ Worktree dir: {worktree_dir}{file_list}
 You MUST take action to fix this. The cleanup will be retried after you respond.
 
 If the error mentions untracked files or "contains modified or untracked files":
-- List the files with `ls {worktree_dir}` or `git status`
+- List the files with `ls {quoted_dir}` or `git status`
 - Determine if they are important (user work) or disposable (build artifacts, __pycache__, etc.)
-- For disposable files: `rm -rf {worktree_dir}/<file>` or `git clean -fd` in the worktree
+- For disposable files: `rm -rf {quoted_dir}/<file>` or `git clean -fd` in the worktree
 - For important files: commit them first
 
 If the error mentions branch not merged:

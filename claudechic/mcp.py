@@ -32,7 +32,8 @@ from claudechic.features.worktree.git import (
     finish_cleanup,
     get_cleanup_fix_prompt,
     get_finish_info,
-    get_finish_prompt,
+    get_no_ff_finish_prompt,
+    get_rebase_finish_prompt,
     start_worktree,
 )
 from claudechic.tasks import create_safe_task
@@ -333,7 +334,7 @@ async def list_agents(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
 
 @tool(
     "finish_worktree",
-    "When you're done working in a worktree, call this to clean it up. Handles committing, rebasing onto the base branch, merging, and removing the worktree. Prefer this over manual git worktree commands.",
+    "When you're done working in a worktree, call this to clean it up. Handles committing, merging (rebase or no-ff per config), and removing the worktree. Prefer this over manual git worktree commands.",
     {},
 )
 async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
@@ -415,14 +416,32 @@ async def _process_finish_resolution(
             # Fast-forward failed, fall through to rebase
             return _text_response(
                 f"Fast-forward merge failed: {error}\n\n"
-                + get_finish_prompt(info)
+                + get_rebase_finish_prompt(info)
                 + "\n\nAfter completing, call finish_worktree again."
             )
 
         if action == ResolutionAction.REBASE:
             return _text_response(
-                get_finish_prompt(info)
+                get_rebase_finish_prompt(info)
                 + "\n\nAfter completing the rebase and merge, call finish_worktree again."
+            )
+
+        if action == ResolutionAction.MAIN_DIR_NOT_READY:
+            issues = []
+            if not status.main_dir_clean:
+                issues.append("has uncommitted changes")
+            if not status.main_dir_on_branch:
+                issues.append(f"is not on '{info.base_branch}'")
+            agent.finish_state = None
+            return _error_response(
+                f"Cannot merge: main worktree {' and '.join(issues)}. "
+                "Resolve manually and try again."
+            )
+
+        if action == ResolutionAction.NO_FF:
+            return _text_response(
+                get_no_ff_finish_prompt(info)
+                + "\n\nAfter completing the no-ff merge, call finish_worktree again."
             )
 
         # Unknown action
