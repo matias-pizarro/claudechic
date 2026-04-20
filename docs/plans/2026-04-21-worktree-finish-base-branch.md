@@ -96,9 +96,9 @@ base_branch = parts[2].strip() if len(parts) > 2 else None
 - `/worktree finish main extra args` → `base_branch = "main extra args"` → fails validation (branch name with spaces does not exist)
 - `/worktree finish --into main` → `base_branch = "--into main"` → fails validation (starts with `-`)
 - `/worktree finish -mybranch` → `base_branch = "-mybranch"` → rejected: "Branch name must not start with '-'"
-- `/worktree finish   ` → Python's default `split()` skips whitespace, producing only 2 parts → `base_branch = None` (auto-detect)
+- `/worktree finish   ` → Python's `str.split()` (without a separator argument, even with `maxsplit`) skips leading/trailing whitespace and collapses runs, producing only 2 parts → `base_branch = None` (auto-detect)
 
-> **Note on empty strings:** An empty `base_branch` can only arrive via the MCP path (`args.get("base_branch")` returning `""`), not from TUI parsing — Python's `str.split()` without a separator argument skips whitespace and never produces empty elements.
+> **Note on empty strings:** An empty or whitespace-only `base_branch` can only arrive via the MCP path when a caller explicitly passes `{"base_branch": ""}` or `{"base_branch": "   "}`. Python's `args.get()` returns `None` (not empty string) when the key is absent. TUI parsing cannot produce empty elements because Python's `str.split()` without a separator skips whitespace. **Important:** `base_branch` should be `.strip()`-ed at extraction time (both TUI and MCP paths), not just inside validation, to avoid confusing error messages for whitespace-padded branch names like `"  main  "`.
 
 All invalid inputs are caught by the validation rules in Section 7 before any git operations execute. All validation failures return `(False, error_message, None)`, consistent with the existing `get_finish_info()` early-return pattern.
 
@@ -200,6 +200,7 @@ def get_local_branches(cwd: Path | None = None, exclude: str | None = None, limi
 | Command handler | `features/worktree/commands.py` | Parse `base_branch` from command string; pass to `get_finish_info()`; add `base_branch` to analytics event |
 | MCP tool | `mcp.py` | Add `base_branch` to tool schema; extract from args; pass to `get_finish_info()` |
 | Help display | `commands.py` | Update help text for `/worktree` |
+| Documentation | `CLAUDE.md` | Update Commands section to document `finish [branch]` |
 
 ### 8.2 Data Flow (TUI)
 
@@ -276,13 +277,31 @@ else:
                 f"Clean it up first or create a worktree for '{base_branch}'.", None)
     merge_head = subprocess.run(
         ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-        cwd=main_wt_path, capture_output=True
+        cwd=main_wt_path, capture_output=True, text=True,
     )
     if merge_head.returncode == 0:
-        return (False, f"Cannot use main worktree for merge: a merge is in progress.", None)
+        return (False, "Cannot use main worktree for merge: a merge is in progress.", None)
+    rebase_head = subprocess.run(
+        ["git", "rev-parse", "--verify", "REBASE_HEAD"],
+        cwd=main_wt_path, capture_output=True, text=True,
+    )
+    if rebase_head.returncode == 0:
+        return (False, "Cannot use main worktree for merge: a rebase is in progress.", None)
+    # Check for concurrent agents working in the main worktree
+    if _app and _app.agent_mgr:
+        busy_in_main = any(
+            a.cwd.resolve() == main_wt_path.resolve() and a.status == "busy"
+            for a in _app.agent_mgr
+        )
+        if busy_in_main:
+            return (False, f"Cannot use main worktree for merge: another agent is "
+                    f"currently working there. Wait for it to finish or create "
+                    f"a worktree for '{base_branch}'.", None)
     main_dir = main_wt_path
     needs_checkout = True
 ```
+
+> **Note on concurrent agent check:** This check uses `agent_mgr` which is available in the TUI path (via `app`) and the MCP path (via `_app` module global). In `get_finish_info()` (a pure git function), this check must be performed by the caller (`_handle_finish` or `finish_worktree`) before or after `get_finish_info()` returns, not inside `get_finish_info()` itself (which should remain free of UI/app dependencies). The pseudocode above shows the logical check; the implementation should place it in the caller.
 
 **`needs_checkout` field on `FinishInfo`:** A new boolean field `needs_checkout: bool` is added to `FinishInfo` (default `False`). This signals to prompt generation functions and `fast_forward_merge()` that a `git checkout {base_branch}` must precede the merge in `main_dir`. This avoids merging into whatever branch the main worktree happens to be on.
 
@@ -291,26 +310,50 @@ else:
 ```
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
-2. Rebase {branch} onto the LOCAL {base_branch}:
+2. Record the current branch in the main dir for rollback:
+   cd {main_dir} && git branch --show-current
+3. Rebase {branch} onto the LOCAL {base_branch}:
    git rebase {base_branch}
-3. In the main dir ({main_dir}), check out the target branch and merge:
+4. In the main dir ({main_dir}), check out the target branch and merge:
    cd {main_dir} && git checkout {base_branch} && git merge {branch}
+5. If the merge fails, restore the original branch:
+   cd {main_dir} && git checkout {original_branch}
 ```
 
 When `needs_checkout` is `False` (target has its own worktree or auto-detected), the existing prompt is used unchanged.
 
-**`fast_forward_merge()` with checkout:** When `needs_checkout` is `True`, `fast_forward_merge()` must also run `git checkout {base_branch}` in `main_dir` before `git merge --ff-only`. The function will accept `FinishInfo` (which it already does) and conditionally add the checkout step:
+**`fast_forward_merge()` with checkout and rollback:** When `needs_checkout` is `True`, `fast_forward_merge()` must:
+1. Record the current branch in `main_dir` (for rollback)
+2. Check out `base_branch`
+3. Attempt the merge
+4. On merge failure, restore the original branch
 
 ```python
 def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
+    original_branch = None
     if info.needs_checkout:
+        # Record original branch for rollback
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=info.main_dir, capture_output=True, text=True,
+        )
+        original_branch = result.stdout.strip() if result.returncode == 0 else None
+        # Checkout target branch
         checkout = subprocess.run(
             ["git", "checkout", info.base_branch],
             cwd=info.main_dir, capture_output=True, text=True,
         )
         if checkout.returncode != 0:
             return False, f"Failed to check out '{info.base_branch}': {checkout.stderr.strip()}"
-    # ... existing merge logic
+    # ... existing merge logic (git merge --ff-only)
+    if merge_result.returncode != 0 and original_branch:
+        # Rollback: restore original branch on merge failure
+        subprocess.run(
+            ["git", "checkout", original_branch],
+            cwd=info.main_dir, capture_output=True, text=True,
+        )
+        return False, merge_result.stderr.strip()
+    # ... success path
 ```
 
 ### 8.5 Interaction with `finish_mode`
@@ -323,7 +366,9 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
 | `no-ff` | No | N/A | **Error:** target must have a worktree for no-ff merges |
 | (auto-detect) | Always yes | `False` | Existing behavior unchanged — auto-detection always finds a worktree branch |
 
-### 8.6 Persistence Across Retries
+> **Diagnostic note:** In rebase mode, `diagnose_worktree()` does not populate `main_dir_on_branch` (it defaults to `True`). When `needs_checkout=True`, this means `WorktreeStatus.main_dir_on_branch` is technically incorrect — the main worktree is not on the target branch yet. This is deliberate: `determine_resolution_action()` does not check `main_dir_on_branch` in rebase mode, so the incorrect default is never consumed. The `needs_checkout` flag handles the branch correction via the prompt/merge function instead. A code comment should document this design choice to prevent future confusion.
+
+### 8.6 Persistence and Concurrency
 
 The `base_branch` override is stored in `FinishInfo`, which is stored in `FinishState`, which is stored on the `Agent` object. This persists across:
 - Conflict resolution retries (Claude responds, `on_response_complete_finish` re-diagnoses)
@@ -331,6 +376,8 @@ The `base_branch` override is stored in `FinishInfo`, which is stored in `Finish
 - MCP tool re-invocations (state is checked at the beginning of `finish_worktree`)
 
 No additional persistence mechanism is needed — the existing state management handles this.
+
+**Concurrent invocation guard:** Both TUI and MCP paths should check `agent.finish_state` at the start. If already set and in RESOLUTION or CLEANUP phase, return an error: `"A finish operation is already in progress."` This prevents the TUI and MCP paths from racing on the same agent.
 
 ### 8.7 `FinishInfo` Immutability
 
@@ -347,7 +394,7 @@ class FinishInfo:
     needs_checkout: bool = False  # True when main_dir is a fallback, not already on base_branch
 ```
 
-This is a low-risk change: `FinishInfo` is already treated as immutable throughout the codebase — no code mutates its fields after construction.
+This is a low-risk change: `FinishInfo` is already treated as immutable throughout the codebase — no code mutates its fields after construction. Making it `frozen=True` also makes it hashable (value-based `__eq__` and `__hash__`). This is intentional and safe since no current code uses identity comparison or stores `FinishInfo` in sets/dicts.
 
 > **Note:** `FinishState` intentionally remains mutable (`@dataclass` without `frozen=True`). It tracks evolving process state — `phase`, `status`, `cleanup_attempts`, and `last_error` are all mutated during the finish flow. Only `FinishInfo` (a value object) gets frozen.
 
@@ -371,6 +418,8 @@ This section summarizes the specific code changes needed. The current codebase h
 
 **Callers of `get_finish_info()` that are NOT affected:** `_handle_discard()` (at `commands.py:385`) also calls `get_finish_info(app.sdk_cwd)`. This caller continues using auto-detection (`base_branch=None` default). No changes needed.
 
+**Implementation optimization:** The current `get_finish_info()` calls `list_worktrees()` at line 381 and then calls `get_main_worktree()` at line 387, which internally calls `list_worktrees()` again. With the override algorithm also iterating worktrees to find `target_wt`, this is a third call. The implementation should reuse the single `worktrees` list from line 381, extracting the main worktree from it directly, to avoid redundant subprocess calls and ensure a consistent snapshot.
+
 ## 9. Error Messages
 
 | Scenario | Message |
@@ -383,6 +432,7 @@ This section summarizes the specific code changes needed. The current codebase h
 | No worktree for target (no-ff) | `"Cannot merge into 'release/1.2': no worktree is checked out to that branch. Create a worktree with '/worktree release/1.2', or check out the branch in an existing worktree."` |
 | Main worktree dirty (rebase fallback) | `"Cannot use main worktree for merge: it has uncommitted changes. Clean it up first or create a worktree for 'release/1.2'."` |
 | Main worktree in mid-merge (rebase fallback) | `"Cannot use main worktree for merge: a merge is in progress."` |
+| Main worktree in mid-rebase (rebase fallback) | `"Cannot use main worktree for merge: a rebase is in progress."` |
 | Not in worktree | `"Not in a feature worktree. Switch to a worktree first."` (existing, unchanged) |
 
 > **Note on "main worktree" in error messages:** When using the rebase-mode fallback (target has no worktree), errors reference the "main worktree" because that is the worktree being used as a fallback merge directory. When a target worktree exists, errors from `diagnose_worktree()` reference the "target directory" (via `MAIN_DIR_NOT_READY`). The existing error message in `commands.py:243` says "main worktree" but `main_dir` may actually be a target worktree — this pre-existing inconsistency is out of scope but should be addressed in a follow-up.
@@ -423,6 +473,8 @@ app.run_worker(capture(
 
 The MCP path tracks tool usage generically via `_track_mcp_tool("finish_worktree")` — no additional MCP-specific analytics are needed.
 
+> **Note:** Moving the event inside `_handle_finish()` means it only fires after basic preconditions are met (active agent exists). This is intentional — failed attempts before agent validation are not tracked.
+
 ## 13. Known Limitations
 
 1. **Race condition:** Branch existence is validated at `get_finish_info()` time, but the actual merge happens later (possibly minutes later, after Claude performs a rebase). If the branch is deleted between validation and merge, the merge will fail with a git error. This is acceptable — the user can re-run the command.
@@ -431,7 +483,7 @@ The MCP path tracks tool usage generically via `_track_mcp_tool("finish_worktree
 
 ## 14. Pre-Existing Issue: No-ff Merge Conflict Recovery
 
-**Not introduced by this change**, but noted for context: When a `MERGE_HEAD` exists in no-ff mode (merge conflict in progress), `diagnose_worktree()` skips the dirty-check and `determine_resolution_action()` returns `NO_FF` again, re-sending the initial merge prompt instead of a conflict-resolution prompt. This can cause Claude to attempt a duplicate merge. This issue affects the existing no-ff flow regardless of `base_branch` override and should be addressed in a separate PR with a dedicated `RESOLVE_MERGE_CONFLICT` resolution action.
+**Not introduced by this change**, but noted for context: When a `MERGE_HEAD` exists in no-ff mode (merge conflict in progress), `diagnose_worktree()` skips the dirty-check and `determine_resolution_action()` returns `NO_FF` again, re-sending the initial merge prompt instead of a conflict-resolution prompt. This can cause Claude to attempt a duplicate merge. This issue affects the existing no-ff flow regardless of `base_branch` override and should be addressed in a separate PR with a dedicated `RESOLVE_MERGE_CONFLICT` resolution action. The `base_branch` override does not exacerbate this issue because `FinishInfo` (including the overridden `base_branch`) persists in `FinishState` across retries.
 
 ## 15. Testing Strategy
 
@@ -487,7 +539,11 @@ All integration tests use `tmp_path` fixtures for isolation, following the patte
 - `base_branch` override pointing to a branch with no worktree (no-ff mode) — verify error
 - `fast_forward_merge()` with `needs_checkout = True` — verify checkout + merge
 - `fast_forward_merge()` with `needs_checkout = False` — verify no checkout (existing behavior)
-- Verify `FinishInfo` is frozen (attempt attribute assignment raises `FrozenInstanceError`)
+- Verify `FinishInfo` is frozen (attempt attribute assignment raises `FrozenInstanceError` / `AttributeError`)
+- Verify `FinishInfo` constructed without `needs_checkout` defaults to `False` (backward compat)
+- Verify `needs_checkout` is never `True` when finish mode is no-ff (V7 prevents it)
+- Verify concurrent `finish_state` guard rejects second invocation
+- Verify `fast_forward_merge()` rollback restores original branch on merge failure
 
 > **Note:** `tests/test_worktree_finish.py` is a new file, distinct from `tests/test_worktree_config.py` (which covers path templates and `start_worktree`) and `tests/test_resolution_action.py` (which covers resolution logic). The new file focuses specifically on the `base_branch` override feature.
 
