@@ -1032,7 +1032,7 @@ Add concurrent agent check after `get_finish_info()` returns (when `needs_checko
         # Check no other agent is busy in the main worktree
         if app.agent_mgr:
             busy_in_main = any(
-                a.cwd.resolve() == info.main_dir.resolve() and a.status == "busy"
+                a.cwd.resolve() == info.main_dir.resolve() and a.status == AgentStatus.BUSY
                 and a.id != agent.id
                 for a in app.agent_mgr
             )
@@ -1161,7 +1161,7 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
         # Concurrent agent check for rebase fallback (PRD Section 8.4)
         if info.needs_checkout and _app and _app.agent_mgr:
             busy_in_main = any(
-                a.cwd.resolve() == info.main_dir.resolve() and a.status == "busy"
+                a.cwd.resolve() == info.main_dir.resolve() and a.status == AgentStatus.BUSY
                 for a in _app.agent_mgr
                 if a != agent
             )
