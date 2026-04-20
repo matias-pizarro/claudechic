@@ -67,11 +67,13 @@ In no-ff mode:
 
 | Scenario | Behavior |
 |----------|----------|
-| Main dir has uncommitted changes | `git merge --no-ff` will fail; Claude reports error; finish flow retries after Claude response |
+| Main dir has uncommitted changes | Prompt instructs Claude to check `git status --porcelain` in main dir before merging; Claude stops and reports the error; finish flow retries |
+| Main dir on wrong branch | Prompt instructs Claude to verify `git branch --show-current` matches base_branch; Claude stops and reports mismatch |
 | Merge conflict during no-ff | Claude resolves or reports; `on_response_complete_finish` re-diagnoses and continues |
 | Already merged branch in no-ff mode | Returns NONE (merge already done), skips to cleanup |
 | 0 commits ahead, clean | Returns NONE regardless of mode |
 | Invalid config value ("noff", "merge") | Falls through to rebase behavior |
+| `start_worktree(base="")` | Rejected with clear error (empty base not allowed) |
 
 ## Two Entry Points
 
@@ -91,10 +93,11 @@ Both call `get_no_ff_finish_prompt(info)` for consistency.
 
 ## Success Criteria
 
-- [ ] `finish_mode: "rebase"` → existing behavior unchanged (fast-forward or rebase)
-- [ ] `finish_mode: "no-ff"` → always creates merge commit via `--no-ff`
-- [ ] Invalid config → defaults to rebase
-- [ ] Shell injection in branch names → quoted in prompt commands
-- [ ] Dirty worktree in no-ff mode → prompts user before merge
-- [ ] Already-merged branch → skips to cleanup
-- [ ] Tests pass: 24/24 in `test_resolution_action.py`
+- [x] `finish_mode: "rebase"` → existing behavior unchanged (fast-forward or rebase)
+- [x] `finish_mode: "no-ff"` → always creates merge commit via `--no-ff`
+- [x] Invalid config → defaults to rebase
+- [x] Shell injection in branch names → quoted in prompt commands
+- [x] Dirty worktree in no-ff mode → prompts user before merge
+- [x] Dirty main dir → Claude verifies clean state before merging
+- [x] Already-merged branch → skips to cleanup
+- [x] Tests pass: 24+ in `test_resolution_action.py`

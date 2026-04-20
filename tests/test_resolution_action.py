@@ -203,3 +203,41 @@ class TestGetNoFfFinishPrompt:
         # shlex.quote wraps in single quotes when needed
         assert "feature/with-slash" in prompt  # Shown in info section
         assert "'/tmp/main dir'" in prompt  # Path with space is quoted
+
+
+class TestGetRebaseFinishPromptShellQuoting:
+    """Test that get_rebase_finish_prompt also uses shlex.quote."""
+
+    def test_shell_quotes_branch_and_paths(self):
+        """Rebase prompt should quote branch names and paths in shell commands."""
+        from pathlib import Path
+
+        from claudechic.features.worktree.git import FinishInfo, get_rebase_finish_prompt
+
+        info = FinishInfo(
+            branch_name="feature/with-slash",
+            base_branch="main",
+            worktree_dir=Path("/tmp/worktree"),
+            main_dir=Path("/tmp/main dir"),
+        )
+        prompt = get_rebase_finish_prompt(info)
+        # Path with space must be quoted in command lines
+        assert "'/tmp/main dir'" in prompt
+        # Branch info section shows unquoted for readability
+        assert "Branch: feature/with-slash" in prompt
+
+    def test_base_branch_quoted_in_rebase_command(self):
+        """Base branch with special chars should be quoted in git rebase command."""
+        from pathlib import Path
+
+        from claudechic.features.worktree.git import FinishInfo, get_rebase_finish_prompt
+
+        info = FinishInfo(
+            branch_name="feature-x",
+            base_branch="release/1.0",
+            worktree_dir=Path("/tmp/worktree"),
+            main_dir=Path("/tmp/main"),
+        )
+        prompt = get_rebase_finish_prompt(info)
+        # git rebase command should use the quoted base
+        assert "git rebase release/1.0" in prompt  # shlex doesn't quote simple slashes

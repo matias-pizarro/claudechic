@@ -275,9 +275,12 @@ def start_worktree(
     Returns (success, message, worktree_path).
     """
     try:
-        # Reject option-injection attempts immediately (no git needed)
-        if base is not None and base.startswith("-"):
-            return False, f"Invalid base branch '{base}': must not start with '-'", None
+        # Reject option-injection and empty base values immediately (no git needed)
+        if base is not None:
+            if not base.strip():
+                return False, "Invalid base branch: must not be empty", None
+            if base.startswith("-"):
+                return False, f"Invalid base branch '{base}': must not start with '-'", None
 
         main_wt = get_main_worktree()
 
@@ -601,6 +604,7 @@ def get_no_ff_finish_prompt(info: FinishInfo) -> str:
     """Generate the prompt for Claude to merge a feature branch back no-ff into its base branch."""
     main_dir = shlex.quote(str(info.main_dir))
     branch = shlex.quote(info.branch_name)
+    base = shlex.quote(info.base_branch)
     return f"""Merge back this feature branch without fast-forward:
 
 Branch: {info.branch_name}
@@ -610,7 +614,11 @@ Main dir: {info.main_dir}
 
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
-2. In the main dir ({info.main_dir}), merge {info.branch_name} without fast-forward:
+2. Verify the main dir is on the correct branch and clean:
+   cd {main_dir} && git status --porcelain
+   The output must be empty (no uncommitted changes) and `git branch --show-current` must show {base}.
+   If the main dir has uncommitted changes or is on the wrong branch, STOP and report the error.
+3. Merge {info.branch_name} without fast-forward:
    cd {main_dir} && git merge --no-ff {branch}
 
 Do NOT rebase before merging - preserve the original commit history.

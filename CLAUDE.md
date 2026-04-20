@@ -304,6 +304,7 @@ worktree:
 - `"rebase"` (default): Attempts fast-forward; falls back to interactive rebase via Claude.
 - `"no-ff"`: Skips rebase; always creates a merge commit preserving branch history.
 - Any other value defaults to `"rebase"` behavior.
+- Config changes require app restart to take effect.
 
 ## Testing
 
