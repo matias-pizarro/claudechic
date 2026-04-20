@@ -7,6 +7,8 @@ from pathlib import Path
 
 from claudechic.config import CONFIG
 
+WORKTREE_FINISH_MODE = CONFIG.get("worktree", {}).get("finish_mode")
+
 
 class FinishPhase(Enum):
     """Phases of the /worktree finish process."""
@@ -24,6 +26,7 @@ class ResolutionAction(Enum):
     PROMPT_UNCOMMITTED = auto()  # Ask user: commit/discard/abort
     FAST_FORWARD = auto()  # git merge --ff-only in main_dir
     REBASE = auto()  # Claude does rebase
+    NO_FF = auto()  # Claude does merge no-ff
 
 
 @dataclass
@@ -506,12 +509,16 @@ def determine_resolution_action(status: WorktreeStatus) -> ResolutionAction:
     if status.is_merged:
         return ResolutionAction.NONE
 
-    # Can fast-forward merge?
-    if status.can_fast_forward:
-        return ResolutionAction.FAST_FORWARD
+    if WORKTREE_FINISH_MODE == "rebase":
+        # Can fast-forward merge?
+        if status.can_fast_forward:
+            return ResolutionAction.FAST_FORWARD
 
-    # Need rebase (Claude handles this)
-    return ResolutionAction.REBASE
+        # Need rebase (Claude handles this)
+        return ResolutionAction.REBASE
+    else:
+        # Merge back no-ff into base branch (Claude handles this)
+        return ResolutionAction.NO_FF
 
 
 def clean_gitignored_files(worktree_dir: Path) -> tuple[bool, str]:
@@ -584,7 +591,7 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
     return True, ""
 
 
-def get_finish_prompt(info: FinishInfo) -> str:
+def get_rebase_finish_prompt(info: FinishInfo) -> str:
     """Generate the prompt for Claude to rebase and merge a feature branch."""
     return f"""Rebase and merge this feature branch:
 
@@ -599,6 +606,24 @@ Steps:
    git rebase {info.base_branch}
 3. In the main dir ({info.main_dir}), merge {info.branch_name}:
    cd {info.main_dir} && git merge {info.branch_name}
+
+Do NOT remove the worktree or delete the branch - the app will handle cleanup.
+Do NOT interact with remotes (no fetch, no pull, no push)."""
+
+
+def get_no_ff_finish_prompt(info: FinishInfo) -> str:
+    """Generate the prompt for Claude to merge a feature branch back no-ff into its base branch."""
+    return f"""Merge back this feature branch without fast-forward:
+
+Branch: {info.branch_name}
+Base branch: {info.base_branch}
+Worktree dir: {info.worktree_dir}
+Main dir: {info.main_dir}
+
+Steps:
+1. Check for uncommitted changes in the worktree (fail if any)
+2. In the main dir ({info.main_dir}), merge {info.branch_name} without fast-forward:
+   cd {info.main_dir} && git checkout {info.base_branch} && git merge --no-ff {info.branch_name}
 
 Do NOT remove the worktree or delete the branch - the app will handle cleanup.
 Do NOT interact with remotes (no fetch, no pull, no push)."""

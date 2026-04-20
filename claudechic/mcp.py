@@ -32,7 +32,8 @@ from claudechic.features.worktree.git import (
     finish_cleanup,
     get_cleanup_fix_prompt,
     get_finish_info,
-    get_finish_prompt,
+    get_no_ff_finish_prompt,
+    get_rebase_finish_prompt,
     start_worktree,
 )
 from claudechic.tasks import create_safe_task
@@ -415,14 +416,20 @@ async def _process_finish_resolution(
             # Fast-forward failed, fall through to rebase
             return _text_response(
                 f"Fast-forward merge failed: {error}\n\n"
-                + get_finish_prompt(info)
+                + get_rebase_finish_prompt(info)
                 + "\n\nAfter completing, call finish_worktree again."
             )
 
         if action == ResolutionAction.REBASE:
             return _text_response(
-                get_finish_prompt(info)
+                get_rebase_finish_prompt(info)
                 + "\n\nAfter completing the rebase and merge, call finish_worktree again."
+            )
+
+        if action == ResolutionAction.NO_FF:
+            return _text_response(
+                get_no_ff_finish_prompt(info)
+                + "\n\nAfter completing the no-ff merge, call finish_worktree again."
             )
 
         # Unknown action
