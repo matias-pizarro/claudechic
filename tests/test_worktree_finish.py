@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from claudechic.features.worktree.git import branch_exists, get_local_branches
+from claudechic.features.worktree.git import FinishInfo, branch_exists, get_local_branches
+
+try:
+    from dataclasses import FrozenInstanceError
+except ImportError:
+    FrozenInstanceError = AttributeError  # type: ignore[misc,assignment]
 
 
 @pytest.fixture
@@ -57,3 +62,34 @@ class TestGetLocalBranches:
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
         result = get_local_branches(cwd=tmp_path)
         assert result == []
+
+
+class TestFinishInfoFrozen:
+    def test_is_frozen(self):
+        info = FinishInfo(
+            branch_name="feat",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feat"),
+            main_dir=Path("/tmp/main"),
+        )
+        with pytest.raises((AttributeError, FrozenInstanceError)):
+            info.branch_name = "other"  # type: ignore[misc]
+
+    def test_needs_checkout_defaults_to_false(self):
+        info = FinishInfo(
+            branch_name="feat",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feat"),
+            main_dir=Path("/tmp/main"),
+        )
+        assert info.needs_checkout is False
+
+    def test_needs_checkout_can_be_set_at_construction(self):
+        info = FinishInfo(
+            branch_name="feat",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feat"),
+            main_dir=Path("/tmp/main"),
+            needs_checkout=True,
+        )
+        assert info.needs_checkout is True

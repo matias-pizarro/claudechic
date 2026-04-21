@@ -49,7 +49,7 @@ class WorktreeInfo:
     is_main: bool
 
 
-@dataclass
+@dataclass(frozen=True)
 class FinishInfo:
     """Info needed to finish a worktree."""
 
@@ -57,6 +57,7 @@ class FinishInfo:
     base_branch: str
     worktree_dir: Path
     main_dir: Path
+    needs_checkout: bool = False  # True when main_dir needs git checkout before merge
 
 
 @dataclass
