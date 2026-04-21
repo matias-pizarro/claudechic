@@ -369,7 +369,14 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
                 agent.finish_state.status = status
                 return await _process_finish_resolution(agent, info, status)
             if agent.finish_state.phase == FinishPhase.CLEANUP:
-                return _error_response("A cleanup operation is already in progress.")
+                # Expected re-invocation: Claude fixed the issue, retry cleanup
+                agent.finish_state.cleanup_attempts += 1
+                if agent.finish_state.cleanup_attempts >= 3:
+                    agent.finish_state = None
+                    return _error_response(
+                        "Cleanup failed after 3 attempts. Resolve manually."
+                    )
+                return await _do_cleanup(agent, agent.finish_state.info)
 
         # Extract optional base_branch (strip whitespace but preserve empty for V2 validation)
         base_branch = args.get("base_branch")
