@@ -143,7 +143,7 @@ def get_help_commands() -> list[tuple[str, str]]:
         elif name == "/compactish":
             display_name = "/compactish [-n]"
         elif name == "/worktree":
-            display_name = "/worktree <name>"
+            display_name = "/worktree <name> | finish [branch]"
         elif name == "/reviews":
             display_name = "/reviews [job_id]"
         elif name == "/reviewer":

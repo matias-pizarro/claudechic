@@ -98,6 +98,10 @@ async def _handle_finish(app: "ChatApp", base_branch: str | None = None) -> None
         app.notify("No active agent", severity="error")
         return
 
+    if agent.finish_state is not None:
+        app.notify("A finish operation is already in progress", severity="warning")
+        return
+
     agent_id = agent.analytics_id if agent else "unknown"
     app.run_worker(capture(
         "worktree_action",
