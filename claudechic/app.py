@@ -517,8 +517,11 @@ class ChatApp(App):
         # Centrally strip terminal escape sequences so no notification path
         # can inject OSC 52 (clipboard), OSC 8 (hyperlink), title changes, etc.
         super().notify(
-            strip_ansi(message), title=strip_ansi(title),
-            severity=severity, timeout=timeout, markup=markup
+            strip_ansi(message),
+            title=strip_ansi(title),
+            severity=severity,
+            timeout=timeout,
+            markup=markup,
         )
 
     async def _replace_client(self, options: ClaudeAgentOptions) -> None:

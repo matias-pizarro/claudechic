@@ -17,12 +17,16 @@ def mock_worktree_deps():
         patch("claudechic.features.worktree.git.get_main_worktree") as mock_get_main,
         patch("claudechic.features.worktree.git.get_repo_name") as mock_get_repo,
         patch("claudechic.features.worktree.git.subprocess.run") as mock_run,
+        patch(
+            "claudechic.features.worktree.git.branch_exists", return_value=True
+        ) as mock_branch_exists,
     ):
         yield {
             "config": mock_config,
             "get_main": mock_get_main,
             "get_repo": mock_get_repo,
             "run": mock_run,
+            "branch_exists": mock_branch_exists,
         }
 
 
@@ -270,6 +274,21 @@ class TestStartWorktreeBase:
         assert "main worktree not found" in message
         mocks["run"].assert_not_called()
 
+    def test_non_branch_revspec_rejected(self, mock_worktree_deps):
+        """Arbitrary revspecs (tags, SHAs, HEAD) must be rejected; only local
+        branch names are allowed as base."""
+        mocks = mock_worktree_deps
+        mocks["get_repo"].return_value = "test-repo"
+        mocks["get_main"].return_value = (Path("/original/test-repo"), "main")
+        mocks["config"].get.return_value = {}
+        mocks["branch_exists"].return_value = False
+
+        for revspec in ["HEAD", "refs/stash", "abc1234", "v1.0"]:
+            success, message, path = start_worktree("wt-x", base=revspec)
+            assert not success, f"Expected rejection for revspec '{revspec}'"
+            assert path is None
+            assert "does not exist as a local branch" in message
+
 
 def _run_git(cwd: Path, *args: str) -> str:
     """Run git in cwd; return stdout stripped."""
@@ -333,9 +352,9 @@ class TestStartWorktreeIntegration:
         assert sha_b == main_sha
 
     def test_spawn_ignores_caller_process_cwd(self, repo, tmp_path, monkeypatch):
-        """With base='HEAD', the ref must resolve against the main worktree,
-        not the caller's cwd. Uses a cwd-dependent ref so a regression (e.g.
-        dropping the `cwd=` kwarg) would actually change the resolved sha."""
+        """With base='main', the ref must resolve against the main worktree,
+        not the caller's cwd. Verifies that even when cwd is a sibling
+        worktree at an older commit, the new branch forks from main's tip."""
         repo_path, main_sha = repo
         # Create a sibling worktree at an older sha and chdir into it.
         other = tmp_path / "other"
@@ -353,8 +372,8 @@ class TestStartWorktreeIntegration:
             ),
         ):
             cfg.get.return_value = {"path_template": template}
-            ok, _, _ = start_worktree("wt-a", base="HEAD")
+            ok, _, _ = start_worktree("wt-a", base="main")
 
         assert ok
-        # HEAD resolved from the main worktree → main_sha, not other_sha.
+        # Ref resolved from the main worktree → main_sha, not other_sha.
         assert _run_git(repo_path, "rev-parse", "wt-a") == main_sha

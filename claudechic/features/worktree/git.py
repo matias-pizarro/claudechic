@@ -372,6 +372,21 @@ def start_worktree(
                 "Cannot resolve base ref: main worktree not found",
                 None,
             )
+
+        # Validate that base is an actual local branch (not a tag, SHA, or
+        # arbitrary revspec). branch_exists() uses check-ref-format + refs/heads/.
+        if base and not branch_exists(base, cwd=main_wt[0] if main_wt else None):
+            branches = get_local_branches(
+                cwd=main_wt[0] if main_wt else None, exclude=feature_name
+            )
+            branch_list = ", ".join(branches) if branches else "(none)"
+            return (
+                False,
+                f"Base branch '{base}' does not exist as a local branch. "
+                f"Local branches: {branch_list}",
+                None,
+            )
+
         base_ref = base or "HEAD"
         git_cwd: Path | None = main_wt[0] if base and main_wt else None
 
@@ -874,6 +889,8 @@ Steps:
 4. In the main dir ({info.main_dir}), check out the target branch and merge:
    cd {main_dir} && git checkout {base} && git merge {branch}
 5. If the merge fails, restore the original branch:
+   cd {main_dir} && git checkout <original_branch_from_step_2>
+6. After a successful merge, restore the original branch:
    cd {main_dir} && git checkout <original_branch_from_step_2>
 
 Do NOT remove the worktree or delete the branch - the app will handle cleanup.
