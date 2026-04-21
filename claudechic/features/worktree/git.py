@@ -461,7 +461,7 @@ def get_finish_info(
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
                 f"Specify a local branch (e.g., '{suggestion}'). "
-                f"Run 'git checkout -- {quoted}' to create a local branch first.",
+                f"Run 'git checkout {quoted}' to create a local branch first.",
                 None,
             )
         if base_branch.startswith("origin/"):
@@ -474,7 +474,7 @@ def get_finish_info(
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
                 f"Specify a local branch (e.g., '{suggestion}'). "
-                f"Run 'git checkout -- {quoted}' to create a local branch first.",
+                f"Run 'git checkout {quoted}' to create a local branch first.",
                 None,
             )
 
