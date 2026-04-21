@@ -103,14 +103,18 @@ async def _handle_finish(app: "ChatApp", base_branch: str | None = None) -> None
         return
 
     agent_id = agent.analytics_id if agent else "unknown"
-    app.run_worker(capture(
-        "worktree_action",
-        action="finish",
-        agent_id=agent_id,
-        base_branch_override=base_branch is not None,
-    ))
+    app.run_worker(
+        capture(
+            "worktree_action",
+            action="finish",
+            agent_id=agent_id,
+            base_branch_override=base_branch is not None,
+        )
+    )
 
-    success, message, info = await asyncio.to_thread(get_finish_info, app.sdk_cwd, base_branch=base_branch)
+    success, message, info = await asyncio.to_thread(
+        get_finish_info, app.sdk_cwd, base_branch=base_branch
+    )
     if not success or info is None:
         app.notify(message, severity="error")
         return
@@ -118,13 +122,18 @@ async def _handle_finish(app: "ChatApp", base_branch: str | None = None) -> None
     if info and info.needs_checkout:
         if app.agent_mgr:
             from claudechic.enums import AgentStatus
+
             busy_in_main = any(
-                a.cwd.resolve() == info.main_dir.resolve() and a.status == AgentStatus.BUSY
+                a.cwd.resolve() == info.main_dir.resolve()
+                and a.status == AgentStatus.BUSY
                 and a.id != agent.id
                 for a in app.agent_mgr
             )
             if busy_in_main:
-                app.notify("Cannot use main worktree for merge: another agent is working there", severity="error")
+                app.notify(
+                    "Cannot use main worktree for merge: another agent is working there",
+                    severity="error",
+                )
                 return
 
     # Phase 1: Pre-flight diagnosis
@@ -253,7 +262,9 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
             # Claude handles rebase
             app._show_thinking(agent.id)
             app._send_to_agent(
-                agent, get_rebase_finish_prompt(state.info), display_as="/worktree finish"
+                agent,
+                get_rebase_finish_prompt(state.info),
+                display_as="/worktree finish",
             )
             return
 
@@ -275,7 +286,9 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
             # Claude handles merge back no-ff into base branch
             app._show_thinking(agent.id)
             app._send_to_agent(
-                agent, get_no_ff_finish_prompt(state.info), display_as="/worktree finish"
+                agent,
+                get_no_ff_finish_prompt(state.info),
+                display_as="/worktree finish",
             )
             return
 

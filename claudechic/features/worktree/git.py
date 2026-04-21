@@ -309,7 +309,6 @@ def _expand_worktree_path(template: str, repo_name: str, feature_name: str) -> P
     return path.resolve()
 
 
-
 def start_worktree(
     feature_name: str, base: str | None = None
 ) -> tuple[bool, str, Path | None]:
@@ -327,7 +326,11 @@ def start_worktree(
             if not base.strip():
                 return False, "Invalid base branch: must not be empty", None
             if base.startswith("-"):
-                return False, f"Invalid base branch '{base}': must not start with '-'", None
+                return (
+                    False,
+                    f"Invalid base branch '{base}': must not start with '-'",
+                    None,
+                )
 
         main_wt = get_main_worktree()
 
@@ -440,7 +443,7 @@ def get_finish_info(
         # V4: Remote ref detection
         if base_branch.startswith("remotes/"):
             # "remotes/origin/release/1.0" -> strip "remotes/<remote>/" -> "release/1.0"
-            remainder = base_branch[len("remotes/"):]
+            remainder = base_branch[len("remotes/") :]
             suggestion = remainder.split("/", 1)[1] if "/" in remainder else remainder
             return (
                 False,
@@ -451,7 +454,7 @@ def get_finish_info(
             )
         if base_branch.startswith("origin/"):
             # "origin/release/1.0" -> strip "origin/" -> "release/1.0"
-            suggestion = base_branch[len("origin/"):]
+            suggestion = base_branch[len("origin/") :]
             return (
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
@@ -595,11 +598,14 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
     main_on_branch = True
     if WORKTREE_FINISH_MODE == "no-ff" and commits_ahead > 0:
         # Check if a merge is already in progress (MERGE_HEAD exists)
-        merge_in_progress = subprocess.run(
-            ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-            cwd=info.main_dir,
-            capture_output=True,
-        ).returncode == 0
+        merge_in_progress = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+                cwd=info.main_dir,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
         # If merge is in progress, main_dir is expected to be dirty (conflict resolution)
         if not merge_in_progress:
             result = subprocess.run(
@@ -777,7 +783,10 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
             text=True,
         )
         if checkout.returncode != 0:
-            return False, f"Failed to check out '{info.base_branch}': {checkout.stderr.strip()}"
+            return (
+                False,
+                f"Failed to check out '{info.base_branch}': {checkout.stderr.strip()}",
+            )
 
     # Do the merge in main dir
     result = subprocess.run(

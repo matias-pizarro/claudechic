@@ -373,8 +373,10 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
 
         if info and info.needs_checkout and _app and _app.agent_mgr:
             from claudechic.enums import AgentStatus
+
             busy_in_main = any(
-                a.cwd.resolve() == info.main_dir.resolve() and a.status == AgentStatus.BUSY
+                a.cwd.resolve() == info.main_dir.resolve()
+                and a.status == AgentStatus.BUSY
                 for a in _app.agent_mgr
                 if a != agent
             )
