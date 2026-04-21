@@ -2,13 +2,19 @@
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from claudechic.features.worktree.git import (
     FinishInfo,
+    FinishPhase,
+    FinishState,
     branch_exists,
+    fast_forward_merge,
+    get_finish_info,
     get_local_branches,
+    get_rebase_finish_prompt,
 )
 
 try:
@@ -58,6 +64,10 @@ class TestBranchExists:
 
     def test_does_not_match_remote_refs(self, git_repo: Path):
         assert branch_exists("origin/main", cwd=git_repo) is False
+
+    def test_rejects_revision_expressions(self, git_repo: Path):
+        """Revision expressions like main^{commit} should not match."""
+        assert branch_exists("main^{commit}", cwd=git_repo) is False
 
 
 class TestGetLocalBranches:
@@ -121,13 +131,6 @@ class TestFinishInfoFrozen:
             needs_checkout=True,
         )
         assert info.needs_checkout is True
-
-
-from unittest.mock import patch
-
-from claudechic.features.worktree.git import (
-    get_finish_info,
-)
 
 
 @pytest.fixture
@@ -338,9 +341,6 @@ class TestGetFinishInfoValidation:
         assert info.base_branch == "main"
 
 
-from claudechic.features.worktree.git import fast_forward_merge
-
-
 class TestFastForwardMergeCheckout:
     def test_no_checkout_when_needs_checkout_false(
         self, worktree_repo: tuple[Path, Path]
@@ -464,13 +464,6 @@ class TestFastForwardMergeCheckout:
             text=True,
         )
         assert result.stdout.strip() == "main"
-
-
-from claudechic.features.worktree.git import (
-    FinishPhase,
-    FinishState,
-    get_rebase_finish_prompt,
-)
 
 
 class TestGetFinishInfoRemotesPrefix:
@@ -610,6 +603,14 @@ class TestMCPArgExtraction:
 
     def test_empty_string_preserved_for_validation(self):
         args = {"base_branch": ""}
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
+        assert base_branch == ""
+
+    def test_whitespace_only_becomes_empty(self):
+        """Whitespace-only becomes empty string after strip, caught by V2."""
+        args = {"base_branch": "   "}
         base_branch = args.get("base_branch")
         if base_branch is not None:
             base_branch = base_branch.strip()

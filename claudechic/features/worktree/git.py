@@ -132,7 +132,16 @@ def branch_exists(branch: str, cwd: Path | None = None) -> bool:
 
     Uses refs/heads/ prefix to match only local branches,
     not tags, remote refs, or arbitrary objects.
+    Validates ref format first to reject revision expressions.
     """
+    # Reject invalid ref names (prevents revision expressions like main^{commit})
+    format_check = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        cwd=cwd,
+        capture_output=True,
+    )
+    if format_check.returncode != 0:
+        return False
     result = subprocess.run(
         ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
         cwd=cwd,
@@ -447,11 +456,12 @@ def get_finish_info(
             suggestion = remainder.split("/", 1)[1] if "/" in remainder else remainder
             if not suggestion:
                 suggestion = base_branch  # fallback: show the original input
+            quoted = shlex.quote(suggestion)
             return (
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
                 f"Specify a local branch (e.g., '{suggestion}'). "
-                f"Run 'git checkout {suggestion}' to create a local branch first.",
+                f"Run 'git checkout -- {quoted}' to create a local branch first.",
                 None,
             )
         if base_branch.startswith("origin/"):
@@ -459,11 +469,12 @@ def get_finish_info(
             suggestion = base_branch[len("origin/") :]
             if not suggestion:
                 suggestion = base_branch  # fallback: show the original input
+            quoted = shlex.quote(suggestion)
             return (
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
                 f"Specify a local branch (e.g., '{suggestion}'). "
-                f"Run 'git checkout {suggestion}' to create a local branch first.",
+                f"Run 'git checkout -- {quoted}' to create a local branch first.",
                 None,
             )
 
