@@ -381,18 +381,18 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
         if not success or info is None:
             return _error_response(message or "Failed to get finish info")
 
-        if info and info.needs_checkout and _app and _app.agent_mgr:
+        if info and _app and _app.agent_mgr:
             from claudechic.enums import AgentStatus
 
-            busy_in_main = any(
+            busy_in_target = any(
                 a.cwd.resolve() == info.main_dir.resolve()
                 and a.status == AgentStatus.BUSY
                 for a in _app.agent_mgr
                 if a != agent
             )
-            if busy_in_main:
+            if busy_in_target:
                 return _error_response(
-                    f"Cannot use main worktree for merge: another agent is working there. "
+                    f"Cannot merge into target worktree: another agent is working there. "
                     f"Wait for it to finish or create a worktree for '{info.base_branch}'."
                 )
 

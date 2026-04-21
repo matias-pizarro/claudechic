@@ -545,6 +545,20 @@ def get_finish_info(
                     "Cannot use main worktree for merge: a rebase is in progress.",
                     None,
                 )
+            # Check for detached HEAD (rollback requires a named branch)
+            current_branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=main_wt_path,
+                capture_output=True,
+                text=True,
+            )
+            if not current_branch.stdout.strip():
+                return (
+                    False,
+                    "Cannot use main worktree for merge: it is in detached HEAD state. "
+                    f"Check out a branch first or create a worktree for '{base_branch}'.",
+                    None,
+                )
             parent_dir = main_wt_path
             needs_checkout = True
     else:

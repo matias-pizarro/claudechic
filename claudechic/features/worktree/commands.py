@@ -119,22 +119,21 @@ async def _handle_finish(app: "ChatApp", base_branch: str | None = None) -> None
         app.notify(message, severity="error")
         return
 
-    if info and info.needs_checkout:
-        if app.agent_mgr:
-            from claudechic.enums import AgentStatus
+    if app.agent_mgr:
+        from claudechic.enums import AgentStatus
 
-            busy_in_main = any(
-                a.cwd.resolve() == info.main_dir.resolve()
-                and a.status == AgentStatus.BUSY
-                and a.id != agent.id
-                for a in app.agent_mgr
+        busy_in_target = any(
+            a.cwd.resolve() == info.main_dir.resolve()
+            and a.status == AgentStatus.BUSY
+            and a.id != agent.id
+            for a in app.agent_mgr
+        )
+        if busy_in_target:
+            app.notify(
+                "Cannot merge into target worktree: another agent is working there",
+                severity="error",
             )
-            if busy_in_main:
-                app.notify(
-                    "Cannot use main worktree for merge: another agent is working there",
-                    severity="error",
-                )
-                return
+            return
 
     # Phase 1: Pre-flight diagnosis
     status = await asyncio.to_thread(diagnose_worktree, info)
