@@ -749,11 +749,35 @@ def needs_rebase(info: FinishInfo) -> bool:
 def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
     """Perform a fast-forward merge when no rebase is needed.
 
+    When info.needs_checkout is True, checks out base_branch in main_dir
+    before merging and rolls back to the original branch on failure.
+
     Returns (success, error_message).
     """
     # Check for uncommitted changes first
     if has_uncommitted_changes(info.worktree_dir):
         return False, "Uncommitted changes in worktree"
+
+    original_branch = None
+    if info.needs_checkout:
+        # Record original branch for rollback
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=info.main_dir,
+            capture_output=True,
+            text=True,
+        )
+        original_branch = result.stdout.strip() if result.returncode == 0 else None
+
+        # Checkout target branch
+        checkout = subprocess.run(
+            ["git", "checkout", info.base_branch],
+            cwd=info.main_dir,
+            capture_output=True,
+            text=True,
+        )
+        if checkout.returncode != 0:
+            return False, f"Failed to check out '{info.base_branch}': {checkout.stderr.strip()}"
 
     # Do the merge in main dir
     result = subprocess.run(
@@ -763,6 +787,14 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
         text=True,
     )
     if result.returncode != 0:
+        # Rollback: restore original branch on merge failure
+        if original_branch:
+            subprocess.run(
+                ["git", "checkout", original_branch],
+                cwd=info.main_dir,
+                capture_output=True,
+                text=True,
+            )
         return False, result.stderr.strip()
 
     return True, ""

@@ -275,3 +275,80 @@ class TestGetFinishInfoValidation:
         assert ok is True
         assert info is not None
         assert info.base_branch == "main"
+
+
+from claudechic.features.worktree.git import fast_forward_merge
+
+
+class TestFastForwardMergeCheckout:
+    def test_no_checkout_when_needs_checkout_false(self, worktree_repo: tuple[Path, Path]):
+        """Existing behavior: no checkout when needs_checkout=False."""
+        main_dir, feature_dir = worktree_repo
+        # Make a commit on feature branch
+        (feature_dir / "new.txt").write_text("new")
+        subprocess.run(["git", "add", "."], cwd=feature_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "feat"], cwd=feature_dir, capture_output=True, check=True)
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="main",
+            worktree_dir=feature_dir,
+            main_dir=main_dir,
+            needs_checkout=False,
+        )
+        ok, err = fast_forward_merge(info)
+        assert ok is True
+
+    def test_checkout_when_needs_checkout_true(self, worktree_repo: tuple[Path, Path]):
+        """When needs_checkout=True, checkout target branch before merge."""
+        main_dir, feature_dir = worktree_repo
+        # Create a target branch at same commit as main
+        subprocess.run(["git", "branch", "release-1.0"], cwd=main_dir, capture_output=True, check=True)
+        # Make a commit on feature branch
+        (feature_dir / "new.txt").write_text("new")
+        subprocess.run(["git", "add", "."], cwd=feature_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "feat"], cwd=feature_dir, capture_output=True, check=True)
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="release-1.0",
+            worktree_dir=feature_dir,
+            main_dir=main_dir,
+            needs_checkout=True,
+        )
+        ok, err = fast_forward_merge(info)
+        assert ok is True
+        # Verify main_dir is now on release-1.0
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=main_dir, capture_output=True, text=True,
+        )
+        assert result.stdout.strip() == "release-1.0"
+
+    def test_rollback_on_merge_failure(self, worktree_repo: tuple[Path, Path]):
+        """When needs_checkout=True and merge fails, restore original branch."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(["git", "branch", "release-1.0"], cwd=main_dir, capture_output=True, check=True)
+        # Make a divergent commit on release-1.0 so ff-only fails
+        subprocess.run(["git", "checkout", "release-1.0"], cwd=main_dir, capture_output=True, check=True)
+        (main_dir / "release-change.txt").write_text("release")
+        subprocess.run(["git", "add", "."], cwd=main_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "release diverge"], cwd=main_dir, capture_output=True, check=True)
+        subprocess.run(["git", "checkout", "main"], cwd=main_dir, capture_output=True, check=True)
+        # Make a commit on feature branch (diverged from release-1.0)
+        (feature_dir / "feat-change.txt").write_text("feat")
+        subprocess.run(["git", "add", "."], cwd=feature_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "feat change"], cwd=feature_dir, capture_output=True, check=True)
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="release-1.0",
+            worktree_dir=feature_dir,
+            main_dir=main_dir,
+            needs_checkout=True,
+        )
+        ok, err = fast_forward_merge(info)
+        assert ok is False
+        # Verify main_dir was rolled back to original branch
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=main_dir, capture_output=True, text=True,
+        )
+        assert result.stdout.strip() == "main"
