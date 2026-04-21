@@ -253,7 +253,10 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
                 app._send_to_agent(
                     agent,
                     f"Fast-forward merge failed: {error}\n\n"
-                    + get_rebase_finish_prompt(state.info),
+                    + get_rebase_finish_prompt(
+                        state.info,
+                        is_non_ancestor=not state.status.can_fast_forward,
+                    ),
                     display_as="/worktree finish",
                 )
             return
@@ -263,7 +266,10 @@ async def _run_resolution(app: "ChatApp", agent: "Agent") -> None:
             app._show_thinking(agent.id)
             app._send_to_agent(
                 agent,
-                get_rebase_finish_prompt(state.info),
+                get_rebase_finish_prompt(
+                    state.info,
+                    is_non_ancestor=not state.status.can_fast_forward,
+                ),
                 display_as="/worktree finish",
             )
             return

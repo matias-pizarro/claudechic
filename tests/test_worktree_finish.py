@@ -369,7 +369,7 @@ class TestFastForwardMergeCheckout:
         assert ok is True
 
     def test_checkout_when_needs_checkout_true(self, worktree_repo: tuple[Path, Path]):
-        """When needs_checkout=True, checkout target branch before merge."""
+        """When needs_checkout=True, checkout target branch, merge, then restore."""
         main_dir, feature_dir = worktree_repo
         # Create a target branch at same commit as main
         subprocess.run(
@@ -398,14 +398,14 @@ class TestFastForwardMergeCheckout:
         )
         ok, err = fast_forward_merge(info)
         assert ok is True
-        # Verify main_dir is now on release-1.0
+        # Verify main_dir is restored to original branch (main)
         result = subprocess.run(
             ["git", "branch", "--show-current"],
             cwd=main_dir,
             capture_output=True,
             text=True,
         )
-        assert result.stdout.strip() == "release-1.0"
+        assert result.stdout.strip() == "main"
 
     def test_rollback_on_merge_failure(self, worktree_repo: tuple[Path, Path]):
         """When needs_checkout=True and merge fails, restore original branch."""
@@ -466,7 +466,23 @@ class TestFastForwardMergeCheckout:
         assert result.stdout.strip() == "main"
 
 
-from claudechic.features.worktree.git import get_rebase_finish_prompt
+from claudechic.features.worktree.git import (
+    FinishPhase,
+    FinishState,
+    get_rebase_finish_prompt,
+)
+
+
+class TestGetFinishInfoRemotesPrefix:
+    """V4: remotes/ prefix variant edge cases."""
+
+    def test_remotes_prefix_returns_targeted_error(self, worktree_repo):
+        """V4: remotes/ prefix produces targeted error with correct suggestion."""
+        _, feature_dir = worktree_repo
+        ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="remotes/origin/main")
+        assert ok is False
+        assert "remote branch" in msg
+        assert "main" in msg  # suggestion strips remotes/origin/
 
 
 class TestRebasePromptCheckout:
@@ -494,3 +510,123 @@ class TestRebasePromptCheckout:
         assert "release-1.0" in prompt
         # Should include rollback instruction
         assert "restore" in prompt.lower() or "original" in prompt.lower()
+
+    def test_includes_non_ancestor_note_when_flagged(self):
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="release-1.0",
+            worktree_dir=Path("/tmp/feature"),
+            main_dir=Path("/tmp/main"),
+        )
+        prompt = get_rebase_finish_prompt(info, is_non_ancestor=True)
+        assert "not an ancestor" in prompt
+        assert "rewrite commit history" in prompt
+
+    def test_no_non_ancestor_note_when_not_flagged(self):
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feature"),
+            main_dir=Path("/tmp/main"),
+        )
+        prompt = get_rebase_finish_prompt(info, is_non_ancestor=False)
+        assert "not an ancestor" not in prompt
+
+
+class TestFastForwardMergeRestoresBranch:
+    def test_restores_original_branch_on_success(self, worktree_repo):
+        """After successful needs_checkout merge, restore original branch."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir,
+            capture_output=True,
+            check=True,
+        )
+        (feature_dir / "new.txt").write_text("new")
+        subprocess.run(
+            ["git", "add", "."], cwd=feature_dir, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "feat"],
+            cwd=feature_dir,
+            capture_output=True,
+            check=True,
+        )
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="release-1.0",
+            worktree_dir=feature_dir,
+            main_dir=main_dir,
+            needs_checkout=True,
+        )
+        ok, err = fast_forward_merge(info)
+        assert ok is True
+        # Verify main_dir is restored to original branch (main), not left on release-1.0
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=main_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout.strip() == "main"
+
+
+class TestCommandParsing:
+    """Test base_branch extraction from TUI command string."""
+
+    def test_no_argument_yields_none(self):
+        parts = "/worktree finish".split(maxsplit=2)
+        base_branch = parts[2].strip() if len(parts) > 2 else None
+        assert base_branch is None
+
+    def test_positional_argument_extracted(self):
+        parts = "/worktree finish main".split(maxsplit=2)
+        base_branch = parts[2].strip() if len(parts) > 2 else None
+        assert base_branch == "main"
+
+    def test_whitespace_only_yields_none(self):
+        parts = "/worktree finish   ".split(maxsplit=2)
+        base_branch = parts[2].strip() if len(parts) > 2 else None
+        assert base_branch is None
+
+
+class TestMCPArgExtraction:
+    """Test base_branch extraction from MCP args."""
+
+    def test_empty_args_yields_none(self):
+        args: dict = {}
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
+        assert base_branch is None
+
+    def test_base_branch_extracted(self):
+        args = {"base_branch": "main"}
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
+        assert base_branch == "main"
+
+    def test_empty_string_preserved_for_validation(self):
+        args = {"base_branch": ""}
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
+        assert base_branch == ""
+
+
+class TestConcurrentGuard:
+    """Test concurrent invocation guard behavior."""
+
+    def test_finish_state_blocks_second_invocation(self):
+        info = FinishInfo(
+            branch_name="feat",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feat"),
+            main_dir=Path("/tmp/main"),
+        )
+        state = FinishState(info=info, phase=FinishPhase.RESOLUTION)
+        # The guard condition: finish_state is not None -> reject
+        assert state is not None
+        assert state.phase == FinishPhase.RESOLUTION

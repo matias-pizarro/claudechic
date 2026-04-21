@@ -445,6 +445,8 @@ def get_finish_info(
             # "remotes/origin/release/1.0" -> strip "remotes/<remote>/" -> "release/1.0"
             remainder = base_branch[len("remotes/") :]
             suggestion = remainder.split("/", 1)[1] if "/" in remainder else remainder
+            if not suggestion:
+                suggestion = base_branch  # fallback: show the original input
             return (
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
@@ -455,6 +457,8 @@ def get_finish_info(
         if base_branch.startswith("origin/"):
             # "origin/release/1.0" -> strip "origin/" -> "release/1.0"
             suggestion = base_branch[len("origin/") :]
+            if not suggestion:
+                suggestion = base_branch  # fallback: show the original input
             return (
                 False,
                 f"'{base_branch}' appears to be a remote branch. "
@@ -806,14 +810,27 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
             )
         return False, result.stderr.strip()
 
+    # Restore original branch after successful merge
+    if original_branch:
+        subprocess.run(
+            ["git", "checkout", original_branch],
+            cwd=info.main_dir,
+            capture_output=True,
+            text=True,
+        )
+
     return True, ""
 
 
-def get_rebase_finish_prompt(info: FinishInfo) -> str:
+def get_rebase_finish_prompt(info: FinishInfo, is_non_ancestor: bool = False) -> str:
     """Generate the prompt for Claude to rebase and merge a feature branch."""
     main_dir = shlex.quote(str(info.main_dir))
     branch = shlex.quote(info.branch_name)
     base = shlex.quote(info.base_branch)
+
+    non_ancestor_note = ""
+    if is_non_ancestor:
+        non_ancestor_note = f"\nNote: {info.base_branch} is not an ancestor of {info.branch_name}. Rebasing will rewrite commit history.\n"
 
     if info.needs_checkout:
         return f"""Rebase and merge this feature branch:
@@ -822,7 +839,7 @@ Branch: {info.branch_name}
 Base branch: {info.base_branch}
 Worktree dir: {info.worktree_dir}
 Main dir: {info.main_dir}
-
+{non_ancestor_note}
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
 2. Record the current branch in the main dir for rollback:
@@ -843,7 +860,7 @@ Branch: {info.branch_name}
 Base branch: {info.base_branch}
 Worktree dir: {info.worktree_dir}
 Main dir: {info.main_dir}
-
+{non_ancestor_note}
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
 2. Rebase {info.branch_name} onto the LOCAL {info.base_branch} branch (do NOT fetch from remote):
