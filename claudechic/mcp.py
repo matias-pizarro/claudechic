@@ -349,10 +349,6 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
             return _error_response("App not initialized")
         _track_mcp_tool("finish_worktree")
 
-        base_branch = args.get("base_branch")
-        if base_branch is not None:
-            base_branch = base_branch.strip()
-
         agent = _app.agent_mgr.active
         if agent is None:
             return _error_response("No active agent")
@@ -363,8 +359,22 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
                 "Use this tool only from a worktree agent."
             )
 
+        # Allow re-entry when in RESOLUTION phase (agent was told to call again
+        # after committing, rebasing, etc.) but block truly concurrent new starts.
         if agent.finish_state is not None:
-            return _error_response("A finish operation is already in progress.")
+            if agent.finish_state.phase == FinishPhase.RESOLUTION:
+                # Expected re-invocation: re-diagnose and continue
+                info = agent.finish_state.info
+                status = diagnose_worktree(info)
+                agent.finish_state.status = status
+                return await _process_finish_resolution(agent, info, status)
+            if agent.finish_state.phase == FinishPhase.CLEANUP:
+                return _error_response("A cleanup operation is already in progress.")
+
+        # Extract optional base_branch (strip whitespace but preserve empty for V2 validation)
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
 
         # Get finish info
         success, message, info = get_finish_info(agent.cwd, base_branch=base_branch)
@@ -440,16 +450,18 @@ async def _process_finish_resolution(
             success, error = fast_forward_merge(info)
             if success:
                 return await _do_cleanup(agent, info)
-            # Fast-forward failed, fall through to rebase
+            # Fast-forward failed, fall through to rebase (non-ancestor by definition)
             return _text_response(
                 f"Fast-forward merge failed: {error}\n\n"
-                + get_rebase_finish_prompt(info)
+                + get_rebase_finish_prompt(info, is_non_ancestor=True)
                 + "\n\nAfter completing, call finish_worktree again."
             )
 
         if action == ResolutionAction.REBASE:
             return _text_response(
-                get_rebase_finish_prompt(info)
+                get_rebase_finish_prompt(
+                    info, is_non_ancestor=not status.can_fast_forward
+                )
                 + "\n\nAfter completing the rebase and merge, call finish_worktree again."
             )
 
