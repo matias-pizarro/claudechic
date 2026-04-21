@@ -352,3 +352,33 @@ class TestFastForwardMergeCheckout:
             cwd=main_dir, capture_output=True, text=True,
         )
         assert result.stdout.strip() == "main"
+
+
+from claudechic.features.worktree.git import get_rebase_finish_prompt
+
+
+class TestRebasePromptCheckout:
+    def test_no_checkout_step_when_needs_checkout_false(self):
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="main",
+            worktree_dir=Path("/tmp/feature"),
+            main_dir=Path("/tmp/main"),
+            needs_checkout=False,
+        )
+        prompt = get_rebase_finish_prompt(info)
+        assert "git checkout" not in prompt
+
+    def test_includes_checkout_step_when_needs_checkout_true(self):
+        info = FinishInfo(
+            branch_name="feature",
+            base_branch="release-1.0",
+            worktree_dir=Path("/tmp/feature"),
+            main_dir=Path("/tmp/main"),
+            needs_checkout=True,
+        )
+        prompt = get_rebase_finish_prompt(info)
+        assert "git checkout" in prompt
+        assert "release-1.0" in prompt
+        # Should include rollback instruction
+        assert "restore" in prompt.lower() or "original" in prompt.lower()

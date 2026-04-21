@@ -805,6 +805,29 @@ def get_rebase_finish_prompt(info: FinishInfo) -> str:
     main_dir = shlex.quote(str(info.main_dir))
     branch = shlex.quote(info.branch_name)
     base = shlex.quote(info.base_branch)
+
+    if info.needs_checkout:
+        return f"""Rebase and merge this feature branch:
+
+Branch: {info.branch_name}
+Base branch: {info.base_branch}
+Worktree dir: {info.worktree_dir}
+Main dir: {info.main_dir}
+
+Steps:
+1. Check for uncommitted changes in the worktree (fail if any)
+2. Record the current branch in the main dir for rollback:
+   cd {main_dir} && git branch --show-current
+3. Rebase {info.branch_name} onto the LOCAL {info.base_branch} branch (do NOT fetch from remote):
+   git rebase {base}
+4. In the main dir ({info.main_dir}), check out the target branch and merge:
+   cd {main_dir} && git checkout {base} && git merge {branch}
+5. If the merge fails, restore the original branch:
+   cd {main_dir} && git checkout <original_branch_from_step_2>
+
+Do NOT remove the worktree or delete the branch - the app will handle cleanup.
+Do NOT interact with remotes (no fetch, no pull, no push)."""
+
     return f"""Rebase and merge this feature branch:
 
 Branch: {info.branch_name}
