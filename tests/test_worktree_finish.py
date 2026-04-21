@@ -1,5 +1,6 @@
 """Tests for parametrized base branch in /worktree finish."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -93,3 +94,184 @@ class TestFinishInfoFrozen:
             needs_checkout=True,
         )
         assert info.needs_checkout is True
+
+
+from unittest.mock import patch
+
+from claudechic.features.worktree.git import (
+    WorktreeInfo,
+    get_finish_info,
+    list_worktrees,
+)
+
+
+@pytest.fixture
+def worktree_repo(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Create a git repo with main + feature worktree for finish testing.
+
+    Changes CWD to the feature worktree so list_worktrees() finds the right repo.
+
+    Returns (main_dir, feature_dir).
+    """
+    main_dir = git_repo
+    # Use a sibling dir named after the git_repo dir to avoid collisions
+    feature_dir = git_repo.parent / f"{git_repo.name}-feature-wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "feature", str(feature_dir)],
+        cwd=main_dir, capture_output=True, check=True,
+    )
+    monkeypatch.chdir(feature_dir)
+    return main_dir, feature_dir
+
+
+class TestGetFinishInfoValidation:
+    """Test validation rules V2-V7 in get_finish_info()."""
+
+    def test_none_base_branch_uses_auto_detect(self, worktree_repo: tuple[Path, Path]):
+        """V1: None triggers auto-detection (existing behavior)."""
+        _, feature_dir = worktree_repo
+        ok, msg, info = get_finish_info(cwd=feature_dir, base_branch=None)
+        assert ok is True
+        assert info is not None
+        assert info.base_branch == "main"  # auto-detected
+
+    def test_empty_string_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V2: Empty string is rejected."""
+        _, feature_dir = worktree_repo
+        ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="")
+        assert ok is False
+        assert "must not be empty" in msg
+
+    def test_dash_prefix_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V3: Branch name starting with '-' is rejected."""
+        _, feature_dir = worktree_repo
+        ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="-mybranch")
+        assert ok is False
+        assert "must not start with '-'" in msg
+
+    def test_remote_ref_returns_targeted_error(self, worktree_repo: tuple[Path, Path]):
+        """V4: Remote ref produces targeted error with suggestion."""
+        _, feature_dir = worktree_repo
+        ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="origin/main")
+        assert ok is False
+        assert "remote branch" in msg
+        assert "main" in msg  # suggestion
+
+    def test_nonexistent_branch_returns_error_with_list(self, worktree_repo: tuple[Path, Path]):
+        """V5: Non-existent branch produces error with branch list."""
+        _, feature_dir = worktree_repo
+        ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="no-such-branch")
+        assert ok is False
+        assert "does not exist" in msg
+        assert "main" in msg  # listed as available branch
+
+    def test_self_merge_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V6: Cannot merge branch into itself."""
+        _, feature_dir = worktree_repo
+        ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="feature")
+        assert ok is False
+        assert "into itself" in msg
+
+    def test_valid_branch_with_worktree_succeeds(self, worktree_repo: tuple[Path, Path]):
+        """Valid override with active worktree -> success."""
+        _, feature_dir = worktree_repo
+        ok, msg, info = get_finish_info(cwd=feature_dir, base_branch="main")
+        assert ok is True
+        assert info is not None
+        assert info.base_branch == "main"
+        assert info.needs_checkout is False
+
+    def test_valid_branch_no_worktree_rebase_mode(self, worktree_repo: tuple[Path, Path]):
+        """V7b: No worktree in rebase mode -> fallback to main, needs_checkout=True."""
+        main_dir, feature_dir = worktree_repo
+        # Create a branch that has no worktree
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+            ok, msg, info = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+        assert ok is True
+        assert info is not None
+        assert info.base_branch == "release-1.0"
+        assert info.needs_checkout is True
+
+    def test_valid_branch_no_worktree_noff_mode_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V7: No worktree in no-ff mode -> error."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "no-ff"):
+            ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+        assert ok is False
+        assert "no worktree is checked out" in msg
+
+    def test_dirty_main_worktree_rebase_fallback_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V7b preflight: Main worktree dirty -> error."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        # Make main dirty
+        (main_dir / "dirty.txt").write_text("dirty")
+        with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+            ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+        assert ok is False
+        assert "uncommitted changes" in msg
+
+    def test_mid_merge_main_worktree_rebase_fallback_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V7b preflight: Main worktree in mid-merge -> error."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        # Simulate MERGE_HEAD by creating the ref (use absolute path)
+        git_dir_abs = main_dir / ".git"
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=main_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        merge_head_path = git_dir_abs / "MERGE_HEAD"
+        merge_head_path.write_text(head_sha)
+        try:
+            with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+                ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+            assert ok is False
+            assert "merge is in progress" in msg
+        finally:
+            merge_head_path.unlink(missing_ok=True)
+
+    def test_mid_rebase_main_worktree_rebase_fallback_returns_error(self, worktree_repo: tuple[Path, Path]):
+        """V7b preflight: Main worktree in mid-rebase -> error."""
+        main_dir, feature_dir = worktree_repo
+        subprocess.run(
+            ["git", "branch", "release-1.0"],
+            cwd=main_dir, capture_output=True, check=True,
+        )
+        # Simulate REBASE_HEAD (use absolute path)
+        git_dir_abs = main_dir / ".git"
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=main_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        rebase_head_path = git_dir_abs / "REBASE_HEAD"
+        rebase_head_path.write_text(head_sha)
+        try:
+            with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+                ok, msg, _ = get_finish_info(cwd=feature_dir, base_branch="release-1.0")
+            assert ok is False
+            assert "rebase is in progress" in msg
+        finally:
+            rebase_head_path.unlink(missing_ok=True)
+
+    def test_whitespace_stripped_at_extraction(self, worktree_repo: tuple[Path, Path]):
+        """Whitespace-padded branch name is stripped."""
+        _, feature_dir = worktree_repo
+        ok, msg, info = get_finish_info(cwd=feature_dir, base_branch="  main  ")
+        assert ok is True
+        assert info is not None
+        assert info.base_branch == "main"
