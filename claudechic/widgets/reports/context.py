@@ -5,27 +5,42 @@ from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import Static
 
+from claudechic.formatting import DEFAULT_CONTEXT_WINDOW
+
 
 def parse_context_markdown(content: str) -> dict:
-    """Parse context markdown into structured data."""
+    """Parse context markdown into structured data.
+
+    ``tokens_total`` comes from the rendered markdown's ``**Tokens:**`` line
+    (whatever Claude Code reports for the active model, including the 1M
+    beta window for Opus 4.7). Only falls back to ``DEFAULT_CONTEXT_WINDOW``
+    if that line is missing from the markdown.
+    """
+    # Parse model line
+    model = ""
+    model_match = re.search(r"\*\*Model:\*\*\s*(\S+)", content)
+    if model_match:
+        model = model_match.group(1)
+
     data = {
-        "model": "",
+        "model": model,
         "tokens_used": 0,
-        "tokens_total": 200_000,
+        "tokens_total": DEFAULT_CONTEXT_WINDOW,
         "categories": [],
     }
 
-    # Parse model line: **Model:** claude-opus-4-5-20251101
-    model_match = re.search(r"\*\*Model:\*\*\s*(\S+)", content)
-    if model_match:
-        data["model"] = model_match.group(1)
-
-    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%)
-    tokens_match = re.search(r"\*\*Tokens:\*\*\s*([\d.]+)k?\s*/\s*([\d.]+)k", content)
+    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%) or 184.2k / 1.0M or 950 / 1000000
+    tokens_match = re.search(
+        r"\*\*Tokens:\*\*\s*([\d.]+)(k|M)?\s*/\s*([\d.]+)(k|M)?", content
+    )
     if tokens_match:
-        used_str, total_str = tokens_match.groups()
-        data["tokens_used"] = int(float(used_str) * 1000)
-        data["tokens_total"] = int(float(total_str) * 1000)
+        used_str, used_unit, total_str, total_unit = tokens_match.groups()
+        used_mult = 1_000_000 if used_unit == "M" else (1000 if used_unit == "k" else 1)
+        total_mult = (
+            1_000_000 if total_unit == "M" else (1000 if total_unit == "k" else 1)
+        )
+        data["tokens_used"] = int(float(used_str) * used_mult)
+        data["tokens_total"] = int(float(total_str) * total_mult)
 
     # Parse category rows from markdown table
     # | System prompt | 2.9k | 1.5% |
@@ -171,8 +186,8 @@ class ContextReport(Widget):
 
         data = self.data
 
-        # Header: model · usage
-        model_short = data["model"].replace("claude-", "").replace("-20251101", "")
+        # Header: model · usage (strip claude- prefix and any trailing -YYYYMMDD date)
+        model_short = re.sub(r"-\d{8}$", "", data["model"].replace("claude-", ""))
         used_k = data["tokens_used"] / 1000
         total_k = data["tokens_total"] / 1000
         pct = (

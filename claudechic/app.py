@@ -45,7 +45,6 @@ from claudechic.messages import (
 )
 from claudechic.sessions import (
     find_session_by_prefix,
-    get_context_from_session,
     get_plan_path_for_session,
     get_recent_sessions,
 )
@@ -59,9 +58,10 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
-from claudechic.formatting import MAX_CONTEXT_TOKENS, parse_context_size, strip_ansi
+from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, parse_context_size, strip_ansi
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
+from claudechic.formatting import trim_model_name
 from claudechic.history import append_to_history
 from claudechic.widgets import (
     ContextBar,
@@ -95,10 +95,11 @@ from claudechic.widgets import (
 from claudechic.widgets.layout.footer import (
     PermissionModeLabel,
     ModelLabel,
+    EffortLabel,
     StatusFooter,
     get_git_branch,
 )
-from claudechic.widgets.prompts import ModelPrompt
+from claudechic.widgets.prompts import EffortPrompt, ModelPrompt
 from claudechic.errors import setup_logging  # noqa: F401 - used at startup
 from claudechic.errors import set_notify_callback as set_log_notify_callback
 from claudechic.profiling import profile
@@ -516,8 +517,11 @@ class ChatApp(App):
         # Centrally strip terminal escape sequences so no notification path
         # can inject OSC 52 (clipboard), OSC 8 (hyperlink), title changes, etc.
         super().notify(
-            strip_ansi(message), title=strip_ansi(title),
-            severity=severity, timeout=timeout, markup=markup
+            strip_ansi(message),
+            title=strip_ansi(title),
+            severity=severity,
+            timeout=timeout,
+            markup=markup,
         )
 
     async def _replace_client(self, options: ClaudeAgentOptions) -> None:
@@ -695,6 +699,7 @@ class ChatApp(App):
         resume: str | None = None,
         agent_name: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
     ) -> ClaudeAgentOptions:
         """Create SDK options with common settings.
 
@@ -719,6 +724,7 @@ class ChatApp(App):
             cwd=cwd,
             resume=resume,
             model=model,
+            effort=effort,  # type: ignore[arg-type]  # SDK Literal lags CLI (missing "xhigh")
             mcp_servers={"chic": create_chic_server(caller_name=agent_name)},
             include_partial_messages=True,
             stderr=self._handle_sdk_stderr,
@@ -861,7 +867,11 @@ class ChatApp(App):
 
         # Connect the agent to SDK
         options = self._make_options(
-            cwd=agent.cwd, resume=resume, agent_name=agent.name, model=agent.model
+            cwd=agent.cwd,
+            resume=resume,
+            agent_name=agent.name,
+            model=agent.model,
+            effort=agent.effort,
         )
         try:
             await agent.connect(options, resume=resume)
@@ -908,6 +918,7 @@ class ChatApp(App):
                     # Update footer with current agent's model
                     agent = self._agent
                     self._update_footer_model(agent.model if agent else None)
+                    self.status_footer.effort = (agent.effort if agent else None) or ""
         except Exception as e:
             log.warning(f"Failed to fetch SDK commands: {e}")
         self._refresh_dynamic_completions()
@@ -1048,43 +1059,39 @@ class ChatApp(App):
 
     @work(group="refresh_context", exclusive=True)
     async def refresh_context(self) -> None:
-        """Update context bar and agent tokens from SDK or session file."""
+        """Update context bar from live SDK context usage.
+
+        Uses ``ClaudeSDKClient.get_context_usage()``, the same data source
+        Claude Code's ``/context`` command uses, so the bar always reflects
+        the active model's window (including the 1M beta for Opus 4.7).
+        """
         agent = self._agent
-        if not agent or not agent.session_id:
+        if not agent or not agent.client:
             self.context_bar.tokens = 0
             return
-        # Try SDK API first (gives both tokens and max_tokens)
-        # get_context_usage() requires claude-agent-sdk >= 0.1.55
-        if agent.client and hasattr(agent.client, "get_context_usage"):
-            try:
-                usage = await agent.client.get_context_usage()
-                if usage:
-                    tokens = usage.get("totalTokens", 0)
-                    raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens", 0)
-                    if raw_max and raw_max > 0:
-                        agent.update_context(tokens, raw_max)
-                    else:
-                        agent.update_context(tokens)
-                        log.debug(
-                            "refresh_context: no max_tokens in response, keys=%s",
-                            list(usage.keys()),
-                        )
-                    self.context_bar.tokens = agent.tokens
-                    self.context_bar.max_tokens = agent.max_tokens
-                    self._update_sidebar_agent_context(agent)
-                    self.call_after_refresh(self.status_footer.refresh_cwd_label)
-                    return
-                log.warning("refresh_context: get_context_usage returned empty/None")
-            except Exception:
-                log.exception("refresh_context: get_context_usage failed")
-        # Fallback: read from session file (works before SDK is fully connected)
-        tokens = await get_context_from_session(agent.session_id, cwd=agent.cwd)
-        if tokens is not None:
-            agent.update_context(tokens)
-            self.context_bar.tokens = agent.tokens
-            self.context_bar.max_tokens = agent.max_tokens
-            self._update_sidebar_agent_context(agent)
-            self.call_after_refresh(self.status_footer.refresh_cwd_label)
+        try:
+            usage = await agent.client.get_context_usage()
+        except Exception as e:
+            log.debug(f"get_context_usage failed: {e}")
+            return
+        if not isinstance(usage, dict):
+            return
+        tokens = usage.get("totalTokens", 0)
+        if not isinstance(tokens, int):
+            tokens = 0
+        raw_max = usage.get("rawMaxTokens") or usage.get("maxTokens")
+        max_tokens = raw_max if isinstance(raw_max, int) and raw_max > 0 else None
+        # Update agent for prompt injection (use agent's own max_tokens as
+        # fallback, not the shared context_bar which may reflect another agent)
+        effective_max = max_tokens or agent.max_tokens
+        agent.update_context(tokens, effective_max)
+        # Update UI bar (always sync max from agent state so switching
+        # agents doesn't leave a stale max from the previous agent/model)
+        self.context_bar.max_tokens = effective_max
+        self.context_bar.tokens = tokens
+        # Keep sidebar and footer in sync
+        self._update_sidebar_agent_context(agent)
+        self.call_after_refresh(self.status_footer.refresh_cwd_label)
 
     def _send_initial_prompt(self) -> None:
         """Send the initial prompt from CLI args."""
@@ -1963,6 +1970,7 @@ class ChatApp(App):
                     resume=resume_id,
                     agent_name=agent.name,
                     model=agent.model,
+                    effort=agent.effort,
                 )
             )
 
@@ -2106,6 +2114,12 @@ class ChatApp(App):
         """Handle model label press - open model selector."""
         self._handle_model_prompt()
 
+    def on_effort_label_effort_change_requested(
+        self, event: EffortLabel.EffortChangeRequested
+    ) -> None:
+        """Handle effort label press - open effort selector."""
+        self._handle_effort_prompt()
+
     def _close_sidebar_overlay(self) -> None:
         """Close sidebar overlay if open."""
         if self._sidebar_overlay_open:
@@ -2168,7 +2182,11 @@ class ChatApp(App):
         """Disconnect and reconnect an agent to reload its session."""
         await agent.disconnect()
         options = self._make_options(
-            cwd=agent.cwd, resume=session_id, agent_name=agent.name, model=agent.model
+            cwd=agent.cwd,
+            resume=session_id,
+            agent_name=agent.name,
+            model=agent.model,
+            effort=agent.effort,
         )
         await agent.connect(options, resume=session_id)
 
@@ -2186,7 +2204,10 @@ class ChatApp(App):
             self.status_footer.set_session_id(None)
         await agent.disconnect()
         options = self._make_options(
-            cwd=agent.cwd, agent_name=agent.name, model=agent.model
+            cwd=agent.cwd,
+            agent_name=agent.name,
+            model=agent.model,
+            effort=agent.effort,
         )
         await agent.connect(options)
         self.refresh_context()
@@ -2228,10 +2249,15 @@ class ChatApp(App):
         )
         self._update_footer_model(model)
         if agent.client:
+            session_id = agent.session_id
             self.notify(f"Switching to {model}...")
             await agent.disconnect()
             options = self._make_options(
-                cwd=agent.cwd, agent_name=agent.name, model=model
+                cwd=agent.cwd,
+                resume=session_id,
+                agent_name=agent.name,
+                model=model,
+                effort=agent.effort,
             )
             await agent.connect(options)
 
@@ -2260,6 +2286,64 @@ class ChatApp(App):
 
         if result and result != agent.model:
             self._set_agent_model(result)
+
+    @work(group="effort_switch", exclusive=True, exit_on_error=False)
+    async def _set_agent_effort(self, effort: str) -> None:
+        """Set effort for active agent and reconnect."""
+        agent = self._agent
+        if not agent:
+            self.notify("No active agent", severity="warning")
+            return
+        # "default" resets to SDK auto (None)
+        effective = None if effort == "default" else effort
+        if effective == agent.effort:
+            return
+        old_effort = agent.effort or "default"
+        agent.effort = effective
+        self.status_footer.effort = effective or ""
+        self.run_worker(
+            capture(
+                "effort_changed",
+                from_effort=old_effort,
+                to_effort=effort,
+                agent_id=agent.analytics_id,
+            )
+        )
+        if agent.client:
+            label = effort if effort != "default" else "auto"
+            session_id = agent.session_id
+            self.notify(f"Switching effort to {label}...")
+            await agent.disconnect()
+            options = self._make_options(
+                cwd=agent.cwd,
+                resume=session_id,
+                agent_name=agent.name,
+                model=agent.model,
+                effort=agent.effort,
+            )
+            await agent.connect(options)
+
+    @work(group="effort_prompt", exclusive=True, exit_on_error=False)
+    async def _handle_effort_prompt(self) -> None:
+        """Show effort selection prompt and handle result for active agent."""
+        from textual.containers import Center
+
+        agent = self._agent
+        if not agent:
+            self.notify("No active agent", severity="warning")
+            return
+
+        prompt = EffortPrompt(current_value=agent.effort)
+        container = Center(prompt, id="effort-modal")
+        self.mount(container)
+
+        try:
+            result = await prompt.wait()
+        finally:
+            container.remove()
+
+        if result and result != agent.effort:
+            self._set_agent_effort(result)
 
     # exclusive=False allows parallel agent creation (needed for plan-swarm).
     # Race on switch_to is acceptable - last created wins for active agent.
@@ -2323,14 +2407,16 @@ class ChatApp(App):
             # Reset footer if no agents left (close() switches otherwise)
             if not self.agent_mgr.agents:
                 self.status_footer.model = ""
+                self.status_footer.effort = ""
             return
         finally:
             # Always remove the connecting indicator
             if connecting_indicator:
                 connecting_indicator.remove()
 
-        # Update footer with connected agent's model
+        # Update footer with connected agent's model and effort
         self._update_footer_model(agent.model)
+        self.status_footer.effort = agent.effort or ""
 
         if resume_id:
             await self._load_and_display_history(resume_id, cwd=cwd)
@@ -2369,7 +2455,10 @@ class ChatApp(App):
             # Reconnect with fresh session (like /clear)
             await agent.disconnect()
             options = self._make_options(
-                cwd=agent.cwd, agent_name=agent.name, model=agent.model
+                cwd=agent.cwd,
+                agent_name=agent.name,
+                model=agent.model,
+                effort=agent.effort,
             )
             await agent.connect(options)
 
@@ -2596,6 +2685,7 @@ class ChatApp(App):
         # Update footer
         self.status_footer.permission_mode = new_agent.permission_mode
         self._update_footer_model(new_agent.model)
+        self.status_footer.effort = new_agent.effort or ""
 
         # Update todo panel and context
         self.todo_panel.update_todos(new_agent.todos)
@@ -3036,7 +3126,9 @@ class ChatApp(App):
         """Update footer to show agent's model."""
         if not self._available_models:
             # No model info yet - show raw value or empty
-            self.status_footer.model = model.capitalize() if model else ""
+            self.status_footer.model = (
+                trim_model_name(model.capitalize()) if model else ""
+            )
             return
         # Find matching model, or default if model is None
         active = self._available_models[0]
@@ -3052,12 +3144,12 @@ class ChatApp(App):
         model_name = (
             desc.split("·")[0].strip() if "·" in desc else active.get("displayName", "")
         )
-        self.status_footer.model = model_name
+        self.status_footer.model = trim_model_name(model_name)
 
         # Set max_tokens from model display name as early fallback
         # (get_context_usage will override later with exact value)
         agent = self._agent
-        if agent and agent.max_tokens == MAX_CONTEXT_TOKENS:
+        if agent and agent.max_tokens == DEFAULT_CONTEXT_WINDOW:
             display_name = active.get("displayName", "")
             context_size = parse_context_size(display_name)
             if context_size is None:

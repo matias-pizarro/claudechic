@@ -3,12 +3,17 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from claudechic.formatting import (
+    extract_tool_search_names,
     format_cwd,
     format_tokens,
     parse_context_size,
     strip_ansi,
+    trim_model_name,
 )
+from claudechic.widgets.reports.context import parse_context_markdown
 
 
 class TestFormatTokens:
@@ -321,3 +326,85 @@ class TestStripAnsi:
         """Lone 8-bit C1 control bytes are stripped after regex pass."""
         # \x9d and \x9e are C1 string introducers without terminators
         assert strip_ansi("text\x9d\x9eend") == "textend"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("Opus 4.7 with 1M context", "Opus 4.7"),
+        ("Opus 4.7 With 1M Context", "Opus 4.7"),
+        ("Sonnet 4.5 (beta)", "Sonnet 4.5"),
+        ("Sonnet 4.5 (experimental)", "Sonnet 4.5"),
+        ("Haiku", "Haiku"),
+        ("Opus 4.7 with 1M context (beta)", "Opus 4.7"),
+        ("", ""),
+        ("   Opus 4.7   ", "Opus 4.7"),
+    ],
+)
+def test_trim_model_name(raw, expected):
+    assert trim_model_name(raw) == expected
+
+
+class TestParseContextMarkdown:
+    """Tests for parse_context_markdown() — token line parsing."""
+
+    def test_k_units(self):
+        """Standard k/k token line parses correctly."""
+        md = "**Model:** claude-sonnet-4-6\n**Tokens:** 18.4k / 200.0k (9%)"
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 18400
+        assert data["tokens_total"] == 200000
+        assert data["model"] == "claude-sonnet-4-6"
+
+    def test_m_total_unit(self):
+        """1M total token value parses correctly (Opus 4.7 beta window)."""
+        md = "**Model:** claude-opus-4-7\n**Tokens:** 184.2k / 1.0M (18%)"
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 184200
+        assert data["tokens_total"] == 1_000_000
+
+    def test_m_both_units(self):
+        """Both used and total in M units parse correctly."""
+        md = "**Model:** claude-opus-4-7\n**Tokens:** 0.5M / 1M"
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 500_000
+        assert data["tokens_total"] == 1_000_000
+
+    def test_used_no_unit_suffix(self):
+        """Used tokens without unit suffix (e.g. '950') default to raw value."""
+        md = "**Model:** claude-sonnet-4-6\n**Tokens:** 950 / 1.0M"
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 950
+        assert data["tokens_total"] == 1_000_000
+
+    def test_total_no_unit_suffix(self):
+        """Total tokens without unit suffix (e.g. '1000000') use raw value."""
+        md = "**Model:** claude-sonnet-4-6\n**Tokens:** 950 / 1000000"
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 950
+        assert data["tokens_total"] == 1_000_000
+
+    def test_no_tokens_line_uses_default(self):
+        """Missing tokens line falls back to DEFAULT_CONTEXT_WINDOW."""
+        md = "**Model:** claude-sonnet-4-6\nNo token info here."
+        data = parse_context_markdown(md)
+        assert data["tokens_used"] == 0
+        assert data["tokens_total"] == 200_000
+
+
+class TestExtractToolSearchNames:
+    """Tests for extract_tool_search_names() size guard."""
+
+    def test_normal_input(self):
+        """Valid tool_reference list returns names."""
+        content = [{"type": "tool_reference", "tool_name": "Read"}]
+        assert extract_tool_search_names(content) == ["Read"]
+
+    def test_oversized_string_returns_none(self):
+        """Strings exceeding 64 KB are rejected before literal_eval."""
+        big = "[{" + "x" * 70_000 + "}]"
+        assert extract_tool_search_names(big) is None
+
+    def test_non_list_string(self):
+        """Strings not starting with '[{' are rejected."""
+        assert extract_tool_search_names("just a string") is None

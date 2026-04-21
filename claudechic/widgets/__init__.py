@@ -55,6 +55,7 @@ from claudechic.widgets.layout import (
     SessionItem,
     PermissionModeLabel,
     ModelLabel,
+    EffortLabel,
     StatusFooter,
     IndicatorWidget,
     CPUBar,
@@ -84,6 +85,7 @@ from claudechic.widgets.prompts import (
     SelectionPrompt,
     QuestionPrompt,
     ModelPrompt,
+    EffortPrompt,
     WorktreePrompt,
     UncommittedChangesPrompt,
 )
@@ -134,6 +136,7 @@ __all__ = [
     "ClickableLabel",
     "PermissionModeLabel",
     "ModelLabel",
+    "EffortLabel",
     "StatusFooter",
     "IndicatorWidget",
     "CPUBar",
@@ -155,6 +158,7 @@ __all__ = [
     "SelectionPrompt",
     "QuestionPrompt",
     "ModelPrompt",
+    "EffortPrompt",
     "WorktreePrompt",
     "UncommittedChangesPrompt",
 ]

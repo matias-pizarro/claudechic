@@ -32,7 +32,8 @@ from claudechic.features.worktree.git import (
     finish_cleanup,
     get_cleanup_fix_prompt,
     get_finish_info,
-    get_finish_prompt,
+    get_no_ff_finish_prompt,
+    get_rebase_finish_prompt,
     start_worktree,
 )
 from claudechic.tasks import create_safe_task
@@ -180,7 +181,11 @@ def _make_spawn_worktree(caller_name: str | None = None):
 
     @tool(
         "spawn_worktree",
-        "Create a git worktree (feature branch) with a new agent. Useful for isolated feature development.",
+        "Create a git worktree (feature branch) with a new agent. Useful for "
+        "isolated feature development. The new branch is forked from "
+        "`base_branch` (e.g. 'main') resolved against the main worktree, so "
+        "sibling worktrees created in the same session do not stack on each "
+        "other.",
         {"name": str, "base_branch": str, "prompt": str},
     )
     async def spawn_worktree(args: dict[str, Any]) -> dict[str, Any]:
@@ -191,9 +196,14 @@ def _make_spawn_worktree(caller_name: str | None = None):
 
         name = args["name"]
         prompt = args.get("prompt")
+        # `base_branch` is required by the schema; MCP validation rejects
+        # calls that omit it.
+        base_branch = args["base_branch"]
 
-        # Create the worktree
-        success, message, wt_path = start_worktree(name)
+        # Create the worktree (start_worktree validates base_branch
+        # internally: rejects '-' prefixes and resolves against the
+        # main worktree with explicit cwd for deterministic ref lookup)
+        success, message, wt_path = start_worktree(name, base=base_branch)
         if not success or wt_path is None:
             return _error_response(f"Error creating worktree: {message}")
 
@@ -324,10 +334,15 @@ async def list_agents(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
 
 @tool(
     "finish_worktree",
-    "When you're done working in a worktree, call this to clean it up. Handles committing, rebasing onto the base branch, merging, and removing the worktree. Prefer this over manual git worktree commands.",
+    "When you're done working in a worktree, call this to clean it up. "
+    "Handles committing, merging (rebase or no-ff per config), and removing the worktree. "
+    "Prefer this over manual git worktree commands. "
+    "Optionally pass base_branch (string) to specify the target branch to merge into. "
+    "Must be a local branch name (not a remote ref like origin/main), must already exist, "
+    "and cannot be the current branch. If omitted, the target is auto-detected.",
     {},
 )
-async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
+async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
     """Start the worktree finish flow for the current agent."""
     try:
         if _app is None or _app.agent_mgr is None:
@@ -344,10 +359,49 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG0
                 "Use this tool only from a worktree agent."
             )
 
+        # Allow re-entry when in RESOLUTION phase (agent was told to call again
+        # after committing, rebasing, etc.) but block truly concurrent new starts.
+        if agent.finish_state is not None:
+            if agent.finish_state.phase == FinishPhase.RESOLUTION:
+                # Expected re-invocation: re-diagnose and continue
+                info = agent.finish_state.info
+                status = diagnose_worktree(info)
+                agent.finish_state.status = status
+                return await _process_finish_resolution(agent, info, status)
+            if agent.finish_state.phase == FinishPhase.CLEANUP:
+                # Expected re-invocation: Claude fixed the issue, retry cleanup
+                agent.finish_state.cleanup_attempts += 1
+                if agent.finish_state.cleanup_attempts >= 3:
+                    agent.finish_state = None
+                    return _error_response(
+                        "Cleanup failed after 3 attempts. Resolve manually."
+                    )
+                return await _do_cleanup(agent, agent.finish_state.info)
+
+        # Extract optional base_branch (strip whitespace but preserve empty for V2 validation)
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
+
         # Get finish info
-        success, message, info = get_finish_info(agent.cwd)
+        success, message, info = get_finish_info(agent.cwd, base_branch=base_branch)
         if not success or info is None:
             return _error_response(message or "Failed to get finish info")
+
+        if info and _app and _app.agent_mgr:
+            from claudechic.enums import AgentStatus
+
+            busy_in_target = any(
+                a.cwd.resolve() == info.main_dir.resolve()
+                and a.status == AgentStatus.BUSY
+                for a in _app.agent_mgr
+                if a != agent
+            )
+            if busy_in_target:
+                return _error_response(
+                    f"Cannot merge into target worktree: another agent is working there. "
+                    f"Wait for it to finish or create a worktree for '{info.base_branch}'."
+                )
 
         # Diagnose current state
         status = diagnose_worktree(info)
@@ -403,17 +457,37 @@ async def _process_finish_resolution(
             success, error = fast_forward_merge(info)
             if success:
                 return await _do_cleanup(agent, info)
-            # Fast-forward failed, fall through to rebase
+            # Fast-forward failed, fall through to rebase (non-ancestor by definition)
             return _text_response(
                 f"Fast-forward merge failed: {error}\n\n"
-                + get_finish_prompt(info)
+                + get_rebase_finish_prompt(info, is_non_ancestor=True)
                 + "\n\nAfter completing, call finish_worktree again."
             )
 
         if action == ResolutionAction.REBASE:
             return _text_response(
-                get_finish_prompt(info)
+                get_rebase_finish_prompt(
+                    info, is_non_ancestor=not status.can_fast_forward
+                )
                 + "\n\nAfter completing the rebase and merge, call finish_worktree again."
+            )
+
+        if action == ResolutionAction.MAIN_DIR_NOT_READY:
+            issues = []
+            if not status.main_dir_clean:
+                issues.append("has uncommitted changes")
+            if not status.main_dir_on_branch:
+                issues.append(f"is not on '{info.base_branch}'")
+            agent.finish_state = None
+            return _error_response(
+                f"Cannot merge: main worktree {' and '.join(issues)}. "
+                "Resolve manually and try again."
+            )
+
+        if action == ResolutionAction.NO_FF:
+            return _text_response(
+                get_no_ff_finish_prompt(info)
+                + "\n\nAfter completing the no-ff merge, call finish_worktree again."
             )
 
         # Unknown action

@@ -97,6 +97,7 @@ COMMANDS: list[tuple[str, str, list[str]]] = [
     ("/compactish", "Compact session to reduce context", []),
     ("/usage", "Show API rate limit usage", []),
     ("/model", "Change model", []),
+    ("/effort", "Change effort level (default/low/medium/high/xhigh/max)", []),
     ("/vim", "Toggle vi mode for input", []),
     ("/processes", "Show background processes", []),
     ("/reviews", "Show roborev reviews", []),
@@ -142,7 +143,7 @@ def get_help_commands() -> list[tuple[str, str]]:
         elif name == "/compactish":
             display_name = "/compactish [-n]"
         elif name == "/worktree":
-            display_name = "/worktree <name>"
+            display_name = "/worktree <name> | finish [branch]"
         elif name == "/reviews":
             display_name = "/reviews [job_id]"
         elif name == "/reviewer":
@@ -237,6 +238,25 @@ def handle_command(app: "ChatApp", prompt: str) -> bool:
                 )
             else:
                 app._set_agent_model(model)
+        return True
+
+    if cmd == "/effort" or cmd.startswith("/effort "):
+        from claudechic.widgets.prompts import EffortPrompt
+
+        _track_command(app, "effort")
+        parts = cmd.split(maxsplit=1)
+        if len(parts) == 1:
+            app._handle_effort_prompt()
+        else:
+            effort = parts[1].lower()
+            valid_efforts = [v for v, _ in EffortPrompt.OPTIONS]
+            if effort not in valid_efforts:
+                app.notify(
+                    f"Invalid effort '{effort}'. Use: {', '.join(valid_efforts)}",
+                    severity="error",
+                )
+            else:
+                app._set_agent_effort(effort)
         return True
 
     if cmd == "/exit":
@@ -371,6 +391,7 @@ SDK_PASSTHROUGH_COMMANDS = frozenset(
         "/compact",
         "/context",
         "/init",
+        "/ultrareview",  # Cloud-based parallel multi-agent review (Claude Code 2.1.111+)
     }
 )
 

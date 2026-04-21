@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -141,3 +142,35 @@ class TestTokenReminderPattern:
         text = "<system-reminder>14000/200000 tokens</system-reminder>\n\nhello"
         result = TOKEN_REMINDER_PATTERN.sub("", text)
         assert result == "hello"
+
+
+class TestSetPermissionMode:
+    """Tests for Agent.set_permission_mode() SDK interaction."""
+
+    @pytest.mark.asyncio
+    async def test_planswarm_sets_sdk_to_plan(self):
+        """planSwarm should set SDK to 'plan' mode, not skip the SDK call."""
+        agent = _make_agent()
+        agent.client = MagicMock()
+        agent.client.set_permission_mode = AsyncMock()
+        agent.session_id = "test-session"
+        agent.permission_mode = "default"
+
+        await agent.set_permission_mode("planSwarm")
+
+        assert agent.permission_mode == "planSwarm"
+        agent.client.set_permission_mode.assert_called_once_with("plan")
+
+    @pytest.mark.asyncio
+    async def test_regular_mode_sets_sdk_directly(self):
+        """Non-planSwarm modes pass through to SDK unchanged."""
+        agent = _make_agent()
+        agent.client = MagicMock()
+        agent.client.set_permission_mode = AsyncMock()
+        agent.session_id = "test-session"
+        agent.permission_mode = "default"
+
+        await agent.set_permission_mode("plan")
+
+        assert agent.permission_mode == "plan"
+        agent.client.set_permission_mode.assert_called_once_with("plan")

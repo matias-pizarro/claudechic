@@ -7,7 +7,7 @@ from textual.reactive import reactive
 from textual.widgets import Static
 from rich.text import Text
 
-from claudechic.formatting import MAX_CONTEXT_TOKENS, format_tokens
+from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, format_tokens
 from claudechic.profiling import profile, timed
 from claudechic.processes import BackgroundProcess
 
@@ -75,9 +75,9 @@ def _context_bar_color(pct: float) -> tuple[str, str, str]:
     fg is the main text color, fg_dim is a muted version for brackets.
     """
     # Anchor colors (R, G, B)
-    green = (0x11, 0x77, 0x33)    # #117733
-    orange = (0xCC, 0x77, 0x00)   # #CC7700
-    red = (0xCC, 0x33, 0x33)      # #CC3333
+    green = (0x11, 0x77, 0x33)  # #117733
+    orange = (0xCC, 0x77, 0x00)  # #CC7700
+    red = (0xCC, 0x33, 0x33)  # #CC3333
     crimson = (0x66, 0x11, 0x11)  # #661111
 
     if pct <= 0.30:
@@ -114,7 +114,7 @@ class ContextBar(IndicatorWidget):
     """Display context usage as a progress bar. Click to run /context."""
 
     tokens = reactive(0)
-    max_tokens = reactive(MAX_CONTEXT_TOKENS)
+    max_tokens = reactive(DEFAULT_CONTEXT_WINDOW)
 
     def render(self) -> RenderResult:
         pct = min(self.tokens / self.max_tokens, 1.0) if self.max_tokens else 0
