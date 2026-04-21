@@ -256,6 +256,13 @@ async for message in client.receive_response():
 
 Agent status indicators: ○ (idle), ● gray (busy), ● orange (needs input)
 
+### Worktree
+- `/worktree <branch>` - Create or switch to a git worktree
+- `/worktree finish` - Finish worktree and merge back to base branch
+- `/worktree finish [branch]` - Finish worktree (optionally specify target branch)
+- `/worktree cleanup` - Remove stale worktrees
+- `/worktree discard` - Discard current worktree entirely
+
 ### Session Management
 - `/resume` - Show session picker
 - `/resume <id>` - Resume specific session

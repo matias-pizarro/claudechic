@@ -1,4 +1,4 @@
-<!-- Generated: 2026-04-11 | Files scanned: 78 | Token estimate: ~700 -->
+<!-- Generated: 2026-04-21 | Files scanned: 82 | Token estimate: ~750 -->
 
 # Internal Dependencies
 
@@ -21,7 +21,20 @@ agent.py
   ├── enums.py ─── AgentStatus, PermissionChoice, ToolName
   ├── permissions.py ─── PermissionRequest
   ├── file_index.py ─── FileIndex
-  └── features/worktree/git.py ─── FinishState
+  └── features/worktree/git.py ─── FinishInfo(frozen), FinishState, FinishPhase
+
+features/worktree/git.py (pure git functions, no UI deps)
+  └── (subprocess only — no app/agent imports)
+
+features/worktree/commands.py
+  ├── features/worktree/git.py ─── FinishInfo, get_finish_info, diagnose_worktree, etc.
+  ├── enums.py ─── AgentStatus (lazy import for busy-agent check)
+  └── analytics.py ─── capture
+
+mcp.py
+  ├── features/worktree/git.py ─── FinishInfo, FinishPhase, get_finish_info, diagnose_worktree
+  ├── enums.py ─── AgentStatus (lazy import for busy-agent check)
+  └── config.py ─── CONFIG (experimental flag gate)
 
 sessions.py
   └── formatting.py ─── TOKEN_REMINDER_PATTERN
@@ -68,4 +81,5 @@ widgets/layout/sidebar.py
 | `MAX_CONTEXT_TOKENS` | `formatting.py:15` | `agent.py`, `indicators.py`, `sidebar.py`, `app.py` |
 | `TOKEN_REMINDER_PATTERN` | `formatting.py:22` | `agent.py`, `sessions.py` |
 | `ToolName` | `enums.py` | `agent.py`, `app.py`, `formatting.py`, `compact.py`, `tools.py` |
-| `AgentStatus` | `enums.py` | `agent.py`, `app.py`, `sidebar.py`, `chat_view.py` |
+| `AgentStatus` | `enums.py` | `agent.py`, `app.py`, `sidebar.py`, `chat_view.py`, `commands.py` (worktree), `mcp.py` |
+| `WORKTREE_FINISH_MODE` | `git.py:14` | `git.py` (diagnose, determine_resolution, get_finish_info) |

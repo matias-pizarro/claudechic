@@ -75,9 +75,9 @@ def _context_bar_color(pct: float) -> tuple[str, str, str]:
     fg is the main text color, fg_dim is a muted version for brackets.
     """
     # Anchor colors (R, G, B)
-    green = (0x11, 0x77, 0x33)    # #117733
-    orange = (0xCC, 0x77, 0x00)   # #CC7700
-    red = (0xCC, 0x33, 0x33)      # #CC3333
+    green = (0x11, 0x77, 0x33)  # #117733
+    orange = (0xCC, 0x77, 0x00)  # #CC7700
+    red = (0xCC, 0x33, 0x33)  # #CC3333
     crimson = (0x66, 0x11, 0x11)  # #661111
 
     if pct <= 0.30:

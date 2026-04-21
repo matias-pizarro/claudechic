@@ -49,7 +49,7 @@ class WorktreeInfo:
     is_main: bool
 
 
-@dataclass
+@dataclass(frozen=True)
 class FinishInfo:
     """Info needed to finish a worktree."""
 
@@ -57,6 +57,7 @@ class FinishInfo:
     base_branch: str
     worktree_dir: Path
     main_dir: Path
+    needs_checkout: bool = False  # True when main_dir needs git checkout before merge
 
 
 @dataclass
@@ -124,6 +125,47 @@ def is_git_repo() -> bool:
         text=True,
     )
     return result.returncode == 0
+
+
+def branch_exists(branch: str, cwd: Path | None = None) -> bool:
+    """Check if a local branch exists.
+
+    Uses refs/heads/ prefix to match only local branches,
+    not tags, remote refs, or arbitrary objects.
+    Validates ref format first to reject revision expressions.
+    """
+    # Reject invalid ref names (prevents revision expressions like main^{commit})
+    format_check = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        cwd=cwd,
+        capture_output=True,
+    )
+    if format_check.returncode != 0:
+        return False
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+        cwd=cwd,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def get_local_branches(
+    cwd: Path | None = None, exclude: str | None = None, limit: int = 5
+) -> list[str]:
+    """List local branch names, sorted alphabetically, excluding one branch."""
+    result = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    branches = sorted(line for line in result.stdout.strip().split("\n") if line)
+    if exclude:
+        branches = [b for b in branches if b != exclude]
+    return branches[:limit]
 
 
 def get_repo_name() -> str:
@@ -276,7 +318,6 @@ def _expand_worktree_path(template: str, repo_name: str, feature_name: str) -> P
     return path.resolve()
 
 
-
 def start_worktree(
     feature_name: str, base: str | None = None
 ) -> tuple[bool, str, Path | None]:
@@ -294,7 +335,11 @@ def start_worktree(
             if not base.strip():
                 return False, "Invalid base branch: must not be empty", None
             if base.startswith("-"):
-                return False, f"Invalid base branch '{base}': must not start with '-'", None
+                return (
+                    False,
+                    f"Invalid base branch '{base}': must not start with '-'",
+                    None,
+                )
 
         main_wt = get_main_worktree()
 
@@ -327,6 +372,21 @@ def start_worktree(
                 "Cannot resolve base ref: main worktree not found",
                 None,
             )
+
+        # Validate that base is an actual local branch (not a tag, SHA, or
+        # arbitrary revspec). branch_exists() uses check-ref-format + refs/heads/.
+        if base and not branch_exists(base, cwd=main_wt[0] if main_wt else None):
+            branches = get_local_branches(
+                cwd=main_wt[0] if main_wt else None, exclude=feature_name
+            )
+            branch_list = ", ".join(branches) if branches else "(none)"
+            return (
+                False,
+                f"Base branch '{base}' does not exist as a local branch. "
+                f"Local branches: {branch_list}",
+                None,
+            )
+
         base_ref = base or "HEAD"
         git_cwd: Path | None = main_wt[0] if base and main_wt else None
 
@@ -363,17 +423,16 @@ def start_worktree(
         return False, f"Error: {e}", None
 
 
-def get_finish_info(cwd: Path | None = None) -> tuple[bool, str, FinishInfo | None]:
+def get_finish_info(
+    cwd: Path | None = None, base_branch: str | None = None
+) -> tuple[bool, str, FinishInfo | None]:
     """Get info needed to finish a worktree.
 
     Args:
         cwd: Current working directory (SDK's cwd). If None, uses Path.cwd().
+        base_branch: Optional target branch override. If None, auto-detects.
 
     Returns (success, message, FinishInfo or None).
-
-    The base_branch is determined by finding which branch this worktree was
-    forked from, allowing nested worktrees to merge back to their parent
-    rather than always going to main.
     """
     if cwd is None:
         cwd = Path.cwd()
@@ -384,30 +443,159 @@ def get_finish_info(cwd: Path | None = None) -> tuple[bool, str, FinishInfo | No
     if current_wt is None or current_wt.is_main:
         return False, "Not in a feature worktree. Switch to a worktree first.", None
 
-    main_wt = get_main_worktree()
-    if main_wt is None:
+    # Find main worktree from the list we already have (avoid redundant list_worktrees())
+    main_wt_info = next((wt for wt in worktrees if wt.is_main), None)
+    if main_wt_info is None:
         return False, "Cannot find main worktree.", None
+    main_wt_path = main_wt_info.path
 
-    main_dir = main_wt[0]
+    # Strip whitespace at extraction time
+    if base_branch is not None:
+        base_branch = base_branch.strip()
 
-    # Find parent branch (handles nested worktrees)
-    parent_branch = get_parent_branch(current_wt.branch, cwd=cwd)
-    if parent_branch is None:
-        # Fallback to main branch
-        parent_branch = main_wt[1]
+    needs_checkout = False
 
-    # Find the directory for the parent branch
-    parent_wt = next((wt for wt in worktrees if wt.branch == parent_branch), None)
-    parent_dir = parent_wt.path if parent_wt else main_dir
+    if base_branch is not None:
+        # V2: Empty after strip
+        if not base_branch:
+            return False, "Branch name must not be empty", None
+
+        # V3: Starts with '-'
+        if base_branch.startswith("-"):
+            return False, "Branch name must not start with '-'", None
+
+        # V4: Remote ref detection
+        if base_branch.startswith("remotes/"):
+            # "remotes/origin/release/1.0" -> strip "remotes/<remote>/" -> "release/1.0"
+            remainder = base_branch[len("remotes/") :]
+            suggestion = remainder.split("/", 1)[1] if "/" in remainder else remainder
+            if not suggestion:
+                suggestion = base_branch  # fallback: show the original input
+            quoted = shlex.quote(suggestion)
+            return (
+                False,
+                f"'{base_branch}' appears to be a remote branch. "
+                f"Specify a local branch (e.g., '{suggestion}'). "
+                f"Run 'git checkout {quoted}' to create a local branch first.",
+                None,
+            )
+        if base_branch.startswith("origin/"):
+            # "origin/release/1.0" -> strip "origin/" -> "release/1.0"
+            suggestion = base_branch[len("origin/") :]
+            if not suggestion:
+                suggestion = base_branch  # fallback: show the original input
+            quoted = shlex.quote(suggestion)
+            return (
+                False,
+                f"'{base_branch}' appears to be a remote branch. "
+                f"Specify a local branch (e.g., '{suggestion}'). "
+                f"Run 'git checkout {quoted}' to create a local branch first.",
+                None,
+            )
+
+        # V5: Branch must exist
+        if not branch_exists(base_branch, cwd=cwd):
+            branches = get_local_branches(cwd=cwd, exclude=current_wt.branch)
+            branch_list = ", ".join(branches) if branches else "(none)"
+            return (
+                False,
+                f"Branch '{base_branch}' does not exist. Local branches: {branch_list}",
+                None,
+            )
+
+        # V6: Self-merge
+        if base_branch == current_wt.branch:
+            return False, f"Cannot merge branch '{base_branch}' into itself", None
+
+        # Resolve main_dir for the override
+        target_wt = next((wt for wt in worktrees if wt.branch == base_branch), None)
+        if target_wt:
+            parent_dir = target_wt.path
+            needs_checkout = False
+        elif WORKTREE_FINISH_MODE == "no-ff":
+            # V7: No-ff requires target to have a worktree
+            return (
+                False,
+                f"Cannot merge into '{base_branch}': no worktree is checked out "
+                f"to that branch. Create a worktree with '/worktree {base_branch}', "
+                f"or check out the branch in an existing worktree.",
+                None,
+            )
+        else:
+            # V7b: Rebase mode fallback -- preflight checks on main worktree
+            main_status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=main_wt_path,
+                capture_output=True,
+                text=True,
+            )
+            if main_status.stdout.strip():
+                return (
+                    False,
+                    "Cannot use main worktree for merge: it has uncommitted changes. "
+                    f"Clean it up first or create a worktree for '{base_branch}'.",
+                    None,
+                )
+            merge_head = subprocess.run(
+                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+                cwd=main_wt_path,
+                capture_output=True,
+                text=True,
+            )
+            if merge_head.returncode == 0:
+                return (
+                    False,
+                    "Cannot use main worktree for merge: a merge is in progress.",
+                    None,
+                )
+            rebase_head = subprocess.run(
+                ["git", "rev-parse", "--verify", "REBASE_HEAD"],
+                cwd=main_wt_path,
+                capture_output=True,
+                text=True,
+            )
+            if rebase_head.returncode == 0:
+                return (
+                    False,
+                    "Cannot use main worktree for merge: a rebase is in progress.",
+                    None,
+                )
+            # Check for detached HEAD (rollback requires a named branch)
+            current_branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=main_wt_path,
+                capture_output=True,
+                text=True,
+            )
+            if not current_branch.stdout.strip():
+                return (
+                    False,
+                    "Cannot use main worktree for merge: it is in detached HEAD state. "
+                    f"Check out a branch first or create a worktree for '{base_branch}'.",
+                    None,
+                )
+            parent_dir = main_wt_path
+            needs_checkout = True
+    else:
+        # Auto-detect parent branch (existing behavior, unchanged)
+        parent_branch = get_parent_branch(current_wt.branch, cwd=cwd)
+        if parent_branch is None:
+            parent_branch = main_wt_info.branch
+        base_branch = parent_branch
+
+        # Find the directory for the parent branch
+        parent_wt = next((wt for wt in worktrees if wt.branch == base_branch), None)
+        parent_dir = parent_wt.path if parent_wt else main_wt_path
 
     return (
         True,
         "Ready to finish worktree",
         FinishInfo(
             branch_name=current_wt.branch,
-            base_branch=parent_branch,
+            base_branch=base_branch,
             worktree_dir=current_wt.path,
             main_dir=parent_dir,
+            needs_checkout=needs_checkout,
         ),
     )
 
@@ -454,11 +642,14 @@ def diagnose_worktree(info: FinishInfo) -> WorktreeStatus:
     main_on_branch = True
     if WORKTREE_FINISH_MODE == "no-ff" and commits_ahead > 0:
         # Check if a merge is already in progress (MERGE_HEAD exists)
-        merge_in_progress = subprocess.run(
-            ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-            cwd=info.main_dir,
-            capture_output=True,
-        ).returncode == 0
+        merge_in_progress = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+                cwd=info.main_dir,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
         # If merge is in progress, main_dir is expected to be dirty (conflict resolution)
         if not merge_in_progress:
             result = subprocess.run(
@@ -608,11 +799,38 @@ def needs_rebase(info: FinishInfo) -> bool:
 def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
     """Perform a fast-forward merge when no rebase is needed.
 
+    When info.needs_checkout is True, checks out base_branch in main_dir
+    before merging and rolls back to the original branch on failure.
+
     Returns (success, error_message).
     """
     # Check for uncommitted changes first
     if has_uncommitted_changes(info.worktree_dir):
         return False, "Uncommitted changes in worktree"
+
+    original_branch = None
+    if info.needs_checkout:
+        # Record original branch for rollback
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=info.main_dir,
+            capture_output=True,
+            text=True,
+        )
+        original_branch = result.stdout.strip() if result.returncode == 0 else None
+
+        # Checkout target branch
+        checkout = subprocess.run(
+            ["git", "checkout", info.base_branch],
+            cwd=info.main_dir,
+            capture_output=True,
+            text=True,
+        )
+        if checkout.returncode != 0:
+            return (
+                False,
+                f"Failed to check out '{info.base_branch}': {checkout.stderr.strip()}",
+            )
 
     # Do the merge in main dir
     result = subprocess.run(
@@ -622,23 +840,69 @@ def fast_forward_merge(info: FinishInfo) -> tuple[bool, str]:
         text=True,
     )
     if result.returncode != 0:
+        # Rollback: restore original branch on merge failure
+        if original_branch:
+            subprocess.run(
+                ["git", "checkout", original_branch],
+                cwd=info.main_dir,
+                capture_output=True,
+                text=True,
+            )
         return False, result.stderr.strip()
+
+    # Restore original branch after successful merge
+    if original_branch:
+        subprocess.run(
+            ["git", "checkout", original_branch],
+            cwd=info.main_dir,
+            capture_output=True,
+            text=True,
+        )
 
     return True, ""
 
 
-def get_rebase_finish_prompt(info: FinishInfo) -> str:
+def get_rebase_finish_prompt(info: FinishInfo, is_non_ancestor: bool = False) -> str:
     """Generate the prompt for Claude to rebase and merge a feature branch."""
     main_dir = shlex.quote(str(info.main_dir))
     branch = shlex.quote(info.branch_name)
     base = shlex.quote(info.base_branch)
+
+    non_ancestor_note = ""
+    if is_non_ancestor:
+        non_ancestor_note = f"\nNote: {info.base_branch} is not an ancestor of {info.branch_name}. Rebasing will rewrite commit history.\n"
+
+    if info.needs_checkout:
+        return f"""Rebase and merge this feature branch:
+
+Branch: {info.branch_name}
+Base branch: {info.base_branch}
+Worktree dir: {info.worktree_dir}
+Main dir: {info.main_dir}
+{non_ancestor_note}
+Steps:
+1. Check for uncommitted changes in the worktree (fail if any)
+2. Record the current branch in the main dir for rollback:
+   cd {main_dir} && git branch --show-current
+3. Rebase {info.branch_name} onto the LOCAL {info.base_branch} branch (do NOT fetch from remote):
+   git rebase {base}
+4. In the main dir ({info.main_dir}), check out the target branch and merge:
+   cd {main_dir} && git checkout {base} && git merge {branch}
+5. If the merge fails, restore the original branch:
+   cd {main_dir} && git checkout <original_branch_from_step_2>
+6. After a successful merge, restore the original branch:
+   cd {main_dir} && git checkout <original_branch_from_step_2>
+
+Do NOT remove the worktree or delete the branch - the app will handle cleanup.
+Do NOT interact with remotes (no fetch, no pull, no push)."""
+
     return f"""Rebase and merge this feature branch:
 
 Branch: {info.branch_name}
 Base branch: {info.base_branch}
 Worktree dir: {info.worktree_dir}
 Main dir: {info.main_dir}
-
+{non_ancestor_note}
 Steps:
 1. Check for uncommitted changes in the worktree (fail if any)
 2. Rebase {info.branch_name} onto the LOCAL {info.base_branch} branch (do NOT fetch from remote):
