@@ -334,15 +334,24 @@ async def list_agents(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
 
 @tool(
     "finish_worktree",
-    "When you're done working in a worktree, call this to clean it up. Handles committing, merging (rebase or no-ff per config), and removing the worktree. Prefer this over manual git worktree commands.",
+    "When you're done working in a worktree, call this to clean it up. "
+    "Handles committing, merging (rebase or no-ff per config), and removing the worktree. "
+    "Prefer this over manual git worktree commands. "
+    "Optionally pass base_branch (string) to specify the target branch to merge into. "
+    "Must be a local branch name (not a remote ref like origin/main), must already exist, "
+    "and cannot be the current branch. If omitted, the target is auto-detected.",
     {},
 )
-async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
+async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:
     """Start the worktree finish flow for the current agent."""
     try:
         if _app is None or _app.agent_mgr is None:
             return _error_response("App not initialized")
         _track_mcp_tool("finish_worktree")
+
+        base_branch = args.get("base_branch")
+        if base_branch is not None:
+            base_branch = base_branch.strip()
 
         agent = _app.agent_mgr.active
         if agent is None:
@@ -354,10 +363,26 @@ async def finish_worktree(args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG0
                 "Use this tool only from a worktree agent."
             )
 
+        if agent.finish_state is not None:
+            return _error_response("A finish operation is already in progress.")
+
         # Get finish info
-        success, message, info = get_finish_info(agent.cwd)
+        success, message, info = get_finish_info(agent.cwd, base_branch=base_branch)
         if not success or info is None:
             return _error_response(message or "Failed to get finish info")
+
+        if info and info.needs_checkout and _app and _app.agent_mgr:
+            from claudechic.enums import AgentStatus
+            busy_in_main = any(
+                a.cwd.resolve() == info.main_dir.resolve() and a.status == AgentStatus.BUSY
+                for a in _app.agent_mgr
+                if a != agent
+            )
+            if busy_in_main:
+                return _error_response(
+                    f"Cannot use main worktree for merge: another agent is working there. "
+                    f"Wait for it to finish or create a worktree for '{info.base_branch}'."
+                )
 
         # Diagnose current state
         status = diagnose_worktree(info)
