@@ -126,6 +126,38 @@ def is_git_repo() -> bool:
     return result.returncode == 0
 
 
+def branch_exists(branch: str, cwd: Path | None = None) -> bool:
+    """Check if a local branch exists.
+
+    Uses refs/heads/ prefix to match only local branches,
+    not tags, remote refs, or arbitrary objects.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+        cwd=cwd,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def get_local_branches(
+    cwd: Path | None = None, exclude: str | None = None, limit: int = 5
+) -> list[str]:
+    """List local branch names, sorted alphabetically, excluding one branch."""
+    result = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    branches = sorted(line for line in result.stdout.strip().split("\n") if line)
+    if exclude:
+        branches = [b for b in branches if b != exclude]
+    return branches[:limit]
+
+
 def get_repo_name() -> str:
     """Get the current repository name."""
     result = subprocess.run(
