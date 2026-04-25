@@ -137,11 +137,30 @@ BaseToolWidget:hover {
     border-left: wide $panel-lighten-2;
 }
 
-/* Error messages - red, like user messages but indicating problems */
+/* Error messages - red, with a [×] close button for dismissal */
 ErrorMessage {
     border-left: thick $error;
     background: $error 10%;
     margin: 1 0 1 0;
+}
+
+/* Dismiss button floats top-right, subtle until hovered/focused */
+.error-dismiss {
+    dock: right;
+    width: 3;
+    height: 1;
+    text-align: center;
+    color: $text-muted;
+}
+
+.error-dismiss:hover {
+    color: $error;
+    text-style: bold;
+}
+
+.error-dismiss:focus {
+    color: $error;
+    text-style: bold reverse;
 }
 
 /* System info messages - muted, informational */
