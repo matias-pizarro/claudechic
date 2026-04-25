@@ -97,7 +97,13 @@ class ErrorDismiss(Static):
         parent = self.parent
         if isinstance(parent, ErrorMessage):
             self._dismissed = True
+            # Capture the scroll container before removal so we can
+            # refresh its layout afterward (fixes viewport height
+            # staying stuck after dismiss).
+            scroll_container = parent.parent
             parent.remove()
+            if scroll_container is not None:
+                scroll_container.refresh(layout=True)
 
     def on_click(self, event: Click) -> None:
         """Dismiss on left-click only; stop all clicks to prevent bubbling."""
