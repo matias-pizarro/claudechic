@@ -1212,6 +1212,19 @@ async def test_error_message_dismiss_via_keyboard():
 
 
 @pytest.mark.asyncio
+async def test_error_message_dismiss_via_space():
+    """Pressing Space on the focused dismiss button removes ErrorMessage."""
+    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
+    async with app.run_test() as pilot:
+        assert len(app.query(ErrorMessage)) == 1
+        app.query_one(ErrorDismiss).focus()
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        assert len(app.query(ErrorMessage)) == 0
+
+
+@pytest.mark.asyncio
 async def test_error_message_double_dismiss_is_safe():
     """Rapidly dismissing twice does not raise an exception."""
     app = WidgetTestApp(lambda: ErrorMessage("test failure"))
