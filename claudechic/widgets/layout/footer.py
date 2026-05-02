@@ -135,6 +135,8 @@ class StatusFooter(Static):
     # Maps permission_mode → (display text, active CSS class or None).
     # "default" gets no class and keeps plain styling. Adding a new mode
     # means one entry here; _MODE_CLASSES is derived below.
+    # NOTE: Full mode wiring also requires: Agent.PERMISSION_MODES (agent.py),
+    # action_cycle_permission_mode (app.py), and styles.tcss for the CSS class.
     _MODE_DISPLAY: dict[str, tuple[str, str | None]] = {
         "default": ("Auto-edit: off", None),
         "planSwarm": ("Plan swarm", "plan-swarm-mode"),
@@ -307,6 +309,8 @@ class StatusFooter(Static):
         if label := self.query_one_optional(
             "#permission-mode-label", PermissionModeLabel
         ):
+            if value not in self._MODE_DISPLAY:
+                log.warning("Unknown permission mode '%s', displaying as default", value)
             text, active = self._MODE_DISPLAY.get(value, self._MODE_DISPLAY["default"])
             label.update(text)
             for cls in self._MODE_CLASSES:
