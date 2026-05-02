@@ -1,4 +1,10 @@
-"""Tests for StatusFooter permission mode display."""
+"""Tests for StatusFooter permission mode display.
+
+These are characterization tests for the table-driven permission mode refactoring,
+exercising mode-specific behavior in isolation. For broader widget composition and
+rendering tests (including StatusFooter within larger widget hierarchies), see
+tests/test_widgets.py.
+"""
 
 from __future__ import annotations
 
