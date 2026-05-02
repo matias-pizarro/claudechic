@@ -246,7 +246,7 @@ No behavioral change — all characterization tests pass."
 - **Assumption:** The SDK has no plan-mode blocking beyond what our `can_use_tool` callback provides. This is based on: (a) the base version (0.4.19) shipped without the mapping and had no reported enforcement issues, (b) upstream 0.4.20 also skips the call.
 - **Mandatory post-merge restoration (Task 5):** Immediately after the merge sequence completes, a follow-up commit MUST restore `planSwarm→"plan"` SDK mapping. This restores callback + SDK + hook enforcement (hook fires on SDK-reported "plan"). See Task 5 and Phase B acceptance criteria.
 
-**Why the tradeoff is acceptable:** The base version (released as 0.4.19) never sent "plan" to the SDK for planSwarm. convergence_target added it as belt-and-suspenders. Removing it returns to shipped behavior while adding LOCAL enforcement (Steps 5 + 5b) that the base never had. Net effect: enforcement is maintained through a different (local) mechanism.
+**Why the tradeoff is acceptable:** The base version (released as 0.4.19) never sent "plan" to the SDK for planSwarm. convergence_target added it as belt-and-suspenders. Removing it returns to shipped behavior while adding LOCAL enforcement (Step 5, verified by Step 5b tests) that the base never had. Net effect: enforcement is maintained through a different (local) mechanism.
 
 ### Phase: RED (write tests matching upstream's skip pattern)
 
