@@ -605,6 +605,7 @@ Expected merge residuals:
 **Files:**
 - Modify: `claudechic/agent.py:set_permission_mode`
 - Modify: `tests/test_agent.py:TestSetPermissionMode` (rename test + update assertion)
+- Modify: `tests/test_app_ui.py` (add `test_plan_mode_hook_blocks_bash`)
 
 This task runs AFTER the merge sequence (Tasks 3) completes. It restores the `planSwarm→"plan"` SDK mapping that was temporarily removed for merge convergence.
 
@@ -634,20 +635,46 @@ In `tests/test_agent.py`, update `test_planswarm_skips_sdk_call` → rename to `
 agent.client.set_permission_mode.assert_called_once_with("plan")
 ```
 
-- [ ] **Step 3: Run tests + pre-commit**
+- [ ] **Step 3: Add automated hook test to `tests/test_app_ui.py`**
+
+```python
+@pytest.mark.asyncio
+async def test_plan_mode_hook_blocks_bash():
+    """Verify PreToolUse hook blocks Bash when SDK reports permission_mode='plan'.
+
+    This proves the full enforcement chain after planSwarm→'plan' restoration:
+    SDK reports 'plan' → hook fires → blocks mutating tools.
+    """
+    from claudechic.app import ChatApp
+
+    app = ChatApp()
+    hooks = app._plan_mode_hooks()
+    hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+    # Hook receives SDK-reported permission_mode="plan" and tool_name="Bash"
+    result = await hook_fn(
+        {"permission_mode": "plan", "tool_name": "Bash", "tool_input": {"command": "echo test"}},
+        None, None,
+    )
+    assert result.get("decision") == "block"
+    assert "not available in plan mode" in result.get("reason", "")
+```
+
+- [ ] **Step 4: Run tests + pre-commit**
 
 Run: `uv run python -m pytest tests/ -n auto -q && uv run pre-commit run --all-files`
 Expected: All pass
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add claudechic/agent.py tests/test_agent.py
-git commit -m "feat: restore planSwarm→plan SDK mapping (post-merge)
+git add claudechic/agent.py tests/test_agent.py tests/test_app_ui.py
+git commit -m "feat: restore planSwarm→plan SDK mapping + add hook test (post-merge)
 
-Re-adds the SDK-level plan-mode enforcement for planSwarm that was
-temporarily removed for merge convergence. All three enforcement
-layers now active: _handle_permission + PreToolUse hook + SDK."
+Re-adds SDK-level plan-mode enforcement for planSwarm. Adds automated
+test proving the PreToolUse hook blocks Bash when permission_mode='plan'.
+All enforcement layers verified: _handle_permission (TestPlanSwarmEnforcement),
+SDK mapping (test_planswarm_sends_plan_to_sdk), hook (test_plan_mode_hook_blocks_bash)."
 ```
 
 **Gate:** Release tagging is blocked until this commit lands.
@@ -669,12 +696,12 @@ layers now active: _handle_permission + PreToolUse hook + SDK."
 ### Phase B: Post-Merge Final State (Task 5, gates release)
 
 8. Task 5 restores `planSwarm→"plan"` SDK mapping in `set_permission_mode`
-9. Enforcement verified by tests: `test_planswarm_sends_plan_to_sdk` (SDK mapping) + `TestPlanSwarmEnforcement` (local `_handle_permission` blocking)
+9. All enforcement layers verified by automated tests:
+   - SDK mapping: `test_planswarm_sends_plan_to_sdk` (verifies SDK receives "plan")
+   - Local blocking: `TestPlanSwarmEnforcement` (verifies `_handle_permission` denies Bash for planSwarm)
+   - Hook blocking: `test_plan_mode_hook_blocks_bash` (verifies PreToolUse hook denies Bash when SDK reports "plan")
 10. `uv run python -m pytest tests/ -n auto -q` passes after restoration
-11. **Release gate:** `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode::test_planswarm_sends_plan_to_sdk tests/test_agent.py::TestPlanSwarmEnforcement -v` — all pass. Task 4's tag is an internal alignment marker, not a release tag.
-
-**Why no separate hook verification is needed:** The `_plan_mode_hooks` PreToolUse hook is NOT modified by this plan. It already blocks mutating tools when SDK-reported `permission_mode == "plan"` — this is existing shipped behavior for regular plan mode. After Task 5 restores the SDK mapping (planSwarm sends "plan" to SDK), the hook fires on "plan" exactly as it does today. The tests prove the chain: `test_planswarm_sends_plan_to_sdk` verifies SDK receives "plan" → existing hook behavior (unchanged, already working) blocks mutating tools. Adding a dedicated hook test is tracked as a follow-up coverage improvement.
+11. **Release gate:** `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode::test_planswarm_sends_plan_to_sdk tests/test_agent.py::TestPlanSwarmEnforcement tests/test_app_ui.py::test_plan_mode_hook_blocks_bash -v` — all pass. Task 4's tag is an internal alignment marker, not a release tag.
 
 **Out of scope (pre-existing issues, not introduced by this plan):**
 - The plan-file allow-path uses `str.startswith(plans_dir)` which permits sibling directories (e.g., `~/.claude/plans-evil/`). This is a pre-existing security concern in both `_handle_permission` and `_plan_mode_hooks`. **Operational restriction:** The pre-merge branch state should not be used for release or deployed for normal planSwarm usage until Task 5 restores full defense-in-depth. Fixing the path validation is tracked as a separate security task.
-- `_plan_mode_hooks` PreToolUse hook is not independently tested by this plan. It already correctly handles `"plan"` mode and will fire after Task 5 restores the SDK mapping. Adding dedicated hook tests is a follow-up coverage improvement.
