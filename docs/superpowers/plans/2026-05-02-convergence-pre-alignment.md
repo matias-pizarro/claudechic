@@ -669,9 +669,10 @@ layers now active: _handle_permission + PreToolUse hook + SDK."
 ### Phase B: Post-Merge Final State (Task 5, gates release)
 
 8. Task 5 restores `planSwarm→"plan"` SDK mapping in `set_permission_mode`
-9. Enforcement verified by tests: `test_planswarm_sends_plan_to_sdk` (SDK mapping) + `TestPlanSwarmEnforcement` (local `_handle_permission` blocking). PreToolUse hook fires on SDK-reported "plan" mode (no code change needed — already handles "plan").
-10. `uv run python -m pytest tests/ -n auto -q` passes after restoration
-11. **Release gate (human-enforced):** No release tag until Task 5 lands. Verify: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode::test_planswarm_sends_plan_to_sdk tests/test_agent.py::TestPlanSwarmEnforcement -v` — all pass. Task 4's tag is an internal alignment marker, not a release tag.
+9. Enforcement verified by tests: `test_planswarm_sends_plan_to_sdk` (SDK mapping) + `TestPlanSwarmEnforcement` (local `_handle_permission` blocking)
+10. **Manual hook verification (after Task 5):** Launch app (`uv run claudechic`), enter `/plan-swarm`, attempt any tool use (e.g., type a message). Confirm tool is blocked or planSwarm orchestration intercepts correctly. This verifies the full path: SDK receives "plan" → PreToolUse hook fires on "plan" → blocks mutating tools. (The hook already handles "plan" — no code change needed.)
+11. `uv run python -m pytest tests/ -n auto -q` passes after restoration
+12. **Release gate (human-enforced):** No release tag until Task 5 lands and manual hook verification passes. Verify automated: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode::test_planswarm_sends_plan_to_sdk tests/test_agent.py::TestPlanSwarmEnforcement -v`. Task 4's tag is an internal alignment marker, not a release tag.
 
 **Out of scope (pre-existing issues, not introduced by this plan):**
 - The plan-file allow-path uses `str.startswith(plans_dir)` which permits sibling directories (e.g., `~/.claude/plans-evil/`). This is a pre-existing security concern in both `_handle_permission` and `_plan_mode_hooks`. **Operational restriction:** The pre-merge branch state should not be used for release or deployed for normal planSwarm usage until Task 5 restores full defense-in-depth. Fixing the path validation is tracked as a separate security task.
