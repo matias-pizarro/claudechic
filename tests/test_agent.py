@@ -8,6 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from claudechic.agent import Agent
+import json
+from unittest.mock import patch
+
+from claudechic.agent import get_default_permission_mode, to_ui_permission_mode
+
 
 
 def _make_agent() -> Agent:
@@ -148,8 +153,8 @@ class TestSetPermissionMode:
     """Tests for Agent.set_permission_mode() SDK interaction."""
 
     @pytest.mark.asyncio
-    async def test_planswarm_sets_sdk_to_plan(self):
-        """planSwarm should set SDK to 'plan' mode, not skip the SDK call."""
+    async def test_planswarm_sends_plan_to_sdk(self):
+        """planSwarm maps to 'plan' for SDK enforcement (server-side blocking)."""
         agent = _make_agent()
         agent.client = MagicMock()
         agent.client.set_permission_mode = AsyncMock()
@@ -162,8 +167,8 @@ class TestSetPermissionMode:
         agent.client.set_permission_mode.assert_called_once_with("plan")
 
     @pytest.mark.asyncio
-    async def test_regular_mode_sets_sdk_directly(self):
-        """Non-planSwarm modes pass through to SDK unchanged."""
+    async def test_regular_mode_passes_through_to_sdk(self):
+        """Non-planSwarm modes pass through to SDK via cast(PermissionMode)."""
         agent = _make_agent()
         agent.client = MagicMock()
         agent.client.set_permission_mode = AsyncMock()
@@ -174,3 +179,196 @@ class TestSetPermissionMode:
 
         assert agent.permission_mode == "plan"
         agent.client.set_permission_mode.assert_called_once_with("plan")
+
+    @pytest.mark.asyncio
+    async def test_no_sdk_call_when_disconnected(self):
+        """No SDK call if client is None or session_id is missing."""
+        agent = _make_agent()
+        agent.client = None
+        agent.permission_mode = "default"
+
+        await agent.set_permission_mode("acceptEdits")
+
+        assert agent.permission_mode == "acceptEdits"
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_calls_ensure_plan_path(self):
+        """Entering plan mode triggers plan path fetch."""
+        agent = _make_agent()
+        agent.client = MagicMock()
+        agent.client.set_permission_mode = AsyncMock()
+        agent.session_id = "test-session"
+        agent.permission_mode = "default"
+        agent.ensure_plan_path = AsyncMock()
+
+        await agent.set_permission_mode("plan")
+
+        agent.ensure_plan_path.assert_called_once()
+
+
+class TestPlanSwarmEnforcement:
+    """Verify planSwarm blocks mutating tools via _handle_permission."""
+
+    @pytest.mark.asyncio
+    async def test_planswarm_blocks_mutating_tools(self):
+        """planSwarm must deny Edit/Write/Bash just like plan mode."""
+        from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Bash", {"command": "rm -rf /"}, context
+        )
+
+        assert isinstance(result, PermissionResultDeny)
+
+    @pytest.mark.asyncio
+    async def test_planswarm_allows_write_to_plan_file(self):
+        """planSwarm allows Write/Edit to ~/.claude/plans/ (same as plan mode)."""
+        from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
+        from pathlib import Path
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        plans_dir = str(Path.home() / ".claude" / "plans")
+        plan_file = f"{plans_dir}/test-plan.md"
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Write", {"file_path": plan_file, "content": "# Plan"}, context
+        )
+
+        assert isinstance(result, PermissionResultAllow)
+
+    @pytest.mark.asyncio
+    async def test_planswarm_blocks_sibling_prefix_path(self):
+        """Sibling directories sharing a prefix must NOT pass the plan-file check."""
+        from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
+        from pathlib import Path
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        # ~/.claude/plans-evil/ shares the prefix but is NOT inside ~/.claude/plans/
+        evil_path = str(Path.home() / ".claude" / "plans-evil" / "payload.md")
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Write", {"file_path": evil_path, "content": "malicious"}, context
+        )
+
+        assert isinstance(result, PermissionResultDeny)
+
+
+class TestPlanModeHooks:
+    """Verify the PreToolUse hook path (app.py _plan_mode_hooks) blocks correctly."""
+
+    @pytest.mark.asyncio
+    async def test_hook_blocks_bash_in_plan_mode(self):
+        """PreToolUse hook blocks Bash when SDK reports permission_mode='plan'."""
+        from claudechic.app import ChatApp
+
+        app = ChatApp()
+        hooks = app._plan_mode_hooks()
+        hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+        result = await hook_fn(
+            {"permission_mode": "plan", "tool_name": "Bash", "tool_input": {"command": "echo"}},
+            None, None,
+        )
+        assert result.get("decision") == "block"
+
+    @pytest.mark.asyncio
+    async def test_hook_allows_write_to_plan_file(self):
+        """PreToolUse hook allows Write to ~/.claude/plans/ in plan mode."""
+        from claudechic.app import ChatApp
+        from pathlib import Path
+
+        app = ChatApp()
+        hooks = app._plan_mode_hooks()
+        hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+        plan_file = str(Path.home() / ".claude" / "plans" / "test.md")
+        result = await hook_fn(
+            {"permission_mode": "plan", "tool_name": "Write", "tool_input": {"file_path": plan_file}},
+            None, None,
+        )
+        assert result == {}  # Empty dict = allow
+
+    @pytest.mark.asyncio
+    async def test_hook_blocks_sibling_prefix_path(self):
+        """PreToolUse hook blocks Write to sibling directories sharing plans prefix."""
+        from claudechic.app import ChatApp
+        from pathlib import Path
+
+        app = ChatApp()
+        hooks = app._plan_mode_hooks()
+        hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+        evil_path = str(Path.home() / ".claude" / "plans-evil" / "payload.md")
+        result = await hook_fn(
+            {"permission_mode": "plan", "tool_name": "Write", "tool_input": {"file_path": evil_path}},
+            None, None,
+        )
+        assert result.get("decision") == "block"
+
+
+def _write_settings(path: Path, default_mode: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"permissions": {"defaultMode": default_mode}}))
+
+
+def test_default_permission_mode_falls_back_to_default(tmp_path):
+    """No settings anywhere → 'default'."""
+    with patch("claudechic.agent.Path.home", return_value=tmp_path / "empty-home"):
+        assert get_default_permission_mode(tmp_path / "empty-proj") == "default"
+
+
+def test_default_permission_mode_reads_user_settings(tmp_path):
+    """User-level ~/.claude/settings.json is honored."""
+    home = tmp_path / "home"
+    _write_settings(home / ".claude" / "settings.json", "auto")
+    with patch("claudechic.agent.Path.home", return_value=home):
+        assert get_default_permission_mode(tmp_path / "proj") == "auto"
+
+
+def test_default_permission_mode_local_beats_project_beats_user(tmp_path):
+    """Layering: local > project > user."""
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    _write_settings(home / ".claude" / "settings.json", "auto")
+    _write_settings(proj / ".claude" / "settings.json", "acceptEdits")
+    _write_settings(proj / ".claude" / "settings.local.json", "plan")
+    with patch("claudechic.agent.Path.home", return_value=home):
+        assert get_default_permission_mode(proj) == "plan"
+
+
+def test_default_permission_mode_passes_sdk_only_modes_through(tmp_path):
+    """Modes the SDK understands but the UI doesn't (e.g. bypassPermissions) are
+    returned verbatim, so the SDK still honors the user's intent."""
+    home = tmp_path / "home"
+    _write_settings(home / ".claude" / "settings.json", "bypassPermissions")
+    with patch("claudechic.agent.Path.home", return_value=home):
+        assert get_default_permission_mode(tmp_path / "proj") == "bypassPermissions"
+
+
+def test_default_permission_mode_rejects_invalid_mode(tmp_path):
+    """Totally bogus values fall back to 'default' rather than propagating."""
+    home = tmp_path / "home"
+    _write_settings(home / ".claude" / "settings.json", "nonsense")
+    with patch("claudechic.agent.Path.home", return_value=home):
+        assert get_default_permission_mode(tmp_path / "proj") == "default"
+
+
+def test_to_ui_permission_mode_collapses_sdk_only_modes():
+    """bypassPermissions / dontAsk → default (UI can't represent them)."""
+    assert to_ui_permission_mode("bypassPermissions") == "default"
+    assert to_ui_permission_mode("dontAsk") == "default"
+
+
+def test_to_ui_permission_mode_passes_ui_modes_through():
+    for mode in ("default", "acceptEdits", "plan", "auto"):
+        assert to_ui_permission_mode(mode) == mode

@@ -7,6 +7,9 @@ from textual.widgets import Static
 
 from claudechic.formatting import DEFAULT_CONTEXT_WINDOW
 
+# Suffix multipliers for token counts in /context output (e.g. "22.6k", "1m").
+_SUFFIX_MULT = {"": 1, "k": 1_000, "m": 1_000_000}
+
 
 def parse_context_markdown(content: str) -> dict:
     """Parse context markdown into structured data.
@@ -29,29 +32,27 @@ def parse_context_markdown(content: str) -> dict:
         "categories": [],
     }
 
-    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%) or 184.2k / 1.0M or 950 / 1000000
+    # Parse tokens line: **Tokens:** 18.4k / 200.0k (9%), 184.2k / 1000.0k, or 22.6k / 1m
     tokens_match = re.search(
-        r"\*\*Tokens:\*\*\s*([\d.]+)(k|M)?\s*/\s*([\d.]+)(k|M)?", content
+        r"\*\*Tokens:\*\*\s*([\d.]+)([kmKM]?)\s*/\s*([\d.]+)([kmKM]?)", content
     )
     if tokens_match:
-        used_str, used_unit, total_str, total_unit = tokens_match.groups()
-        used_mult = 1_000_000 if used_unit == "M" else (1000 if used_unit == "k" else 1)
-        total_mult = (
-            1_000_000 if total_unit == "M" else (1000 if total_unit == "k" else 1)
+        used_str, used_suffix, total_str, total_suffix = tokens_match.groups()
+        data["tokens_used"] = int(float(used_str) * _SUFFIX_MULT[used_suffix.lower()])
+        data["tokens_total"] = int(
+            float(total_str) * _SUFFIX_MULT[total_suffix.lower()]
         )
-        data["tokens_used"] = int(float(used_str) * used_mult)
-        data["tokens_total"] = int(float(total_str) * total_mult)
 
     # Parse category rows from markdown table
     # | System prompt | 2.9k | 1.5% |
     for match in re.finditer(
-        r"\|\s*([^|]+?)\s*\|\s*([\d.]+)(k?)\s*\|\s*([\d.]+)%\s*\|", content
+        r"\|\s*([^|]+?)\s*\|\s*([\d.]+)([kmKM]?)\s*\|\s*([\d.]+)%\s*\|", content
     ):
         name, tokens_raw, suffix, pct_str = match.groups()
         name = name.strip()
         if name in ("Category", "-------"):
             continue
-        tokens = int(float(tokens_raw) * (1000 if suffix == "k" else 1))
+        tokens = int(float(tokens_raw) * _SUFFIX_MULT[suffix.lower()])
         data["categories"].append(
             {
                 "name": name,

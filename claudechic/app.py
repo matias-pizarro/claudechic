@@ -53,12 +53,22 @@ from claudechic.features.worktree import list_worktrees
 from claudechic.commands import BARE_WORDS, handle_command
 from claudechic.features.worktree.commands import on_response_complete_finish
 from claudechic.permissions import PermissionRequest, PermissionResponse
-from claudechic.agent import Agent, ImageAttachment, ToolUse
+from claudechic.agent import (
+    Agent,
+    ImageAttachment,
+    ToolUse,
+    get_default_permission_mode,
+)
 from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
-from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, parse_context_size, strip_ansi
+from claudechic.formatting import (
+    CONTEXT_USAGE_HEADING,
+    DEFAULT_CONTEXT_WINDOW,
+    parse_context_size,
+    strip_ansi,
+)
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.formatting import trim_model_name
@@ -598,13 +608,13 @@ class ChatApp(App):
                 self.input_container.remove_class("hidden")
 
     def action_cycle_permission_mode(self) -> None:
-        """Cycle permission mode: default -> acceptEdits -> plan -> default.
+        """Cycle permission mode: default -> acceptEdits -> plan -> auto -> default.
 
         planSwarm is not in the cycle - use /plan-swarm to enter, shift-tab to exit.
         """
         if self._agent:
             agent = self._agent  # Capture for closure
-            modes = ["default", "acceptEdits", "plan"]
+            modes = ["default", "acceptEdits", "plan", "auto"]
             current = agent.permission_mode
 
             # If in planSwarm, exit to default (not in normal cycle)
@@ -621,7 +631,12 @@ class ChatApp(App):
             self.run_worker(set_mode(), exclusive=False)
 
             # Show notification with friendly names
-            display = {"default": "Default", "acceptEdits": "Auto-edit", "plan": "Plan"}
+            display = {
+                "default": "Default",
+                "auto": "Auto",
+                "acceptEdits": "Auto-edit",
+                "plan": "Plan",
+            }
             self.notify(f"Mode: {display[next_mode]}")
 
     def _update_footer_permission_mode(self) -> None:
@@ -662,7 +677,7 @@ class ChatApp(App):
         """Create hooks for plan mode enforcement."""
         # Tools that should be blocked in plan mode (except plan file writes)
         blocked_tools = {"Edit", "Write", "Bash", "NotebookEdit"}
-        plans_dir = str(Path.home() / ".claude" / "plans")
+        plans_dir = Path.home() / ".claude" / "plans"
 
         async def block_mutating_tools(
             hook_input: dict,
@@ -680,8 +695,8 @@ class ChatApp(App):
                     file_path = tool_input.get("file_path", "")
                     if file_path:
                         # Expand ~ and resolve to absolute path
-                        resolved = str(Path(file_path).expanduser().resolve())
-                        if resolved.startswith(plans_dir):
+                        resolved = Path(file_path).expanduser().resolve()
+                        if resolved.is_relative_to(plans_dir):
                             return {}  # Allow it
                 return {
                     "decision": "block",
@@ -718,7 +733,7 @@ class ChatApp(App):
         return ClaudeAgentOptions(
             permission_mode="bypassPermissions"
             if self._skip_permissions
-            else "default",
+            else get_default_permission_mode(cwd or Path.cwd()),
             env=env,
             setting_sources=["user", "project", "local"],
             cwd=cwd,
@@ -744,6 +759,27 @@ class ChatApp(App):
         set_log_notify_callback(
             lambda msg, severity: self.notify(msg, severity=severity, timeout=5)
         )
+
+        # Warn on washed-out colors over SSH (COLORTERM rarely propagates,
+        # so Textual falls back to 256-color). Skip locally to avoid nagging
+        # users whose terminal genuinely can't do truecolor.
+        is_ssh = any(
+            os.environ.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+        )
+        color_system = self.console.color_system
+        log.debug(
+            "color_system=%s TERM=%s COLORTERM=%s SSH=%s",
+            color_system,
+            os.environ.get("TERM"),
+            os.environ.get("COLORTERM"),
+            is_ssh,
+        )
+        if is_ssh and color_system != "truecolor":
+            log.warning(
+                "Colors look washed out? Terminal is %s, not truecolor. "
+                "Try `export COLORTERM=truecolor` on the remote host.",
+                color_system or "unknown",
+            )
 
         # Start CPU sampling profiler + event loop lag monitor
         start_sampler()
@@ -885,6 +921,21 @@ class ChatApp(App):
             self.exit(
                 message=f"Connection failed: {e}\n\nPlease run `claude /login` to authenticate."
             )
+            return
+        except Exception as e:
+            # Catch-all for SDK transport/init errors (e.g. "Control request
+            # timeout: initialize", subprocess spawn failure, handshake
+            # timeout). Scoped to initial connect only — no session state
+            # exists yet, so exiting cleanly is always safe. If this masks
+            # a real bug, the analytics capture below logs the full type name.
+            await capture(
+                "error_occurred",
+                error_type=type(e).__name__,
+                error_subtype=str(e)[:200],
+                context="initial_connect",
+            )
+            self.exit(message=f"Connection failed: {e}")
+            return
 
         # Load history if resuming
         if resume:
@@ -1509,7 +1560,7 @@ class ChatApp(App):
             return
 
         # Use custom widget for context reports
-        if "## Context Usage" in event.content:
+        if CONTEXT_USAGE_HEADING in event.content:
             from claudechic.widgets.reports.context import ContextReport
 
             widget = ContextReport(event.content)

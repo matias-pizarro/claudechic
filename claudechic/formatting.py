@@ -27,6 +27,11 @@ TOKEN_REMINDER_PATTERN = re.compile(
     r"^\s*<system-reminder>\d+/\d+ tokens</system-reminder>\n*"
 )
 
+# Heading emitted by the SDK's /context slash command. Used to detect
+# non-streamed TextBlocks that should be routed to the ContextReport widget.
+# If the SDK changes this heading, update this constant in one place.
+CONTEXT_USAGE_HEADING = "## Context Usage"
+
 # Comprehensive ANSI/terminal escape sequence pattern per ECMA-48.
 # Covers both 7-bit (ESC-prefixed) and 8-bit (C1) forms:
 #   CSI (including DEC private modes), OSC, DCS, PM, APC (all string
