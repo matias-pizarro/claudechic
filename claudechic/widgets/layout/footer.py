@@ -136,8 +136,8 @@ class StatusFooter(Static):
     # "default" gets no class and keeps plain styling. Adding a new mode
     # means one entry here; _MODE_CLASSES is derived below.
     # NOTE: Full mode wiring also requires: Agent.PERMISSION_MODES (agent.py),
-    # set_permission_mode SDK mapping (agent.py), action_cycle_permission_mode
-    # (app.py), /plan-swarm command (commands.py), and styles.tcss for CSS class.
+    # set_permission_mode SDK mapping (agent.py), action_cycle_permission_mode +
+    # display dict (app.py), /plan-swarm command (commands.py), styles.tcss.
     _MODE_DISPLAY: dict[str, tuple[str, str | None]] = {
         "default": ("Auto-edit: off", None),
         "planSwarm": ("Plan swarm", "plan-swarm-mode"),
