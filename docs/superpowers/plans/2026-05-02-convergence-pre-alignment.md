@@ -237,7 +237,13 @@ No behavioral change — all characterization tests pass."
 
 **Behavioral note:** This task reverts the planSwarm→"plan" SDK mapping that convergence_target added (commit `d16d091`), returning to the base's (`a6624cf`) behavior where planSwarm skips the SDK call entirely. This makes our code identical in structure to upstream's, enabling zero-conflict merge. The planSwarm→"plan" enforcement can be re-added as a separate commit AFTER the merge sequence.
 
-**Why this is safe:** The base version (released as 0.4.19) already skipped the SDK call for planSwarm. To prevent any enforcement gap, this task ALSO adds `"planSwarm"` to the local `_handle_permission()` blocking check (Step 5). After this change, planSwarm is enforced locally (our `_handle_permission` blocks mutating tools for both `"plan"` and `"planSwarm"`) without depending on the SDK call. This is strictly BETTER than the base (which had no planSwarm enforcement at all) and equivalent to convergence_target's current enforcement (which relied on the SDK).
+**What changes and what is preserved:**
+- **Preserved:** planSwarm blocks mutating tools (enforced by `_handle_permission` at Step 5, which fires for every tool use request)
+- **Preserved:** planSwarm blocks mutating tools via PreToolUse hook (Step 5b, defense-in-depth)
+- **Lost (temporary):** SDK-visible permission mode is no longer set to "plan" during planSwarm. This means SDK-internal behavior keyed off `permission_mode == "plan"` won't fire during planSwarm. In practice, the SDK doesn't have its own plan-mode blocking beyond what our callback provides.
+- **Post-merge restoration:** After the merge sequence completes, a follow-up commit MAY restore `planSwarm→"plan"` SDK mapping if desired. This is documented as acceptance criterion #9 below.
+
+**Why the tradeoff is acceptable:** The base version (released as 0.4.19) never sent "plan" to the SDK for planSwarm. convergence_target added it as belt-and-suspenders. Removing it returns to shipped behavior while adding LOCAL enforcement (Steps 5 + 5b) that the base never had. Net effect: enforcement is maintained through a different (local) mechanism.
 
 ### Phase: RED (write tests matching upstream's skip pattern)
 
@@ -413,30 +419,43 @@ class TestPlanSwarmEnforcement:
     @pytest.mark.asyncio
     async def test_planswarm_blocks_mutating_tools(self):
         """planSwarm must deny Edit/Write/Bash just like plan mode."""
-        from claudechic.permissions import PermissionRequest
+        from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
 
         agent = _make_agent()
         agent.permission_mode = "planSwarm"
 
-        # Mock the observer to capture permission requests (we won't resolve them)
-        agent.observer = MagicMock()
-        agent.observer.on_prompt_added = MagicMock()
-
-        # Directly test _handle_permission blocks Bash in planSwarm
-        from claude_agent_sdk.types import ToolPermissionContext
-
-        context = ToolPermissionContext(tool_name="Bash", tool_input={})
+        # ToolPermissionContext uses default constructor (no tool_name/tool_input args)
+        context = ToolPermissionContext()
         result = await agent._handle_permission("Bash", {"command": "rm -rf /"}, context)
 
-        # Should deny (not allow)
-        from claude_agent_sdk.types import PermissionResultDeny
+        # Should deny (planSwarm blocks mutating tools)
         assert isinstance(result, PermissionResultDeny)
+
+    @pytest.mark.asyncio
+    async def test_planswarm_allows_write_to_plan_file(self):
+        """planSwarm allows Write/Edit to ~/.claude/plans/ (same as plan mode)."""
+        from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
+        from pathlib import Path
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        plans_dir = str(Path.home() / ".claude" / "plans")
+        plan_file = f"{plans_dir}/test-plan.md"
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Write", {"file_path": plan_file, "content": "# Plan"}, context
+        )
+
+        # Should allow (plan file exception)
+        assert isinstance(result, PermissionResultAllow)
 ```
 
-- [ ] **Step 6: Run tests to verify all pass**
+- [ ] **Step 6: Run tests to verify all pass (both permission + enforcement classes)**
 
-Run: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode -v`
-Expected: All 4 tests PASS
+Run: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode tests/test_agent.py::TestPlanSwarmEnforcement -v`
+Expected: All 6 tests PASS (4 permission + 2 enforcement)
 
 - [ ] **Step 7: Run full test suite + pre-commit**
 
@@ -446,7 +465,7 @@ Expected: All pass
 - [ ] **Step 8: Commit**
 
 ```bash
-git add claudechic/agent.py tests/test_agent.py
+git add claudechic/agent.py claudechic/app.py tests/test_agent.py
 git commit -m "refactor: use cast(PermissionMode), skip planSwarm SDK call, add local enforcement
 
 Adopt upstream 0.4.20's exact set_permission_mode code (byte-identical
@@ -554,9 +573,9 @@ When Phase 1 reports a conflict on `footer.py`:
 
 When `tests/test_agent.py` has add/add conflict:
 1. Resolution: combine both files into one coherent module:
-   - Union of imports (ours: `Path, AsyncMock, MagicMock, pytest, Agent`; theirs adds: `json, tmp_path fixture`)
+   - Union of imports (ours: `Path, AsyncMock, MagicMock, pytest, Agent`; theirs adds: `json, patch` from `unittest.mock`)
    - Keep our `_make_agent()` helper
-   - Keep theirs: `_write_settings(tmp_path, data)` helper
+   - Keep theirs: `_write_settings(path, default_mode)` helper (uses `Path` for file creation)
    - Keep ALL test classes from both sides:
      - Ours: `TestUpdateContext`, `TestPreparePrompt`, `TestTokenReminderPattern`, `TestSetPermissionMode`, `TestPlanSwarmEnforcement`
      - Theirs: `test_get_default_permission_mode_*` (module-level functions), `test_to_ui_permission_mode_*` (module-level functions)
@@ -603,4 +622,5 @@ Expected merge residuals:
 5. `uv run pre-commit run --all-files` passes
 6. `git merge --no-ff 0.4.20` produces: zero conflict on agent.py, trivial 1-line conflict on footer.py, add/add on tests/test_agent.py
 7. After resolving trivial residuals (~2 min), all 3 merges complete and tests pass
-8. planSwarm enforcement is preserved via local `_handle_permission` check (no enforcement gap)
+8. planSwarm enforcement is preserved via local `_handle_permission` + PreToolUse hook (no enforcement gap)
+9. **Post-merge mandatory task:** Restore `planSwarm→"plan"` SDK mapping as a separate commit immediately after the merge sequence completes. This restores full defense-in-depth (local + SDK + hook — all three layers). Block tagging until this is done.
