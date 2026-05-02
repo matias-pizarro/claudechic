@@ -12,7 +12,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -26,6 +26,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 from claude_agent_sdk.types import (
+    PermissionMode,
     PermissionResult,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -808,7 +809,10 @@ Key Rules:
 
         # Block mutating tools in plan mode (except writes to plan file)
         # Note: PreToolUse hook in app.py also blocks these; this is a fallback
-        if self.permission_mode == "plan" and tool_name in self.PLAN_MODE_BLOCKED_TOOLS:
+        if (
+            self.permission_mode in ("plan", "planSwarm")
+            and tool_name in self.PLAN_MODE_BLOCKED_TOOLS
+        ):
             # Allow Write/Edit to files in ~/.claude/plans/
             if tool_name in (ToolName.WRITE, ToolName.EDIT):
                 file_path = tool_input.get("file_path", "")
@@ -952,9 +956,7 @@ Key Rules:
         """Update permission mode via SDK and emit event.
 
         Args:
-            mode: One of 'default', 'acceptEdits', 'plan', 'planSwarm'.
-                  'planSwarm' is claudechic-specific; the SDK is set to
-                  'plan' (closest safe enforceable mode).
+            mode: One of 'default', 'acceptEdits', 'plan'
         """
         assert mode in self.PERMISSION_MODES, f"Invalid permission mode: {mode}"
         if self.permission_mode != mode:
@@ -963,12 +965,11 @@ Key Rules:
             if mode == "plan":
                 await self.ensure_plan_path()
             # Only call SDK if connected (client exists and has active connection).
-            # "planSwarm" is claudechic-specific; set SDK to "plan" (the closest
-            # safe enforceable mode) since the SDK's PermissionMode Literal
-            # doesn't include "planSwarm".
-            if self.client and self.session_id:
-                sdk_mode = "plan" if mode == "planSwarm" else mode
-                await self.client.set_permission_mode(sdk_mode)  # type: ignore[arg-type]
+            # "planSwarm" is claudechic-specific; skip SDK call for it since the
+            # SDK's PermissionMode Literal doesn't include it.
+            if self.client and self.session_id and mode != "planSwarm":
+                # Validated by the assert above; cast for the SDK's Literal type.
+                await self.client.set_permission_mode(cast(PermissionMode, mode))
             if self.observer:
                 self.observer.on_permission_mode_changed(self)
 

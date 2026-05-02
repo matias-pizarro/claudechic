@@ -148,8 +148,8 @@ class TestSetPermissionMode:
     """Tests for Agent.set_permission_mode() SDK interaction."""
 
     @pytest.mark.asyncio
-    async def test_planswarm_sets_sdk_to_plan(self):
-        """planSwarm should set SDK to 'plan' mode, not skip the SDK call."""
+    async def test_planswarm_skips_sdk_call(self):
+        """planSwarm is claudechic-specific; SDK call is skipped entirely."""
         agent = _make_agent()
         agent.client = MagicMock()
         agent.client.set_permission_mode = AsyncMock()
@@ -159,11 +159,11 @@ class TestSetPermissionMode:
         await agent.set_permission_mode("planSwarm")
 
         assert agent.permission_mode == "planSwarm"
-        agent.client.set_permission_mode.assert_called_once_with("plan")
+        agent.client.set_permission_mode.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_regular_mode_sets_sdk_directly(self):
-        """Non-planSwarm modes pass through to SDK unchanged."""
+    async def test_regular_mode_passes_through_to_sdk(self):
+        """Non-planSwarm modes pass through to SDK via cast(PermissionMode)."""
         agent = _make_agent()
         agent.client = MagicMock()
         agent.client.set_permission_mode = AsyncMock()
@@ -174,3 +174,66 @@ class TestSetPermissionMode:
 
         assert agent.permission_mode == "plan"
         agent.client.set_permission_mode.assert_called_once_with("plan")
+
+    @pytest.mark.asyncio
+    async def test_no_sdk_call_when_disconnected(self):
+        """No SDK call if client is None or session_id is missing."""
+        agent = _make_agent()
+        agent.client = None
+        agent.permission_mode = "default"
+
+        await agent.set_permission_mode("acceptEdits")
+
+        assert agent.permission_mode == "acceptEdits"
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_calls_ensure_plan_path(self):
+        """Entering plan mode triggers plan path fetch."""
+        agent = _make_agent()
+        agent.client = MagicMock()
+        agent.client.set_permission_mode = AsyncMock()
+        agent.session_id = "test-session"
+        agent.permission_mode = "default"
+        agent.ensure_plan_path = AsyncMock()
+
+        await agent.set_permission_mode("plan")
+
+        agent.ensure_plan_path.assert_called_once()
+
+
+class TestPlanSwarmEnforcement:
+    """Verify planSwarm blocks mutating tools via _handle_permission."""
+
+    @pytest.mark.asyncio
+    async def test_planswarm_blocks_mutating_tools(self):
+        """planSwarm must deny Edit/Write/Bash just like plan mode."""
+        from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Bash", {"command": "rm -rf /"}, context
+        )
+
+        assert isinstance(result, PermissionResultDeny)
+
+    @pytest.mark.asyncio
+    async def test_planswarm_allows_write_to_plan_file(self):
+        """planSwarm allows Write/Edit to ~/.claude/plans/ (same as plan mode)."""
+        from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
+        from pathlib import Path
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        plans_dir = str(Path.home() / ".claude" / "plans")
+        plan_file = f"{plans_dir}/test-plan.md"
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Write", {"file_path": plan_file, "content": "# Plan"}, context
+        )
+
+        assert isinstance(result, PermissionResultAllow)
