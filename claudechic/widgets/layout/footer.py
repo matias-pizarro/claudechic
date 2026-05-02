@@ -305,6 +305,18 @@ class StatusFooter(Static):
             label.set_class(bool(value), "elevated")
         self.call_after_refresh(self._render_cwd_label)
 
+    # Maps permission_mode → (display text, active CSS class or None).
+    # "default" gets no class and keeps plain styling. Adding a new mode
+    # means one entry here; _MODE_CLASSES is derived below.
+    _MODE_DISPLAY: dict[str, tuple[str, str | None]] = {
+        "default": ("Auto-edit: off", None),
+        "planSwarm": ("Plan swarm", "plan-swarm-mode"),
+        "plan": ("Plan mode", "plan-mode"),
+        "acceptEdits": ("Auto-edit: on", "active"),
+        "auto": ("Auto", "auto-mode"),
+    }
+    _MODE_CLASSES = tuple(cls for _, cls in _MODE_DISPLAY.values() if cls)
+
     def watch_permission_mode(self, value: str) -> None:
         """Update permission mode label when setting changes."""
         if label := self.query_one_optional(
@@ -312,11 +324,6 @@ class StatusFooter(Static):
         ):
             if value not in self._MODE_DISPLAY:
                 log.warning("Unknown permission mode '%s', displaying as default", value)
-            text, active = self._MODE_DISPLAY.get(value, self._MODE_DISPLAY["default"])
-            label.update(text)
-            for cls in self._MODE_CLASSES:
-                label.set_class(cls == active, cls)
-        self.call_after_refresh(self._render_cwd_label)
 
     def update_processes(self, processes: list[BackgroundProcess]) -> None:
         """Update the process indicator."""

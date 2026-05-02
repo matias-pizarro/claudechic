@@ -110,6 +110,60 @@ class ChatItem:
 
 
 # ---------------------------------------------------------------------------
+# Settings lookup
+# ---------------------------------------------------------------------------
+
+
+# SDK-valid permission modes. We pass any of these through to the SDK verbatim
+# so users who set e.g. "bypassPermissions" in settings.json get the behavior
+# they asked for, even though the UI state machine doesn't represent those modes.
+_SDK_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
+)
+
+# Modes the UI (footer label, shift+tab cycle) knows how to display. A narrower
+# subset of the SDK modes; see `to_ui_permission_mode` for the mapping.
+# `planSwarm` is intentionally excluded — it's an internal state toggled by
+# a slash command, not something users should configure via settings.json.
+_UI_PERMISSION_MODES = frozenset({"default", "acceptEdits", "plan", "auto"})
+
+
+def get_default_permission_mode(cwd: Path) -> PermissionMode:
+    """Resolve ``permissions.defaultMode`` from Claude settings.json layers.
+
+    Layering matches Claude Code: user < project < local. Returns the topmost
+    SDK-valid mode, or ``"default"`` if nothing is set. The value is suitable
+    to pass directly to ``ClaudeAgentOptions(permission_mode=...)``.
+    """
+    layers = [
+        Path.home() / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.local.json",
+    ]
+    resolved: PermissionMode = "default"
+    for path in layers:
+        try:
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            continue
+        mode = data.get("permissions", {}).get("defaultMode")
+        if isinstance(mode, str) and mode in _SDK_PERMISSION_MODES:
+            resolved = cast(PermissionMode, mode)
+    return resolved
+
+
+def to_ui_permission_mode(mode: str) -> str:
+    """Project an SDK mode onto the UI state machine.
+
+    The UI only represents ``{default, acceptEdits, plan, auto}``; modes outside
+    that set (``bypassPermissions``, ``dontAsk``) collapse to ``"default"`` so
+    the footer and shift+tab cycle stay coherent. The SDK still receives the
+    original mode — this only affects what ``Agent.permission_mode`` holds.
+    """
+    return mode if mode in _UI_PERMISSION_MODES else "default"
+
+
+# ---------------------------------------------------------------------------
 # Agent class
 # ---------------------------------------------------------------------------
 
@@ -144,6 +198,7 @@ class Agent:
         *,
         id: str | None = None,
         worktree: str | None = None,
+        permission_mode: str = "default",
     ):
         # Identity
         self.id = id or str(uuid.uuid4())[:8]
@@ -182,7 +237,7 @@ class Agent:
         self.pending_images: list[ImageAttachment] = []
         self.file_index: FileIndex | None = None
         self.todos: list[dict] = []
-        self.permission_mode: str = "default"  # See PERMISSION_MODES for valid values
+        self.permission_mode: str = permission_mode  # default, acceptEdits, plan, auto
         self.session_allowed_tools: set[str] = set()  # Tools allowed for this session
         self._pending_followup: str | None = None  # Auto-send after current response
         self.model: str | None = None  # Model override (None = SDK default)
@@ -932,7 +987,7 @@ Key Rules:
                 self.observer.on_status_changed(self)
 
     # Valid permission modes
-    PERMISSION_MODES = {"default", "acceptEdits", "plan", "planSwarm"}
+    PERMISSION_MODES = {"default", "acceptEdits", "plan", "planSwarm", "auto"}
 
     def _set_permission_mode_local(self, mode: str) -> None:
         """Update permission mode locally without calling SDK.
