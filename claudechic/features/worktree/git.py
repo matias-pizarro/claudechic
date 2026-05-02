@@ -758,7 +758,11 @@ def get_finish_info(
                         needs_checkout = True
                         resolved = True
                     else:
-                        return False, err, None
+                        return (
+                            False,
+                            f"Cannot merge into '{parent_branch}': {err}",
+                            None,
+                        )
             else:
                 # Invariant 4: branch was deleted
                 log.debug(
