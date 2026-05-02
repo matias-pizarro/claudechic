@@ -75,15 +75,22 @@ class TestWatchPermissionMode:
             assert not label.has_class("plan-mode")
 
     @pytest.mark.asyncio
-    async def test_unknown_mode_falls_back_to_default(self):
-        async with FooterTestApp().run_test() as pilot:
-            footer = pilot.app.query_one(StatusFooter)
-            footer.permission_mode = "unknown_future_mode"
-            await pilot.pause()
-            label = footer.query_one("#permission-mode-label")
-            rendered = label.render()
-            assert "auto-edit: off" in rendered.plain.lower()  # type: ignore[union-attr]
-            assert not label.has_class("active")
+    async def test_unknown_mode_falls_back_to_default_with_warning(self, caplog):
+        """Unknown modes fall back to default display AND emit a warning."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="claudechic.widgets.layout.footer"):
+            async with FooterTestApp().run_test() as pilot:
+                footer = pilot.app.query_one(StatusFooter)
+                footer.permission_mode = "unknown_future_mode"
+                await pilot.pause()
+                label = footer.query_one("#permission-mode-label")
+                rendered = label.render()
+                assert "auto-edit: off" in rendered.plain.lower()  # type: ignore[union-attr]
+                assert not label.has_class("active")
+
+        assert "Unknown permission mode" in caplog.text
+        assert "unknown_future_mode" in caplog.text
 
     @pytest.mark.asyncio
     async def test_transition_clears_previous_mode_class(self):

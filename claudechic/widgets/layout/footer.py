@@ -126,7 +126,7 @@ class StatusFooter(Static):
     """Footer showing git branch, model, auto-edit status, and resource indicators."""
 
     can_focus = False
-    permission_mode = reactive("default")  # default, acceptEdits, plan
+    permission_mode = reactive("default")  # See _MODE_DISPLAY for all supported modes
     model = reactive("")
     # "" = SDK default (shown muted), else low/medium/high/xhigh/max
     effort = reactive("")
@@ -136,7 +136,8 @@ class StatusFooter(Static):
     # "default" gets no class and keeps plain styling. Adding a new mode
     # means one entry here; _MODE_CLASSES is derived below.
     # NOTE: Full mode wiring also requires: Agent.PERMISSION_MODES (agent.py),
-    # action_cycle_permission_mode (app.py), and styles.tcss for the CSS class.
+    # set_permission_mode SDK mapping (agent.py), action_cycle_permission_mode
+    # (app.py), /plan-swarm command (commands.py), and styles.tcss for CSS class.
     _MODE_DISPLAY: dict[str, tuple[str, str | None]] = {
         "default": ("Auto-edit: off", None),
         "planSwarm": ("Plan swarm", "plan-swarm-mode"),
