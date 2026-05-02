@@ -15,10 +15,12 @@
 **Rollback:** If merge verification fails beyond the documented trivial residual, abandon pre-alignment and resolve conflicts manually during merge (~10 minutes for 3 hunks).
 
 **Expected merge outcome after pre-alignment:**
-- `agent.py`: ZERO conflict (both sides make identical change: `type: ignore` → `cast()`)
+- `agent.py`: ZERO conflict (our output is byte-identical to upstream's)
 - `footer.py`: 1 trivial conflict (upstream adds `"auto"` dict entry; ours has `call_after_refresh`)
 - `tests/test_agent.py`: add/add conflict (trivial: concatenate both test classes)
 - All other files: auto-merge clean
+
+Total manual resolution: ~2 minutes (add 1 dict entry + concatenate test classes).
 
 ---
 
@@ -169,7 +171,7 @@ Expected: All 6 tests PASS (characterization — behavior is same before and aft
 Replace the if/elif chain (lines 294-319) in `claudechic/widgets/layout/footer.py` with upstream 0.4.20's exact pattern (matching comment text, type signature, and derivation):
 
 ```python
-    # Maps permission_mode -> (display text, active CSS class or None).
+    # Maps permission_mode → (display text, active CSS class or None).
     # "default" gets no class and keeps plain styling. Adding a new mode
     # means one entry here; _MODE_CLASSES is derived below.
     _MODE_DISPLAY: dict[str, tuple[str, str | None]] = {
@@ -235,7 +237,7 @@ No behavioral change — all characterization tests pass."
 
 **Behavioral note:** This task reverts the planSwarm→"plan" SDK mapping that convergence_target added (commit `d16d091`), returning to the base's (`a6624cf`) behavior where planSwarm skips the SDK call entirely. This makes our code identical in structure to upstream's, enabling zero-conflict merge. The planSwarm→"plan" enforcement can be re-added as a separate commit AFTER the merge sequence.
 
-**Why this is safe:** The base version (released as 0.4.19) already skipped the SDK call for planSwarm. Local enforcement of plan-mode blocking happens in `_handle_permission()` (checks `self.permission_mode == "plan"`) — since planSwarm's local mode is "planSwarm" (not "plan"), the local blocking never fired for planSwarm anyway. The SDK-side enforcement was belt-and-suspenders that the base version didn't have.
+**Why this is safe:** The base version (released as 0.4.19) already skipped the SDK call for planSwarm. To prevent any enforcement gap, this task ALSO adds `"planSwarm"` to the local `_handle_permission()` blocking check (Step 5). After this change, planSwarm is enforced locally (our `_handle_permission` blocks mutating tools for both `"plan"` and `"planSwarm"`) without depending on the SDK call. This is strictly BETTER than the base (which had no planSwarm enforcement at all) and equivalent to convergence_target's current enforcement (which relied on the SDK).
 
 ### Phase: RED (write tests matching upstream's skip pattern)
 
@@ -339,18 +341,16 @@ from claude_agent_sdk.types import (
 )
 ```
 
-- [ ] **Step 4: Refactor `set_permission_mode` to match base/upstream pattern**
+- [ ] **Step 4: Refactor `set_permission_mode` to produce upstream's EXACT output**
 
-Replace lines 951-973 in `claudechic/agent.py`:
+Replace lines 951-973 in `claudechic/agent.py`. The ONLY diff from base should be: the `await` line gains `cast()` + an inline comment (matching upstream byte-for-byte). All other lines (docstring, comment block) remain UNCHANGED from base:
 
 ```python
     async def set_permission_mode(self, mode: str) -> None:
         """Update permission mode via SDK and emit event.
 
         Args:
-            mode: One of 'default', 'acceptEdits', 'plan', 'planSwarm'.
-                  'planSwarm' is claudechic-specific; the SDK call is skipped
-                  since the SDK's PermissionMode Literal doesn't include it.
+            mode: One of 'default', 'acceptEdits', 'plan'
         """
         assert mode in self.PERMISSION_MODES, f"Invalid permission mode: {mode}"
         if self.permission_mode != mode:
@@ -358,37 +358,54 @@ Replace lines 951-973 in `claudechic/agent.py`:
             # Fetch plan path when entering plan mode
             if mode == "plan":
                 await self.ensure_plan_path()
-            # Only call SDK if connected and mode is SDK-recognized.
-            # "planSwarm" is claudechic-specific; skip the SDK call entirely.
+            # Only call SDK if connected (client exists and has active connection).
+            # "planSwarm" is claudechic-specific; skip SDK call for it since the
+            # SDK's PermissionMode Literal doesn't include it.
             if self.client and self.session_id and mode != "planSwarm":
+                # Validated by the assert above; cast for the SDK's Literal type.
                 await self.client.set_permission_mode(cast(PermissionMode, mode))
             if self.observer:
                 self.observer.on_permission_mode_changed(self)
 ```
 
-- [ ] **Step 5: Run tests to verify all 4 pass**
+This is byte-identical to upstream 0.4.20's version. Both sides produce identical output from the same base → git auto-resolves (keeps one copy).
+
+- [ ] **Step 5: Add planSwarm to local `_handle_permission` enforcement**
+
+In `claudechic/agent.py`, find line ~811:
+```python
+        if self.permission_mode == "plan" and tool_name in self.PLAN_MODE_BLOCKED_TOOLS:
+```
+
+Replace with:
+```python
+        if self.permission_mode in ("plan", "planSwarm") and tool_name in self.PLAN_MODE_BLOCKED_TOOLS:
+```
+
+This ensures planSwarm retains plan-mode tool blocking via local enforcement even though the SDK call is skipped. Without this, planSwarm would have no restriction layer (the SDK is in its previous mode, and local code only checked `"plan"`).
+
+- [ ] **Step 6: Run tests to verify all 4 pass**
 
 Run: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode -v`
 Expected: All 4 tests PASS
 
-- [ ] **Step 6: Run full test suite + pre-commit**
+- [ ] **Step 7: Run full test suite + pre-commit**
 
 Run: `uv run python -m pytest tests/ -n auto -q && uv run pre-commit run --all-files`
 Expected: All pass
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add claudechic/agent.py tests/test_agent.py
-git commit -m "refactor: use cast(PermissionMode) and revert to skip-planSwarm pattern
+git commit -m "refactor: use cast(PermissionMode), skip planSwarm SDK call, add local enforcement
 
-Adopt the base (a6624cf) and upstream (0.4.20) pattern for
-set_permission_mode: skip SDK call for planSwarm, use cast() for
-type safety on all other modes. This makes agent.py's merge with
-0.4.20 zero-conflict (identical structural change on both sides).
+Adopt upstream 0.4.20's exact set_permission_mode code (byte-identical
+output for zero-conflict merge). planSwarm SDK call is skipped (matching
+base/upstream), but local _handle_permission now enforces plan-mode
+blocking for planSwarm too (no enforcement gap).
 
-Behavioral change: planSwarm no longer sends 'plan' to SDK.
-This reverts to the shipped 0.4.19 behavior. The planSwarm->plan
+This reverts to the shipped 0.4.19 SDK behavior. The planSwarm->plan
 enforcement can be re-added post-merge if desired (it was added
 by convergence_target but the base never had it)."
 ```
@@ -410,8 +427,6 @@ set -euo pipefail
 
 STARTING_REF=$(git rev-parse HEAD)
 TEMP_BRANCH="merge-verify-$$"
-FAILED=0
-
 # Only clean up on SUCCESS; leave state for diagnosis on failure
 cleanup_success() {
     git checkout "$STARTING_REF" 2>/dev/null
@@ -429,42 +444,42 @@ if ! git merge --no-ff 0.4.20 -m "Merge 0.4.20"; then
     git diff --name-only --diff-filter=U
     echo ""
     echo "Expected: footer.py trivial conflict (add 'auto' entry)."
-    echo "Resolve manually, then continue with: git merge --continue"
-    FAILED=1
+    echo "Resolve manually, then re-run this script (it detects merged state)."
+    echo "Temp branch '$TEMP_BRANCH' left intact for diagnosis."
+    exit 1
 fi
 
-if [ $FAILED -eq 0 ]; then
-    echo "PASS: 0.4.20 merged cleanly"
-    echo ""
-    echo "=== Phase 2: Tests after 0.4.20 ==="
-    uv run python -m pytest tests/ -n auto -q
-    echo "PASS: Tests pass"
+echo "PASS: 0.4.20 merged cleanly"
 
-    echo ""
-    echo "=== Phase 3: Merge 0.4.21 ==="
-    git merge --no-ff 0.4.21 -m "Merge 0.4.21"
-    echo "PASS: 0.4.21 merged cleanly"
+echo ""
+echo "=== Phase 2: Tests after 0.4.20 ==="
+uv run python -m pytest tests/ -n auto -q
+echo "PASS: Tests pass"
 
-    echo ""
-    echo "=== Phase 4: Tests after 0.4.21 ==="
-    uv run python -m pytest tests/ -n auto -q
-    echo "PASS: Tests pass"
+echo ""
+echo "=== Phase 3: Merge 0.4.21 ==="
+git merge --no-ff 0.4.21 -m "Merge 0.4.21"
+echo "PASS: 0.4.21 merged cleanly"
 
-    echo ""
-    echo "=== Phase 5: Merge origin/main ==="
-    git merge --no-ff origin/main -m "Merge origin/main"
-    echo "PASS: origin/main merged cleanly"
+echo ""
+echo "=== Phase 4: Tests after 0.4.21 ==="
+uv run python -m pytest tests/ -n auto -q
+echo "PASS: Tests pass"
 
-    echo ""
-    echo "=== Phase 6: Final tests + hooks ==="
-    uv run python -m pytest tests/ -n auto -q
-    uv run pre-commit run --all-files
-    echo "PASS: All pass"
+echo ""
+echo "=== Phase 5: Merge origin/main ==="
+git merge --no-ff origin/main -m "Merge origin/main"
+echo "PASS: origin/main merged cleanly"
 
-    echo ""
-    echo "ALL MERGES COMPLETE."
-    cleanup_success
-fi
+echo ""
+echo "=== Phase 6: Final tests + hooks ==="
+uv run python -m pytest tests/ -n auto -q
+uv run pre-commit run --all-files
+echo "PASS: All pass"
+
+echo ""
+echo "ALL MERGES COMPLETE."
+cleanup_success
 ```
 
 - [ ] **Step 2: Handle expected trivial conflicts**
@@ -513,10 +528,11 @@ Expected merge residuals:
 
 ## Acceptance Criteria
 
-1. `agent.py:set_permission_mode` uses `mode != "planSwarm"` + `cast(PermissionMode, mode)` — matching base/upstream exactly
-2. `footer.py:watch_permission_mode` uses `_MODE_DISPLAY` dict with upstream's exact comment, type, and derivation
-3. `uv run python -m pytest tests/ -n auto -q` passes on pre-aligned state
-4. `uv run pre-commit run --all-files` passes
-5. `git merge --no-ff 0.4.20` produces at most a trivial 1-line conflict on footer.py
-6. After resolving trivial residuals, all 3 merges complete and tests pass
-7. planSwarm skip behavior documented with rationale and post-merge re-add path
+1. `agent.py:set_permission_mode` produces byte-identical output to upstream 0.4.20's version
+2. `agent.py:_handle_permission` blocks mutating tools for both `"plan"` and `"planSwarm"`
+3. `footer.py:watch_permission_mode` uses `_MODE_DISPLAY` dict with upstream's exact comment (Unicode `→`), type, and derivation
+4. `uv run python -m pytest tests/ -n auto -q` passes on pre-aligned state
+5. `uv run pre-commit run --all-files` passes
+6. `git merge --no-ff 0.4.20` produces: zero conflict on agent.py, trivial 1-line conflict on footer.py, add/add on tests/test_agent.py
+7. After resolving trivial residuals (~2 min), all 3 merges complete and tests pass
+8. planSwarm enforcement is preserved via local `_handle_permission` check (no enforcement gap)
