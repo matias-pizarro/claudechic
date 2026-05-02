@@ -240,7 +240,7 @@ No behavioral change — all characterization tests pass."
 **Behavioral note:** This task reverts the planSwarm→"plan" SDK mapping that convergence_target added (commit `d16d091`), returning to the base's (`a6624cf`) behavior where planSwarm skips the SDK call entirely. This makes our code identical in structure to upstream's, enabling zero-conflict merge. The planSwarm→"plan" enforcement can be re-added as a separate commit AFTER the merge sequence.
 
 **What changes and what is preserved (pre-merge state):**
-- **Preserved:** planSwarm blocks mutating tools via `_handle_permission` (Step 5). This is the SOLE active enforcement layer pre-merge.
+- **Preserved:** planSwarm blocks mutating tools via `_handle_permission` (Step 5). This is the only GUARANTEED active enforcement layer pre-merge. (The PreToolUse hook MAY also fire if planSwarm is entered from `plan` mode, since the SDK would still report `permission_mode="plan"` — but this is incidental, not relied upon.)
 - **Prepared but inactive:** Step 5b updates the PreToolUse hook to recognize "planSwarm", but this hook checks `hook_input.permission_mode` (SDK-reported). Since the SDK call is skipped, SDK-reported mode stays at the previous value → the hook won't fire for planSwarm pre-merge. Step 5b prepares the hook for post-merge when the SDK mapping is restored.
 - **Lost (temporary):** SDK-visible permission mode is no longer set to "plan" during planSwarm.
 - **Assumption:** The SDK has no plan-mode blocking beyond what our `can_use_tool` callback provides. This is based on: (a) the base version (0.4.19) shipped without the mapping and had no reported enforcement issues, (b) upstream 0.4.20 also skips the call.
@@ -477,7 +477,7 @@ base/upstream), but local _handle_permission now enforces plan-mode
 blocking for planSwarm too (no enforcement gap).
 
 This reverts to the shipped 0.4.19 SDK behavior. The planSwarm->plan
-enforcement can be re-added post-merge if desired (it was added
+enforcement is restored post-merge via mandatory Task 5 (it was added
 by convergence_target but the base never had it)."
 ```
 
@@ -671,6 +671,8 @@ layers now active: _handle_permission + PreToolUse hook + SDK."
 
 ## Acceptance Criteria
 
+### Phase A: Pre-Alignment (Tasks 1-2, verified by Task 3)
+
 1. `agent.py:set_permission_mode` produces byte-identical output to upstream 0.4.20's version
 2. `agent.py:_handle_permission` blocks mutating tools for both `"plan"` and `"planSwarm"`
 3. `footer.py:watch_permission_mode` uses `_MODE_DISPLAY` dict with upstream's exact comment (Unicode `→`), type, and derivation
@@ -678,8 +680,14 @@ layers now active: _handle_permission + PreToolUse hook + SDK."
 5. `uv run pre-commit run --all-files` passes
 6. `git merge --no-ff 0.4.20` produces: zero conflict on agent.py, trivial 1-line conflict on footer.py, add/add on tests/test_agent.py
 7. After resolving trivial residuals (~2 min), all 3 merges complete and tests pass
-8. planSwarm enforcement is preserved pre-merge via `_handle_permission` (sole active layer); full defense-in-depth restored by Task 5
-9. Task 5 (post-merge) restores `planSwarm→"plan"` SDK mapping, activating all three enforcement layers. Release tagging is blocked until Task 5 lands.
+
+### Phase B: Post-Merge Final State (Task 5, gates release)
+
+8. Task 5 restores `planSwarm→"plan"` SDK mapping in `set_permission_mode`
+9. All three enforcement layers active: `_handle_permission` + PreToolUse hook + SDK
+10. `uv run python -m pytest tests/ -n auto -q` passes after restoration
+11. **Release gate (human-enforced, single-maintainer project):** No release tag until Task 5 commit exists on the branch. Verify with: `git log --oneline | grep "restore planSwarm"`. Task 4's tag is an internal alignment marker, not a release tag.
 
 **Out of scope (pre-existing issues, not introduced by this plan):**
-- The plan-file allow-path uses `str.startswith(plans_dir)` which permits sibling directories (e.g., `~/.claude/plans-evil/`). This is a pre-existing security concern in both `_handle_permission` and `_plan_mode_hooks`. Fixing it is tracked separately and does not block this convergence work.
+- The plan-file allow-path uses `str.startswith(plans_dir)` which permits sibling directories (e.g., `~/.claude/plans-evil/`). This is a pre-existing security concern in both `_handle_permission` and `_plan_mode_hooks`. **Operational restriction:** The pre-merge branch state should not be used for release or deployed for normal planSwarm usage until Task 5 restores full defense-in-depth. Fixing the path validation is tracked as a separate security task.
+- Task 5 restores the SDK mapping but does not add an app-level test for `_plan_mode_hooks` blocking behavior. This is tracked as a follow-up test coverage improvement (the hook itself is unchanged by this plan; only its recognition of "planSwarm" in Step 5b is new).
