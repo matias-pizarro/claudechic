@@ -38,8 +38,8 @@ async def test_slash_command_autocomplete(mock_sdk, tmp_path: Path):
         input_widget.text = "/worktree fin"
         await pilot.pause()
 
-        # Should show just /worktree finish
-        assert autocomplete.option_list.option_count == 1
+        # Should show /worktree finish (may also match worktree branches on disk)
+        assert autocomplete.option_list.option_count >= 1
 
         # Clear input - should hide
         input_widget.text = ""
@@ -94,8 +94,8 @@ async def test_tab_completion(mock_sdk):
         input_widget.text = "/worktree fin"
         await pilot.pause()
 
-        # Should show just /worktree finish
-        assert autocomplete.option_list.option_count == 1
+        # Should show /worktree finish (may also match worktree branches on disk)
+        assert autocomplete.option_list.option_count >= 1
 
         # Press Tab to complete
         await pilot.press("tab")

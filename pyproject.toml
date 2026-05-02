@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claudechic"
-dynamic = ["version"]
+version = "0.4.19.9"
 description = "Claude Chic - A stylish terminal UI for Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"

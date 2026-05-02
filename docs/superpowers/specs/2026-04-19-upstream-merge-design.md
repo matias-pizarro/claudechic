@@ -175,3 +175,12 @@ Post-merge, verify these behaviors:
 | Accidental staging of secrets | Step 9 requires `git status --short` review; step 10 uses explicit file staging |
 | `get_context_usage()` unavailable on older SDK | `pyproject.toml` pins `>=0.1.56` which includes the method |
 | `get_context_usage()` returns malformed data | Both `totalTokens` and `rawMaxTokens` validated with type checks and defaults |
+
+## Post-Merge Fixes
+
+The following minor divergences from the design above were made during implementation:
+
+- **`refresh_context()` fallback:** The final code falls back to `agent.max_tokens` (not `self.context_bar.max_tokens`) when `rawMaxTokens` is unavailable. This keeps the agent's prompt-injection consistent with its own state rather than coupling to a UI widget.
+- **`maxTokens` accepted alongside `rawMaxTokens`:** Context parsing now checks both `rawMaxTokens` and `maxTokens` from the SDK response, since different SDK versions may report either key.
+- **`_validate_base_branch()` removed:** The standalone validation helper described in early iterations was replaced by inline validation at the call site, eliminating dead code.
+- **`/effort` forward-compatibility:** The effort value is passed to `ClaudeAgentOptions` with a `type: ignore` comment, allowing the option to work with SDK versions that haven't yet added it to the type stubs.
