@@ -482,8 +482,21 @@ def start_worktree(
                 None,
             )
 
-        base_ref = base or "HEAD"
-        git_cwd: Path | None = main_wt[0] if base and main_wt else None
+        # When parent_cwd is given but no explicit base, fork from the branch
+        # at parent_cwd so the actual git topology matches the recorded parent.
+        # Without this, HEAD resolves from process cwd (typically main), causing
+        # the fork point to diverge from the recorded parent metadata.
+        if not base and parent_cwd:
+            parent_branch = _current_branch(parent_cwd)
+            if parent_branch:
+                base_ref = parent_branch
+                git_cwd: Path | None = main_wt[0] if main_wt else None
+            else:
+                base_ref = "HEAD"
+                git_cwd = None
+        else:
+            base_ref = base or "HEAD"
+            git_cwd = main_wt[0] if base and main_wt else None
 
         subprocess.run(
             [

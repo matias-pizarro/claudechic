@@ -727,11 +727,21 @@ def test_start_worktree_records_parent_from_parent_cwd(tmp_path):
         ok, _, wt_a = start_worktree("feat-a", base="main")
     assert ok and wt_a is not None
 
+    # Make a commit on feat-a so its HEAD diverges from main
+    (wt_a / "a.txt").write_text("a")
+    _git(wt_a, "add", "a.txt")
+    _git(wt_a, "commit", "-m", "feat-a commit")
+    feat_a_head = _git(wt_a, "rev-parse", "HEAD")
+
     with patch("claudechic.features.worktree.git.CONFIG") as cfg:
         cfg.get.return_value = {"path_template": template}
         ok, _, wt_b = start_worktree("feat-b", parent_cwd=wt_a)
     assert ok and wt_b is not None
     assert read_parent_branch(wt_b) == "feat-a"
+
+    # Verify actual git topology: feat-b should fork from feat-a's HEAD
+    merge_base = _git(wt_b, "merge-base", "feat-a", "feat-b")
+    assert merge_base == feat_a_head, "feat-b should fork from feat-a's HEAD"
 
 
 @pytest.mark.usefixtures("patched_main")
@@ -746,10 +756,21 @@ def test_get_finish_info_uses_recorded_parent_over_sibling(tmp_path):
         cfg.get.return_value = {"path_template": template}
         ok, _, wt_a = start_worktree("feat-a", base="main")
         assert ok and wt_a is not None
+
+        # Commit on feat-a so it diverges from main
+        (wt_a / "a.txt").write_text("a")
+        _git(wt_a, "add", "a.txt")
+        _git(wt_a, "commit", "-m", "feat-a commit")
+        feat_a_head = _git(wt_a, "rev-parse", "HEAD")
+
         ok, _, wt_b = start_worktree("feat-b", parent_cwd=wt_a)
         assert ok and wt_b is not None
         ok, _, wt_c = start_worktree("feat-c", parent_cwd=wt_a)
         assert ok and wt_c is not None
+
+    # Verify both children actually fork from feat-a's HEAD
+    assert _git(wt_b, "merge-base", "feat-a", "feat-b") == feat_a_head
+    assert _git(wt_c, "merge-base", "feat-a", "feat-c") == feat_a_head
 
     (wt_b / "b").write_text("b")
     _git(wt_b, "add", "b")
