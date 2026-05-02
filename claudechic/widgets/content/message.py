@@ -7,6 +7,7 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.events import Click
 from textual.message import Message
 from textual.widgets import Markdown, TextArea, Static
 
@@ -72,7 +73,10 @@ class ConnectingIndicator(Vertical):
 
 
 class ErrorMessage(Static):
-    """Error message displayed in the chat view with red styling."""
+    """Error message displayed in the chat view with red styling.
+
+    Click to dismiss. Left-click only.
+    """
 
     can_focus = False
 
@@ -88,7 +92,16 @@ class ErrorMessage(Static):
         display = f"**Error:** {self._message}"
         if self._exception:
             display += f"\n\n`{type(self._exception).__name__}: {self._exception}`"
+        display += "\n\n*click to dismiss*"
         yield Markdown(display, id="content")
+
+    def on_click(self, event: Click) -> None:
+        """Dismiss on left-click."""
+        if event.button != 1:
+            return
+        event.stop()
+        self.display = False
+        self.remove()
 
 
 class SystemInfo(Static):

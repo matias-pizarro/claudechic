@@ -12,7 +12,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -21,11 +21,14 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     SystemMessage,
+    # Aliased to disambiguate from the local TextBlock dataclass below.
+    TextBlock as SdkTextBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
 )
 from claude_agent_sdk.types import (
+    PermissionMode,
     PermissionResult,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -36,7 +39,11 @@ from claude_agent_sdk.types import (
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
 from claudechic.features.worktree.git import FinishState
 from claudechic.file_index import FileIndex
-from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, TOKEN_REMINDER_PATTERN
+from claudechic.formatting import (
+    CONTEXT_USAGE_HEADING,
+    DEFAULT_CONTEXT_WINDOW,
+    TOKEN_REMINDER_PATTERN,
+)
 from claudechic.permissions import PermissionRequest
 from claudechic.sessions import get_plan_path_for_session
 from claudechic.tasks import create_safe_task
@@ -109,6 +116,60 @@ class ChatItem:
 
 
 # ---------------------------------------------------------------------------
+# Settings lookup
+# ---------------------------------------------------------------------------
+
+
+# SDK-valid permission modes. We pass any of these through to the SDK verbatim
+# so users who set e.g. "bypassPermissions" in settings.json get the behavior
+# they asked for, even though the UI state machine doesn't represent those modes.
+_SDK_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
+)
+
+# Modes the UI (footer label, shift+tab cycle) knows how to display. A narrower
+# subset of the SDK modes; see `to_ui_permission_mode` for the mapping.
+# `planSwarm` is intentionally excluded — it's an internal state toggled by
+# a slash command, not something users should configure via settings.json.
+_UI_PERMISSION_MODES = frozenset({"default", "acceptEdits", "plan", "auto"})
+
+
+def get_default_permission_mode(cwd: Path) -> PermissionMode:
+    """Resolve ``permissions.defaultMode`` from Claude settings.json layers.
+
+    Layering matches Claude Code: user < project < local. Returns the topmost
+    SDK-valid mode, or ``"default"`` if nothing is set. The value is suitable
+    to pass directly to ``ClaudeAgentOptions(permission_mode=...)``.
+    """
+    layers = [
+        Path.home() / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.local.json",
+    ]
+    resolved: PermissionMode = "default"
+    for path in layers:
+        try:
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            continue
+        mode = data.get("permissions", {}).get("defaultMode")
+        if isinstance(mode, str) and mode in _SDK_PERMISSION_MODES:
+            resolved = cast(PermissionMode, mode)
+    return resolved
+
+
+def to_ui_permission_mode(mode: str) -> str:
+    """Project an SDK mode onto the UI state machine.
+
+    The UI only represents ``{default, acceptEdits, plan, auto}``; modes outside
+    that set (``bypassPermissions``, ``dontAsk``) collapse to ``"default"`` so
+    the footer and shift+tab cycle stay coherent. The SDK still receives the
+    original mode — this only affects what ``Agent.permission_mode`` holds.
+    """
+    return mode if mode in _UI_PERMISSION_MODES else "default"
+
+
+# ---------------------------------------------------------------------------
 # Agent class
 # ---------------------------------------------------------------------------
 
@@ -143,6 +204,7 @@ class Agent:
         *,
         id: str | None = None,
         worktree: str | None = None,
+        permission_mode: str = "default",
     ):
         # Identity
         self.id = id or str(uuid.uuid4())[:8]
@@ -181,7 +243,7 @@ class Agent:
         self.pending_images: list[ImageAttachment] = []
         self.file_index: FileIndex | None = None
         self.todos: list[dict] = []
-        self.permission_mode: str = "default"  # default, acceptEdits, plan
+        self.permission_mode: str = permission_mode  # default, acceptEdits, plan, auto
         self.session_allowed_tools: set[str] = set()  # Tools allowed for this session
         self._pending_followup: str | None = None  # Auto-send after current response
         self.model: str | None = None  # Model override (None = SDK default)
@@ -589,12 +651,24 @@ Key Rules:
         if isinstance(message, AssistantMessage):
             parent_id = message.parent_tool_use_id
             for block in message.content:
-                # Skip TextBlock - handled via StreamEvent for streaming
                 if isinstance(block, ToolUseBlock):
                     self._handle_tool_use(block, parent_id)
                     had_tool_use[parent_id] = True
                 elif isinstance(block, ToolResultBlock):
                     self._handle_tool_result(block)
+                elif isinstance(block, SdkTextBlock):
+                    # Normally TextBlocks are streamed via StreamEvent deltas
+                    # and arrive here pre-rendered — skip duplicates. But local
+                    # slash commands (/context, /compact, …) bypass streaming
+                    # and deliver their full output as a single TextBlock with
+                    # an empty stream buffer. Route those as command output.
+                    if (
+                        not self._current_text_buffer
+                        and self._current_assistant is None
+                        and CONTEXT_USAGE_HEADING in block.text
+                        and self.observer
+                    ):
+                        self.observer.on_command_output(self, block.text)
 
         elif isinstance(message, UserMessage):
             # Capture UUID for checkpoints (needed for /rewind file restoration)
@@ -808,14 +882,17 @@ Key Rules:
 
         # Block mutating tools in plan mode (except writes to plan file)
         # Note: PreToolUse hook in app.py also blocks these; this is a fallback
-        if self.permission_mode == "plan" and tool_name in self.PLAN_MODE_BLOCKED_TOOLS:
+        if (
+            self.permission_mode in ("plan", "planSwarm")
+            and tool_name in self.PLAN_MODE_BLOCKED_TOOLS
+        ):
             # Allow Write/Edit to files in ~/.claude/plans/
             if tool_name in (ToolName.WRITE, ToolName.EDIT):
                 file_path = tool_input.get("file_path", "")
                 if file_path:
                     plans_dir = Path.home() / ".claude" / "plans"
                     resolved = Path(file_path).expanduser().resolve()
-                    if str(resolved).startswith(str(plans_dir)):
+                    if resolved.is_relative_to(plans_dir):
                         self.plan_path = resolved  # Capture for ExitPlanMode display
                         log.info(f"Auto-approved {tool_name} to plan file (plan mode)")
                         return PermissionResultAllow()
@@ -928,7 +1005,7 @@ Key Rules:
                 self.observer.on_status_changed(self)
 
     # Valid permission modes
-    PERMISSION_MODES = {"default", "acceptEdits", "plan", "planSwarm"}
+    PERMISSION_MODES = {"default", "acceptEdits", "plan", "planSwarm", "auto"}
 
     def _set_permission_mode_local(self, mode: str) -> None:
         """Update permission mode locally without calling SDK.
@@ -952,9 +1029,7 @@ Key Rules:
         """Update permission mode via SDK and emit event.
 
         Args:
-            mode: One of 'default', 'acceptEdits', 'plan', 'planSwarm'.
-                  'planSwarm' is claudechic-specific; the SDK is set to
-                  'plan' (closest safe enforceable mode).
+            mode: One of 'default', 'acceptEdits', 'plan'
         """
         assert mode in self.PERMISSION_MODES, f"Invalid permission mode: {mode}"
         if self.permission_mode != mode:
@@ -963,12 +1038,12 @@ Key Rules:
             if mode == "plan":
                 await self.ensure_plan_path()
             # Only call SDK if connected (client exists and has active connection).
-            # "planSwarm" is claudechic-specific; set SDK to "plan" (the closest
-            # safe enforceable mode) since the SDK's PermissionMode Literal
-            # doesn't include "planSwarm".
+            # "planSwarm" maps to SDK "plan" for server-side enforcement;
+            # all other modes pass through directly.
             if self.client and self.session_id:
                 sdk_mode = "plan" if mode == "planSwarm" else mode
-                await self.client.set_permission_mode(sdk_mode)  # type: ignore[arg-type]
+                # Validated by the assert above; cast for the SDK's Literal type.
+                await self.client.set_permission_mode(cast(PermissionMode, sdk_mode))
             if self.observer:
                 self.observer.on_permission_mode_changed(self)
 

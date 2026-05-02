@@ -35,7 +35,7 @@ async def test_app_mounts_basic_widgets(mock_sdk):
 
 @pytest.mark.asyncio
 async def test_permission_mode_cycle(mock_sdk):
-    """Shift+Tab cycles permission mode: default -> acceptEdits -> plan -> default."""
+    """Shift+Tab cycles permission mode: default -> acceptEdits -> plan -> auto -> default."""
     app = ChatApp()
     async with app.run_test() as pilot:
         assert app._agent is not None
@@ -46,6 +46,9 @@ async def test_permission_mode_cycle(mock_sdk):
 
         await pilot.press("shift+tab")
         assert app._agent.permission_mode == "plan"
+
+        await pilot.press("shift+tab")
+        assert app._agent.permission_mode == "auto"
 
         await pilot.press("shift+tab")
         assert app._agent.permission_mode == "default"
@@ -1269,3 +1272,31 @@ def test_no_markup_true_with_dynamic_content():
         "notify(markup=True) with dynamic content is unsafe "
         f"(can cause MarkupError): {violations}"
     )
+
+
+@pytest.mark.asyncio
+async def test_plan_swarm_permission_mode_footer(mock_sdk):
+    """Setting planSwarm mode updates footer text and applies plan-swarm-mode CSS class."""
+    app = ChatApp()
+    async with app.run_test() as pilot:
+        footer = app.query_one(StatusFooter)
+        agent = app._agent
+        assert agent is not None
+
+        # Enter planSwarm mode via the agent
+        await agent.set_permission_mode("planSwarm")
+        await pilot.pause()
+
+        # Footer should reflect planSwarm mode
+        assert footer.permission_mode == "planSwarm"
+
+        # Verify the label text
+        label = footer.query_one("#permission-mode-label")
+        rendered = label.render()
+        assert "plan swarm" in rendered.plain.lower()
+
+        # Verify plan-swarm-mode CSS class is applied
+        assert label.has_class("plan-swarm-mode")
+        # Other mode classes should not be present
+        assert not label.has_class("active")
+        assert not label.has_class("plan-mode")

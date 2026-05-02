@@ -38,7 +38,7 @@ class AgentObserver(Protocol):
         ...
 
     def on_permission_mode_changed(self, agent: Agent) -> None:
-        """Called when permission_mode changes (default/acceptEdits/plan)."""
+        """Called when permission_mode changes. See Agent.PERMISSION_MODES for valid modes."""
         ...
 
     def on_message_updated(self, agent: Agent) -> None:
