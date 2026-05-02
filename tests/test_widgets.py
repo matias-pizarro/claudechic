@@ -22,7 +22,6 @@ from claudechic.widgets import (
     EffortLabel,
     ContextBar,
 )
-from claudechic.widgets.content.message import ErrorDismiss
 from claudechic.widgets.content.todo import TodoItem
 from claudechic.widgets.layout.processes import ProcessItem
 from claudechic.enums import AgentStatus
@@ -1151,27 +1150,14 @@ async def test_tool_use_widget_edit_lazy_diff():
 
 
 @pytest.mark.asyncio
-async def test_error_message_dismiss_on_left_click():
-    """Left-clicking the [×] button removes the ErrorMessage from the DOM."""
+async def test_error_message_dismiss_on_click():
+    """Left-clicking the error message removes it from the DOM."""
     app = WidgetTestApp(lambda: ErrorMessage("test failure"))
     async with app.run_test() as pilot:
         assert len(app.query(ErrorMessage)) == 1
-        await pilot.click(ErrorDismiss)
+        await pilot.click(ErrorMessage)
         await pilot.pause()
         assert len(app.query(ErrorMessage)) == 0
-
-
-@pytest.mark.asyncio
-async def test_error_message_body_click_does_not_dismiss():
-    """Clicking the error body (not the [×] button) does NOT dismiss."""
-    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
-    async with app.run_test() as pilot:
-        assert len(app.query(ErrorMessage)) == 1
-        from textual.widgets import Markdown
-
-        await pilot.click(Markdown)
-        await pilot.pause()
-        assert len(app.query(ErrorMessage)) == 1
 
 
 @pytest.mark.asyncio
@@ -1191,47 +1177,13 @@ async def test_error_message_renders_content():
 
 
 @pytest.mark.asyncio
-async def test_error_message_dismiss_button_is_focusable():
-    """The [×] dismiss button is focusable for keyboard accessibility."""
+async def test_error_message_has_dismiss_hint():
+    """ErrorMessage includes a 'click to dismiss' hint."""
     app = WidgetTestApp(lambda: ErrorMessage("test failure"))
     async with app.run_test():
-        assert app.query_one(ErrorDismiss).can_focus is True
+        error = app.query_one(ErrorMessage)
+        from textual.widgets import Markdown
 
-
-@pytest.mark.asyncio
-async def test_error_message_dismiss_via_keyboard():
-    """Pressing Enter on the focused dismiss button removes ErrorMessage."""
-    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
-    async with app.run_test() as pilot:
-        assert len(app.query(ErrorMessage)) == 1
-        app.query_one(ErrorDismiss).focus()
-        await pilot.pause()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert len(app.query(ErrorMessage)) == 0
-
-
-@pytest.mark.asyncio
-async def test_error_message_dismiss_via_space():
-    """Pressing Space on the focused dismiss button removes ErrorMessage."""
-    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
-    async with app.run_test() as pilot:
-        assert len(app.query(ErrorMessage)) == 1
-        app.query_one(ErrorDismiss).focus()
-        await pilot.pause()
-        await pilot.press("space")
-        await pilot.pause()
-        assert len(app.query(ErrorMessage)) == 0
-
-
-@pytest.mark.asyncio
-async def test_error_message_double_dismiss_is_safe():
-    """Rapidly dismissing twice does not raise an exception."""
-    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
-    async with app.run_test() as pilot:
-        assert len(app.query(ErrorMessage)) == 1
-        dismiss_btn = app.query_one(ErrorDismiss)
-        dismiss_btn.action_dismiss()
-        dismiss_btn.action_dismiss()
-        await pilot.pause()
-        assert len(app.query(ErrorMessage)) == 0
+        md = error.query_one(Markdown)
+        source = md.source if hasattr(md, "source") else str(md.render())
+        assert "click to dismiss" in source

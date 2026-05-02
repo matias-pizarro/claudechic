@@ -72,50 +72,10 @@ class ConnectingIndicator(Vertical):
             yield Spinner("Establishing session")
 
 
-class ErrorDismiss(Static):
-    """Close button for ErrorMessage.
-
-    Left-click or Enter/Space removes the parent ErrorMessage.
-    Focusable so keyboard-only users can Tab to it and dismiss.
-    """
-
-    can_focus = True
-
-    BINDINGS = [
-        Binding("enter", "dismiss", "Dismiss", show=False),
-        Binding("space", "dismiss", "Dismiss", show=False),
-    ]
-
-    def __init__(self, content: str = "", **kwargs: object) -> None:
-        super().__init__(content, **kwargs)
-        self._dismissed = False
-
-    def action_dismiss(self) -> None:
-        """Remove the parent ErrorMessage from the DOM."""
-        if self._dismissed:
-            return
-        parent = self.parent
-        if isinstance(parent, ErrorMessage):
-            self._dismissed = True
-            # Capture the scroll container before removal so we can
-            # refresh its layout afterward (fixes viewport height
-            # staying stuck after dismiss).
-            scroll_container = parent.parent
-            parent.remove()
-            if scroll_container is not None:
-                scroll_container.refresh(layout=True)
-
-    def on_click(self, event: Click) -> None:
-        """Dismiss on left-click only; stop all clicks to prevent bubbling."""
-        event.stop()
-        if event.button == 1:
-            self.action_dismiss()
-
-
 class ErrorMessage(Static):
     """Error message displayed in the chat view with red styling.
 
-    Contains a [×] close button for dismissal.
+    Click to dismiss. Left-click only.
     """
 
     can_focus = False
@@ -132,8 +92,16 @@ class ErrorMessage(Static):
         display = f"**Error:** {self._message}"
         if self._exception:
             display += f"\n\n`{type(self._exception).__name__}: {self._exception}`"
+        display += "\n\n*click to dismiss*"
         yield Markdown(display, id="content")
-        yield ErrorDismiss("×", classes="error-dismiss")
+
+    def on_click(self, event: Click) -> None:
+        """Dismiss on left-click."""
+        if event.button != 1:
+            return
+        event.stop()
+        self.display = False
+        self.remove()
 
 
 class SystemInfo(Static):
