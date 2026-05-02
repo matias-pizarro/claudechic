@@ -370,6 +370,8 @@ Replace lines 951-973 in `claudechic/agent.py`. The ONLY diff from base should b
 
 This is byte-identical to upstream 0.4.20's version. Both sides produce identical output from the same base → git auto-resolves (keeps one copy).
 
+> **Note on docstring:** The method docstring says `mode: One of 'default', 'acceptEdits', 'plan'` (matching upstream exactly). `planSwarm` is intentionally omitted from the docstring (as upstream does) because it's a local-only mode not exposed to users. The `PERMISSION_MODES` set at line 931 still includes `"planSwarm"` and the assert validates it — the docstring is for human readers, not enforcement.
+
 - [ ] **Step 5: Add planSwarm to local `_handle_permission` enforcement**
 
 In `claudechic/agent.py`, find line ~811:
@@ -382,9 +384,56 @@ Replace with:
         if self.permission_mode in ("plan", "planSwarm") and tool_name in self.PLAN_MODE_BLOCKED_TOOLS:
 ```
 
-This ensures planSwarm retains plan-mode tool blocking via local enforcement even though the SDK call is skipped. Without this, planSwarm would have no restriction layer (the SDK is in its previous mode, and local code only checked `"plan"`).
+This ensures planSwarm retains plan-mode tool blocking via the `can_use_tool` callback even though the SDK call is skipped.
 
-- [ ] **Step 6: Run tests to verify all 4 pass**
+- [ ] **Step 5b: Add planSwarm to `_plan_mode_hooks` in app.py (defense-in-depth)**
+
+In `claudechic/app.py`, find line ~677:
+```python
+            if permission_mode == "plan" and tool_name in blocked_tools:
+```
+
+Replace with:
+```python
+            if permission_mode in ("plan", "planSwarm") and tool_name in blocked_tools:
+```
+
+This updates the `PreToolUse` hook (a secondary enforcement layer that checks the SDK-reported mode). Note: when planSwarm skips the SDK call, the SDK-reported mode remains the previous value (e.g., "default"), so this hook won't fire. The primary enforcement is `_handle_permission` (Step 5). This change ensures defense-in-depth if the SDK ever reports "planSwarm" in hook_input.
+
+> **Merge safety:** Upstream 0.4.20 does NOT modify `_plan_mode_hooks` — this line is in a stable region untouched by the merge.
+
+- [ ] **Step 5c: Add test for planSwarm blocking in `_handle_permission`**
+
+Add to `tests/test_agent.py` after the `TestSetPermissionMode` class:
+
+```python
+class TestPlanSwarmEnforcement:
+    """Verify planSwarm blocks mutating tools via _handle_permission."""
+
+    @pytest.mark.asyncio
+    async def test_planswarm_blocks_mutating_tools(self):
+        """planSwarm must deny Edit/Write/Bash just like plan mode."""
+        from claudechic.permissions import PermissionRequest
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        # Mock the observer to capture permission requests (we won't resolve them)
+        agent.observer = MagicMock()
+        agent.observer.on_prompt_added = MagicMock()
+
+        # Directly test _handle_permission blocks Bash in planSwarm
+        from claude_agent_sdk.types import ToolPermissionContext
+
+        context = ToolPermissionContext(tool_name="Bash", tool_input={})
+        result = await agent._handle_permission("Bash", {"command": "rm -rf /"}, context)
+
+        # Should deny (not allow)
+        from claude_agent_sdk.types import PermissionResultDeny
+        assert isinstance(result, PermissionResultDeny)
+```
+
+- [ ] **Step 6: Run tests to verify all pass**
 
 Run: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode -v`
 Expected: All 4 tests PASS
@@ -443,9 +492,21 @@ if ! git merge --no-ff 0.4.20 -m "Merge 0.4.20"; then
     echo "CONFLICT in Phase 1. Conflicted files:"
     git diff --name-only --diff-filter=U
     echo ""
-    echo "Expected: footer.py trivial conflict (add 'auto' entry)."
-    echo "Resolve manually, then re-run this script (it detects merged state)."
-    echo "Temp branch '$TEMP_BRANCH' left intact for diagnosis."
+    echo "Expected conflicts: footer.py (add 'auto' entry) and/or tests/test_agent.py (add/add)."
+    echo ""
+    echo "To resolve and continue:"
+    echo "  1. Fix all conflicted files (see Step 2 below)"
+    echo "  2. git add <resolved files>"
+    echo "  3. git merge --continue"
+    echo "  4. Then run remaining phases manually:"
+    echo "     uv run python -m pytest tests/ -n auto -q"
+    echo "     git merge --no-ff 0.4.21 -m 'Merge 0.4.21'"
+    echo "     uv run python -m pytest tests/ -n auto -q"
+    echo "     git merge --no-ff origin/main -m 'Merge origin/main'"
+    echo "     uv run python -m pytest tests/ -n auto -q"
+    echo "     uv run pre-commit run --all-files"
+    echo ""
+    echo "Temp branch '$TEMP_BRANCH' left intact for resolution."
     exit 1
 fi
 
@@ -492,8 +553,15 @@ When Phase 1 reports a conflict on `footer.py`:
 5. Continue with Phase 2+
 
 When `tests/test_agent.py` has add/add conflict:
-1. Resolution: keep both test classes (ours: TestUpdateContext + TestPreparePrompt + TestTokenReminderPattern + TestSetPermissionMode; theirs: test_get_default_permission_mode + test_to_ui_permission_mode)
-2. `git add tests/test_agent.py && git merge --continue`
+1. Resolution: combine both files into one coherent module:
+   - Union of imports (ours: `Path, AsyncMock, MagicMock, pytest, Agent`; theirs adds: `json, tmp_path fixture`)
+   - Keep our `_make_agent()` helper
+   - Keep theirs: `_write_settings(tmp_path, data)` helper
+   - Keep ALL test classes from both sides:
+     - Ours: `TestUpdateContext`, `TestPreparePrompt`, `TestTokenReminderPattern`, `TestSetPermissionMode`, `TestPlanSwarmEnforcement`
+     - Theirs: `test_get_default_permission_mode_*` (module-level functions), `test_to_ui_permission_mode_*` (module-level functions)
+   - Ensure no duplicate imports or name collisions
+2. `git add tests/test_agent.py`
 
 - [ ] **Step 3: Verify final state**
 
