@@ -705,6 +705,12 @@ def get_finish_info(
     else:
         # Auto-detect parent branch.
         #
+        # BEHAVIOR CHANGE (0.4.22 merge): recorded parents are now
+        # authoritative. When the recorded parent branch exists, the code
+        # returns errors instead of silently falling back to the topology
+        # heuristic. This prevents merges landing on the wrong branch when
+        # the parent's worktree was removed or the main worktree is busy.
+        #
         # Merge-target invariants (shared with the explicit base_branch path):
         #   1. Prefer the parent recorded at worktree-creation time (unambiguous)
         #      over the commit-topology heuristic, which ties when sibling
@@ -712,9 +718,10 @@ def get_finish_info(
         #   2. If the recorded parent has an active worktree → merge directly.
         #   3. If the recorded parent exists as a branch but has no worktree:
         #      - rebase mode: use main worktree with needs_checkout=True
-        #        (mirrors the explicit path's V7b behavior)
-        #      - no-ff mode: fall back to heuristic (no-ff requires a live
-        #        worktree to receive the merge commit)
+        #        (mirrors the explicit path's V7b behavior); error if
+        #        main worktree fails preflight
+        #      - no-ff mode: error requiring a worktree (no-ff needs a
+        #        live worktree to receive the merge commit)
         #   4. If the recorded parent branch was deleted → fall back to heuristic.
         #   5. If no record exists (legacy worktree) → topology heuristic.
         #   6. Final fallback: main branch.
@@ -751,13 +758,7 @@ def get_finish_info(
                         needs_checkout = True
                         resolved = True
                     else:
-                        return (
-                            False,
-                            f"Cannot merge into '{parent_branch}': {err} "
-                            f"Clean up the main worktree or create a worktree "
-                            f"for '{parent_branch}'.",
-                            None,
-                        )
+                        return False, err, None
             else:
                 # Invariant 4: branch was deleted
                 log.debug(

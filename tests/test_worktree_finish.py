@@ -846,7 +846,7 @@ def test_get_finish_info_uses_checkout_when_parent_worktree_gone_rebase(
     assert read_parent_branch(wt_b) == "feat-a"
 
     # Rebase mode: recorded parent is authoritative, use main worktree
-    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", None):
+    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
         success, _, info = get_finish_info(wt_b)
     assert success and info is not None
     assert info.base_branch == "feat-a"
@@ -908,9 +908,62 @@ def test_get_finish_info_errors_when_parent_worktree_gone_main_dirty(
     # Make main worktree dirty
     (repo / "dirty").write_text("dirty")
 
-    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", None):
+    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
         success, msg, info = get_finish_info(wt_b)
     assert not success
     assert info is None
-    assert "feat-a" in msg
     assert "uncommitted" in msg.lower() or "clean" in msg.lower()
+
+
+@pytest.mark.parametrize(
+    "setup_fn, error_fragment",
+    [
+        pytest.param(
+            lambda repo: (repo / "dirty").write_text("dirty"),
+            "uncommitted",
+            id="dirty-main",
+        ),
+        pytest.param(
+            lambda repo: (repo / ".git" / "MERGE_HEAD").write_text(
+                "0" * 40 + "\n"
+            ),
+            "merge is in progress",
+            id="merge-in-progress",
+        ),
+        pytest.param(
+            lambda repo: (repo / ".git" / "REBASE_HEAD").write_text(
+                "0" * 40 + "\n"
+            ),
+            "rebase is in progress",
+            id="rebase-in-progress",
+        ),
+    ],
+)
+def test_get_finish_info_errors_on_all_preflight_failures(
+    patched_main, tmp_path, setup_fn, error_fragment
+):
+    """Rebase mode: all _preflight_main_worktree failure modes return
+    errors when the recorded parent is authoritative but has no worktree."""
+    repo = patched_main
+    template = f"{tmp_path}/wts/${{repo_name}}/${{branch_name}}"
+    with patch("claudechic.features.worktree.git.CONFIG") as cfg:
+        cfg.get.return_value = {"path_template": template}
+        ok, _, wt_a = start_worktree("feat-a", base="main")
+        assert ok and wt_a is not None
+        ok, _, wt_b = start_worktree("feat-b", parent_cwd=wt_a)
+        assert ok and wt_b is not None
+
+    (wt_b / "x").write_text("x")
+    _git(wt_b, "add", "x")
+    _git(wt_b, "commit", "-m", "feat-b commit")
+
+    _git(repo, "worktree", "remove", str(wt_a))
+
+    # Make main worktree fail preflight
+    setup_fn(repo)
+
+    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "rebase"):
+        success, msg, info = get_finish_info(wt_b)
+    assert not success
+    assert info is None
+    assert error_fragment in msg.lower()
