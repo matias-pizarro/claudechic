@@ -132,6 +132,17 @@ class StatusFooter(Static):
     effort = reactive("")
     branch = reactive("")
 
+    # Maps permission_mode → (display text, active CSS class or None).
+    # "default" gets no class and keeps plain styling. Adding a new mode
+    # means one entry here; _MODE_CLASSES is derived below.
+    _MODE_DISPLAY: dict[str, tuple[str, str | None]] = {
+        "default": ("Auto-edit: off", None),
+        "planSwarm": ("Plan swarm", "plan-swarm-mode"),
+        "plan": ("Plan mode", "plan-mode"),
+        "acceptEdits": ("Auto-edit: on", "active"),
+    }
+    _MODE_CLASSES = tuple(cls for _, cls in _MODE_DISPLAY.values() if cls)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._cwd: str = ""
@@ -296,26 +307,10 @@ class StatusFooter(Static):
         if label := self.query_one_optional(
             "#permission-mode-label", PermissionModeLabel
         ):
-            if value == "planSwarm":
-                label.update("Plan swarm")
-                label.set_class(False, "active")
-                label.set_class(False, "plan-mode")
-                label.set_class(True, "plan-swarm-mode")
-            elif value == "plan":
-                label.update("Plan mode")
-                label.set_class(False, "active")
-                label.set_class(True, "plan-mode")
-                label.set_class(False, "plan-swarm-mode")
-            elif value == "acceptEdits":
-                label.update("Auto-edit: on")
-                label.set_class(True, "active")
-                label.set_class(False, "plan-mode")
-                label.set_class(False, "plan-swarm-mode")
-            else:  # default
-                label.update("Auto-edit: off")
-                label.set_class(False, "active")
-                label.set_class(False, "plan-mode")
-                label.set_class(False, "plan-swarm-mode")
+            text, active = self._MODE_DISPLAY.get(value, self._MODE_DISPLAY["default"])
+            label.update(text)
+            for cls in self._MODE_CLASSES:
+                label.set_class(cls == active, cls)
         self.call_after_refresh(self._render_cwd_label)
 
     def update_processes(self, processes: list[BackgroundProcess]) -> None:
