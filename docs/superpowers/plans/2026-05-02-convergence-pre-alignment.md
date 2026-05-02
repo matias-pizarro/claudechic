@@ -10,7 +10,9 @@
 
 **Non-goals:**
 - Adding "auto" mode (arrives via 0.4.20 merge)
-- Re-adding planSwarm→"plan" SDK enforcement (defer to post-merge commit)
+
+**Deferred to Task 5 (mandatory, post-merge):**
+- Restore planSwarm→"plan" SDK enforcement (blocks release tagging)
 
 **Rollback:** If merge verification fails beyond the documented trivial residual, abandon pre-alignment and resolve conflicts manually during merge (~10 minutes for 3 hunks).
 
@@ -237,11 +239,12 @@ No behavioral change — all characterization tests pass."
 
 **Behavioral note:** This task reverts the planSwarm→"plan" SDK mapping that convergence_target added (commit `d16d091`), returning to the base's (`a6624cf`) behavior where planSwarm skips the SDK call entirely. This makes our code identical in structure to upstream's, enabling zero-conflict merge. The planSwarm→"plan" enforcement can be re-added as a separate commit AFTER the merge sequence.
 
-**What changes and what is preserved:**
-- **Preserved:** planSwarm blocks mutating tools (enforced by `_handle_permission` at Step 5, which fires for every tool use request)
-- **Preserved:** planSwarm blocks mutating tools via PreToolUse hook (Step 5b, defense-in-depth)
-- **Lost (temporary):** SDK-visible permission mode is no longer set to "plan" during planSwarm. This means SDK-internal behavior keyed off `permission_mode == "plan"` won't fire during planSwarm. In practice, the SDK doesn't have its own plan-mode blocking beyond what our callback provides.
-- **Post-merge restoration:** After the merge sequence completes, a follow-up commit MAY restore `planSwarm→"plan"` SDK mapping if desired. This is documented as acceptance criterion #9 below.
+**What changes and what is preserved (pre-merge state):**
+- **Preserved:** planSwarm blocks mutating tools via `_handle_permission` (Step 5). This is the SOLE active enforcement layer pre-merge.
+- **Prepared but inactive:** Step 5b updates the PreToolUse hook to recognize "planSwarm", but this hook checks `hook_input.permission_mode` (SDK-reported). Since the SDK call is skipped, SDK-reported mode stays at the previous value → the hook won't fire for planSwarm pre-merge. Step 5b prepares the hook for post-merge when the SDK mapping is restored.
+- **Lost (temporary):** SDK-visible permission mode is no longer set to "plan" during planSwarm.
+- **Assumption:** The SDK has no plan-mode blocking beyond what our `can_use_tool` callback provides. This is based on: (a) the base version (0.4.19) shipped without the mapping and had no reported enforcement issues, (b) upstream 0.4.20 also skips the call.
+- **Mandatory post-merge restoration (Task 5):** Immediately after the merge sequence completes, a follow-up commit MUST restore `planSwarm→"plan"` SDK mapping. This restores all three enforcement layers (callback + hook + SDK). See Task 5 and acceptance criterion #9.
 
 **Why the tradeoff is acceptable:** The base version (released as 0.4.19) never sent "plan" to the SDK for planSwarm. convergence_target added it as belt-and-suspenders. Removing it returns to shipped behavior while adding LOCAL enforcement (Steps 5 + 5b) that the base never had. Net effect: enforcement is maintained through a different (local) mechanism.
 
@@ -613,6 +616,59 @@ Expected merge residuals:
 
 ---
 
+## Task 5: Post-Merge Restoration of planSwarm SDK Mapping (MANDATORY)
+
+**Files:**
+- Modify: `claudechic/agent.py:set_permission_mode`
+
+This task runs AFTER the merge sequence (Tasks 3) completes. It restores the `planSwarm→"plan"` SDK mapping that was temporarily removed for merge convergence.
+
+- [ ] **Step 1: Restore planSwarm→"plan" SDK mapping**
+
+In `claudechic/agent.py`, find `set_permission_mode` and change:
+```python
+            if self.client and self.session_id and mode != "planSwarm":
+                # Validated by the assert above; cast for the SDK's Literal type.
+                await self.client.set_permission_mode(cast(PermissionMode, mode))
+```
+
+To:
+```python
+            if self.client and self.session_id:
+                # "planSwarm" maps to "plan" for SDK enforcement; all other modes
+                # pass through directly.
+                sdk_mode = "plan" if mode == "planSwarm" else mode
+                # Validated by the assert above; cast for the SDK's Literal type.
+                await self.client.set_permission_mode(cast(PermissionMode, sdk_mode))
+```
+
+- [ ] **Step 2: Update test expectation**
+
+In `tests/test_agent.py`, update `test_planswarm_skips_sdk_call` → rename to `test_planswarm_sends_plan_to_sdk` and assert:
+```python
+agent.client.set_permission_mode.assert_called_once_with("plan")
+```
+
+- [ ] **Step 3: Run tests + pre-commit**
+
+Run: `uv run python -m pytest tests/ -n auto -q && uv run pre-commit run --all-files`
+Expected: All pass
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add claudechic/agent.py tests/test_agent.py
+git commit -m "feat: restore planSwarm→plan SDK mapping (post-merge)
+
+Re-adds the SDK-level plan-mode enforcement for planSwarm that was
+temporarily removed for merge convergence. All three enforcement
+layers now active: _handle_permission + PreToolUse hook + SDK."
+```
+
+**Gate:** Release tagging is blocked until this commit lands.
+
+---
+
 ## Acceptance Criteria
 
 1. `agent.py:set_permission_mode` produces byte-identical output to upstream 0.4.20's version
@@ -622,5 +678,8 @@ Expected merge residuals:
 5. `uv run pre-commit run --all-files` passes
 6. `git merge --no-ff 0.4.20` produces: zero conflict on agent.py, trivial 1-line conflict on footer.py, add/add on tests/test_agent.py
 7. After resolving trivial residuals (~2 min), all 3 merges complete and tests pass
-8. planSwarm enforcement is preserved via local `_handle_permission` + PreToolUse hook (no enforcement gap)
-9. **Post-merge mandatory task:** Restore `planSwarm→"plan"` SDK mapping as a separate commit immediately after the merge sequence completes. This restores full defense-in-depth (local + SDK + hook — all three layers). Block tagging until this is done.
+8. planSwarm enforcement is preserved pre-merge via `_handle_permission` (sole active layer); full defense-in-depth restored by Task 5
+9. Task 5 (post-merge) restores `planSwarm→"plan"` SDK mapping, activating all three enforcement layers. Release tagging is blocked until Task 5 lands.
+
+**Out of scope (pre-existing issues, not introduced by this plan):**
+- The plan-file allow-path uses `str.startswith(plans_dir)` which permits sibling directories (e.g., `~/.claude/plans-evil/`). This is a pre-existing security concern in both `_handle_permission` and `_plan_mode_hooks`. Fixing it is tracked separately and does not block this convergence work.
