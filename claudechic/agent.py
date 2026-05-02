@@ -1020,11 +1020,12 @@ Key Rules:
             if mode == "plan":
                 await self.ensure_plan_path()
             # Only call SDK if connected (client exists and has active connection).
-            # "planSwarm" is claudechic-specific; skip SDK call for it since the
-            # SDK's PermissionMode Literal doesn't include it.
-            if self.client and self.session_id and mode != "planSwarm":
+            # "planSwarm" maps to SDK "plan" for server-side enforcement;
+            # all other modes pass through directly.
+            if self.client and self.session_id:
+                sdk_mode = "plan" if mode == "planSwarm" else mode
                 # Validated by the assert above; cast for the SDK's Literal type.
-                await self.client.set_permission_mode(cast(PermissionMode, mode))
+                await self.client.set_permission_mode(cast(PermissionMode, sdk_mode))
             if self.observer:
                 self.observer.on_permission_mode_changed(self)
 

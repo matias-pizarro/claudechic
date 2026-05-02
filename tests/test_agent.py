@@ -153,8 +153,8 @@ class TestSetPermissionMode:
     """Tests for Agent.set_permission_mode() SDK interaction."""
 
     @pytest.mark.asyncio
-    async def test_planswarm_skips_sdk_call(self):
-        """planSwarm is claudechic-specific; SDK call is skipped entirely."""
+    async def test_planswarm_sends_plan_to_sdk(self):
+        """planSwarm maps to 'plan' for SDK enforcement (server-side blocking)."""
         agent = _make_agent()
         agent.client = MagicMock()
         agent.client.set_permission_mode = AsyncMock()
@@ -164,7 +164,7 @@ class TestSetPermissionMode:
         await agent.set_permission_mode("planSwarm")
 
         assert agent.permission_mode == "planSwarm"
-        agent.client.set_permission_mode.assert_not_called()
+        agent.client.set_permission_mode.assert_called_once_with("plan")
 
     @pytest.mark.asyncio
     async def test_regular_mode_passes_through_to_sdk(self):
