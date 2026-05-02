@@ -1018,6 +1018,53 @@ def test_word_diff_with_go_syntax():
         assert not text[0].isalnum() or start == 0 or not old_line[start - 1].isalnum()
 
 
+def test_highlight_text_preserves_tab_positions():
+    """Tab-indented source must keep token spans aligned with raw text.
+
+    Regression test: previously the lexer was created with ``tabsize=8``,
+    which expands tabs into 8 spaces inside token text. The position
+    accumulator (now replaced with ``get_tokens_unprocessed`` indices)
+    drifted +7 chars per tab, so Go syntax spans landed on the wrong
+    characters or extended past end-of-content.
+    """
+    from claudechic.widgets.content.diff import _highlight_text
+
+    src = 'func main() {\n\tprintln("hi")\n}'
+    content = _highlight_text(src, "go")
+
+    # Content length must equal source length
+    assert len(content.plain) == len(src)
+
+    # Every span must lie within bounds, and the slice must match the source
+    # (non-trivial: catches drift even when spans stay in-bounds).
+    for span in content._spans:
+        assert 0 <= span.start <= span.end <= len(src), (
+            f"span {span} out of bounds for len={len(src)}"
+        )
+
+    # Spot-check that the keyword `func` got highlighted at position 0
+    keyword_spans = [s for s in content._spans if s.start == 0 and s.end == 4]
+    assert keyword_spans, "expected a span covering `func` at [0:4]"
+
+
+def test_diff_widget_expands_tabs():
+    """Tabs in input must be expanded so ``len()`` matches rendered cell width.
+
+    Without expansion, tab-indented sources (Go, Makefiles) misalign because
+    terminals render ``\\t`` at up to 8 cols while ``len`` counts it as 1 —
+    backgrounds underfill and side-by-side columns drift.
+    """
+    from claudechic.widgets.content.diff import DiffWidget
+
+    old = "func main() {\n\treturn 1\n}"
+    new = "func main() {\n\treturn 2\n}"
+
+    w = DiffWidget(old=old, new=new, path="main.go")
+    assert "\t" not in w._old
+    assert "\t" not in w._new
+    assert " " * w.TAB_SIZE + "return 1" in w._old
+
+
 # --- Lazy collapsible tests ---
 
 
