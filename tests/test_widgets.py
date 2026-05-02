@@ -7,6 +7,7 @@ from textual.widgets import Static
 from claudechic.widgets import (
     ChatInput,
     ChatMessage,
+    ErrorMessage,
     ThinkingIndicator,
     SelectionPrompt,
     QuestionPrompt,
@@ -1271,3 +1272,46 @@ async def test_tool_use_widget_edit_lazy_diff():
         # DiffWidget should now exist
         diffs = widget.query(DiffWidget)
         assert len(diffs) == 1
+
+
+# ── ErrorMessage dismiss tests ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_error_message_dismiss_on_click():
+    """Left-clicking the error message removes it from the DOM."""
+    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
+    async with app.run_test() as pilot:
+        assert len(app.query(ErrorMessage)) == 1
+        await pilot.click(ErrorMessage)
+        await pilot.pause()
+        assert len(app.query(ErrorMessage)) == 0
+
+
+@pytest.mark.asyncio
+async def test_error_message_renders_content():
+    """ErrorMessage renders the message text and exception details."""
+    exc = ValueError("bad value")
+    app = WidgetTestApp(lambda: ErrorMessage("Something broke", exc))
+    async with app.run_test():
+        error = app.query_one(ErrorMessage)
+        from textual.widgets import Markdown
+
+        md = error.query_one(Markdown)
+        source = md.source if hasattr(md, "source") else str(md.render())
+        assert "Something broke" in source
+        assert "ValueError" in source
+        assert "bad value" in source
+
+
+@pytest.mark.asyncio
+async def test_error_message_has_dismiss_hint():
+    """ErrorMessage includes a 'click to dismiss' hint."""
+    app = WidgetTestApp(lambda: ErrorMessage("test failure"))
+    async with app.run_test():
+        error = app.query_one(ErrorMessage)
+        from textual.widgets import Markdown
+
+        md = error.query_one(Markdown)
+        source = md.source if hasattr(md, "source") else str(md.render())
+        assert "click to dismiss" in source

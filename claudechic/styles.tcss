@@ -141,11 +141,15 @@ BaseToolWidget:hover {
     border-left: wide $panel-lighten-2;
 }
 
-/* Error messages - red, like user messages but indicating problems */
+/* Error messages - red, click to dismiss */
 ErrorMessage {
     border-left: thick $error;
     background: $error 10%;
     margin: 1 0 1 0;
+}
+
+ErrorMessage:hover {
+    background: $error 20%;
 }
 
 /* System info messages - muted, informational */
