@@ -670,7 +670,7 @@ layers now active: _handle_permission + PreToolUse hook + SDK."
 
 8. Task 5 restores `planSwarm→"plan"` SDK mapping in `set_permission_mode`
 9. Enforcement verified by tests: `test_planswarm_sends_plan_to_sdk` (SDK mapping) + `TestPlanSwarmEnforcement` (local `_handle_permission` blocking)
-10. **Manual hook verification (after Task 5):** Launch app (`uv run claudechic`), enter `/plan-swarm`, attempt any tool use (e.g., type a message). Confirm tool is blocked or planSwarm orchestration intercepts correctly. This verifies the full path: SDK receives "plan" → PreToolUse hook fires on "plan" → blocks mutating tools. (The hook already handles "plan" — no code change needed.)
+10. **Manual hook verification (after Task 5):** Launch app (`uv run claudechic`), enter `/plan-swarm`, type `please run echo test in bash`. Expected outcome: the Bash tool use is **denied** with a message containing "not available in plan mode". This confirms the full path: SDK mode set to "plan" → PreToolUse hook fires → blocks Bash. Record the denial message in the Task 5 commit message as evidence (e.g., `Verified: "Bash is not available in plan mode"`).
 11. `uv run python -m pytest tests/ -n auto -q` passes after restoration
 12. **Release gate (human-enforced):** No release tag until Task 5 lands and manual hook verification passes. Verify automated: `uv run python -m pytest tests/test_agent.py::TestSetPermissionMode::test_planswarm_sends_plan_to_sdk tests/test_agent.py::TestPlanSwarmEnforcement -v`. Task 4's tag is an internal alignment marker, not a release tag.
 
