@@ -730,14 +730,17 @@ def get_finish_info(
                 parent_dir = parent_wt.path
                 resolved = True
             elif branch_exists(parent_branch, cwd=cwd):
-                # Invariant 3: branch exists but no worktree
+                # Invariant 3: branch exists but no worktree. The recorded
+                # parent is authoritative — do NOT fall back to heuristic,
+                # which could silently retarget the merge to the wrong branch.
                 if WORKTREE_FINISH_MODE == "no-ff":
-                    log.debug(
-                        "Recorded parent %r for worktree %s has no checked-out "
-                        "worktree and finish_mode is no-ff; falling back to "
-                        "topology heuristic.",
-                        parent_branch,
-                        current_wt.path,
+                    return (
+                        False,
+                        f"Cannot merge into '{parent_branch}': no worktree is "
+                        f"checked out to that branch. Create a worktree with "
+                        f"'/worktree {parent_branch}', or check out the branch "
+                        f"in an existing worktree.",
+                        None,
                     )
                 else:
                     # Rebase mode: use main worktree with checkout
@@ -748,12 +751,12 @@ def get_finish_info(
                         needs_checkout = True
                         resolved = True
                     else:
-                        log.debug(
-                            "Recorded parent %r for worktree %s: main worktree "
-                            "not usable (%s); falling back to topology heuristic.",
-                            parent_branch,
-                            current_wt.path,
-                            err,
+                        return (
+                            False,
+                            f"Cannot merge into '{parent_branch}': {err} "
+                            f"Clean up the main worktree or create a worktree "
+                            f"for '{parent_branch}'.",
+                            None,
                         )
             else:
                 # Invariant 4: branch was deleted

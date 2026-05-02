@@ -823,11 +823,12 @@ def test_get_finish_info_ignores_stale_record_for_deleted_branch(
     assert info.base_branch == "main"
 
 
-def test_get_finish_info_ignores_stale_record_when_parent_worktree_gone(
+def test_get_finish_info_uses_checkout_when_parent_worktree_gone_rebase(
     patched_main, tmp_path
 ):
-    """If the recorded parent branch still exists but its worktree was
-    removed, fall back to inference."""
+    """Rebase mode: recorded parent branch exists but worktree removed.
+    The recorded parent is authoritative — use needs_checkout with the
+    main worktree rather than falling back to the topology heuristic."""
     repo = patched_main
     template = f"{tmp_path}/wts/${{repo_name}}/${{branch_name}}"
     with patch("claudechic.features.worktree.git.CONFIG") as cfg:
@@ -844,7 +845,72 @@ def test_get_finish_info_ignores_stale_record_when_parent_worktree_gone(
     _git(repo, "worktree", "remove", str(wt_a))
     assert read_parent_branch(wt_b) == "feat-a"
 
-    success, _, info = get_finish_info(wt_b)
+    # Rebase mode: recorded parent is authoritative, use main worktree
+    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", None):
+        success, _, info = get_finish_info(wt_b)
     assert success and info is not None
-    assert info.base_branch == "main"
+    assert info.base_branch == "feat-a"
     assert info.main_dir == repo
+    assert info.needs_checkout is True
+
+
+def test_get_finish_info_errors_when_parent_worktree_gone_noff(
+    patched_main, tmp_path
+):
+    """No-ff mode: recorded parent branch exists but worktree removed.
+    The recorded parent is authoritative — return an error requiring the
+    user to create a worktree, rather than falling back to heuristic."""
+    repo = patched_main
+    template = f"{tmp_path}/wts/${{repo_name}}/${{branch_name}}"
+    with patch("claudechic.features.worktree.git.CONFIG") as cfg:
+        cfg.get.return_value = {"path_template": template}
+        ok, _, wt_a = start_worktree("feat-a", base="main")
+        assert ok and wt_a is not None
+        ok, _, wt_b = start_worktree("feat-b", parent_cwd=wt_a)
+        assert ok and wt_b is not None
+
+    (wt_b / "x").write_text("x")
+    _git(wt_b, "add", "x")
+    _git(wt_b, "commit", "-m", "feat-b commit")
+
+    _git(repo, "worktree", "remove", str(wt_a))
+    assert read_parent_branch(wt_b) == "feat-a"
+
+    # No-ff mode: error instead of fallback
+    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", "no-ff"):
+        success, msg, info = get_finish_info(wt_b)
+    assert not success
+    assert info is None
+    assert "feat-a" in msg
+    assert "no worktree" in msg.lower()
+
+
+def test_get_finish_info_errors_when_parent_worktree_gone_main_dirty(
+    patched_main, tmp_path
+):
+    """Rebase mode: recorded parent exists, worktree removed, main worktree
+    has uncommitted changes. Returns an error instead of falling back."""
+    repo = patched_main
+    template = f"{tmp_path}/wts/${{repo_name}}/${{branch_name}}"
+    with patch("claudechic.features.worktree.git.CONFIG") as cfg:
+        cfg.get.return_value = {"path_template": template}
+        ok, _, wt_a = start_worktree("feat-a", base="main")
+        assert ok and wt_a is not None
+        ok, _, wt_b = start_worktree("feat-b", parent_cwd=wt_a)
+        assert ok and wt_b is not None
+
+    (wt_b / "x").write_text("x")
+    _git(wt_b, "add", "x")
+    _git(wt_b, "commit", "-m", "feat-b commit")
+
+    _git(repo, "worktree", "remove", str(wt_a))
+
+    # Make main worktree dirty
+    (repo / "dirty").write_text("dirty")
+
+    with patch("claudechic.features.worktree.git.WORKTREE_FINISH_MODE", None):
+        success, msg, info = get_finish_info(wt_b)
+    assert not success
+    assert info is None
+    assert "feat-a" in msg
+    assert "uncommitted" in msg.lower() or "clean" in msg.lower()
