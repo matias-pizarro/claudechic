@@ -63,7 +63,12 @@ from claudechic.agent_manager import AgentManager
 from claudechic.analytics import capture
 from claudechic.config import CONFIG, NEW_INSTALL, save as save_config
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
-from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, parse_context_size, strip_ansi
+from claudechic.formatting import (
+    CONTEXT_USAGE_HEADING,
+    DEFAULT_CONTEXT_WINDOW,
+    parse_context_size,
+    strip_ansi,
+)
 from claudechic.mcp import set_app, create_chic_server
 from claudechic.file_index import FileIndex
 from claudechic.formatting import trim_model_name
@@ -918,8 +923,11 @@ class ChatApp(App):
             )
             return
         except Exception as e:
-            # Catch-all (e.g. SDK "Control request timeout: initialize") so
-            # the user sees a clean message rather than a crashing traceback.
+            # Catch-all for SDK transport/init errors (e.g. "Control request
+            # timeout: initialize", subprocess spawn failure, handshake
+            # timeout). Scoped to initial connect only — no session state
+            # exists yet, so exiting cleanly is always safe. If this masks
+            # a real bug, the analytics capture below logs the full type name.
             await capture(
                 "error_occurred",
                 error_type=type(e).__name__,
@@ -1552,7 +1560,7 @@ class ChatApp(App):
             return
 
         # Use custom widget for context reports
-        if "## Context Usage" in event.content:
+        if CONTEXT_USAGE_HEADING in event.content:
             from claudechic.widgets.reports.context import ContextReport
 
             widget = ContextReport(event.content)

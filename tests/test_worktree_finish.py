@@ -646,6 +646,11 @@ class TestConcurrentGuard:
 
 # ---------------------------------------------------------------------------
 # Parent-tracking tests (from upstream 0.4.22)
+#
+# These tests use a separate fixture chain (real_repo → patched_main) because
+# they need real git worktrees with parent-branch metadata files. The existing
+# git_repo / worktree_repo fixtures above use subprocess mocks. The two chains
+# are independent and cannot be combined without rewriting one set of tests.
 # ---------------------------------------------------------------------------
 
 

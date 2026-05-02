@@ -8,7 +8,6 @@ from enum import Enum, auto
 from pathlib import Path
 
 from claudechic.config import CONFIG
-from claudechic.errors import log
 
 log = logging.getLogger(__name__)
 
@@ -533,6 +532,58 @@ def start_worktree(
         return False, f"Error: {e}", None
 
 
+def _preflight_main_worktree(
+    main_wt_path: Path, target_branch: str
+) -> tuple[bool, str]:
+    """Check that the main worktree is safe to use for a checkout-based merge.
+
+    Returns (ok, error_message). When ok is True, error_message is empty.
+    Used by both explicit base_branch and auto-detect paths to avoid
+    duplicating preflight logic.
+    """
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=main_wt_path,
+        capture_output=True,
+        text=True,
+    )
+    if status.stdout.strip():
+        return (
+            False,
+            "Cannot use main worktree for merge: it has uncommitted changes. "
+            f"Clean it up first or create a worktree for '{target_branch}'.",
+        )
+    merge_head = subprocess.run(
+        ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+        cwd=main_wt_path,
+        capture_output=True,
+        text=True,
+    )
+    if merge_head.returncode == 0:
+        return False, "Cannot use main worktree for merge: a merge is in progress."
+    rebase_head = subprocess.run(
+        ["git", "rev-parse", "--verify", "REBASE_HEAD"],
+        cwd=main_wt_path,
+        capture_output=True,
+        text=True,
+    )
+    if rebase_head.returncode == 0:
+        return False, "Cannot use main worktree for merge: a rebase is in progress."
+    current_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=main_wt_path,
+        capture_output=True,
+        text=True,
+    )
+    if not current_branch.stdout.strip():
+        return (
+            False,
+            "Cannot use main worktree for merge: it is in detached HEAD state. "
+            f"Check out a branch first or create a worktree for '{target_branch}'.",
+        )
+    return True, ""
+
+
 def get_finish_info(
     cwd: Path | None = None, base_branch: str | None = None
 ) -> tuple[bool, str, FinishInfo | None]:
@@ -632,91 +683,93 @@ def get_finish_info(
                 None,
             )
         else:
-            # V7b: Rebase mode fallback -- preflight checks on main worktree
-            main_status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=main_wt_path,
-                capture_output=True,
-                text=True,
-            )
-            if main_status.stdout.strip():
-                return (
-                    False,
-                    "Cannot use main worktree for merge: it has uncommitted changes. "
-                    f"Clean it up first or create a worktree for '{base_branch}'.",
-                    None,
-                )
-            merge_head = subprocess.run(
-                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-                cwd=main_wt_path,
-                capture_output=True,
-                text=True,
-            )
-            if merge_head.returncode == 0:
-                return (
-                    False,
-                    "Cannot use main worktree for merge: a merge is in progress.",
-                    None,
-                )
-            rebase_head = subprocess.run(
-                ["git", "rev-parse", "--verify", "REBASE_HEAD"],
-                cwd=main_wt_path,
-                capture_output=True,
-                text=True,
-            )
-            if rebase_head.returncode == 0:
-                return (
-                    False,
-                    "Cannot use main worktree for merge: a rebase is in progress.",
-                    None,
-                )
-            # Check for detached HEAD (rollback requires a named branch)
-            current_branch = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=main_wt_path,
-                capture_output=True,
-                text=True,
-            )
-            if not current_branch.stdout.strip():
-                return (
-                    False,
-                    "Cannot use main worktree for merge: it is in detached HEAD state. "
-                    f"Check out a branch first or create a worktree for '{base_branch}'.",
-                    None,
-                )
+            # V7b: Rebase mode fallback -- use main worktree with checkout
+            ok, err = _preflight_main_worktree(main_wt_path, base_branch)
+            if not ok:
+                return False, err, None
             parent_dir = main_wt_path
             needs_checkout = True
     else:
-        # Auto-detect parent branch. Prefer the parent recorded at
-        # worktree-creation time (unambiguous) over the commit-topology
-        # heuristic which ties when sibling worktrees share a tip.
+        # Auto-detect parent branch.
+        #
+        # Merge-target invariants (shared with the explicit base_branch path):
+        #   1. Prefer the parent recorded at worktree-creation time (unambiguous)
+        #      over the commit-topology heuristic, which ties when sibling
+        #      worktrees share a tip commit.
+        #   2. If the recorded parent has an active worktree → merge directly.
+        #   3. If the recorded parent exists as a branch but has no worktree:
+        #      - rebase mode: use main worktree with needs_checkout=True
+        #        (mirrors the explicit path's V7b behavior)
+        #      - no-ff mode: fall back to heuristic (no-ff requires a live
+        #        worktree to receive the merge commit)
+        #   4. If the recorded parent branch was deleted → fall back to heuristic.
+        #   5. If no record exists (legacy worktree) → topology heuristic.
+        #   6. Final fallback: main branch.
+        resolved = False
         parent_branch = read_parent_branch(current_wt.path)
         if parent_branch:
-            has_worktree = any(wt.branch == parent_branch for wt in worktrees)
-            if not has_worktree:
+            parent_wt = next(
+                (wt for wt in worktrees if wt.branch == parent_branch), None
+            )
+            if parent_wt:
+                # Invariant 2: recorded parent has an active worktree
+                base_branch = parent_branch
+                parent_dir = parent_wt.path
+                resolved = True
+            elif branch_exists(parent_branch, cwd=cwd):
+                # Invariant 3: branch exists but no worktree
+                if WORKTREE_FINISH_MODE == "no-ff":
+                    log.debug(
+                        "Recorded parent %r for worktree %s has no checked-out "
+                        "worktree and finish_mode is no-ff; falling back to "
+                        "topology heuristic.",
+                        parent_branch,
+                        current_wt.path,
+                    )
+                else:
+                    # Rebase mode: use main worktree with checkout
+                    ok, err = _preflight_main_worktree(main_wt_path, parent_branch)
+                    if ok:
+                        base_branch = parent_branch
+                        parent_dir = main_wt_path
+                        needs_checkout = True
+                        resolved = True
+                    else:
+                        log.debug(
+                            "Recorded parent %r for worktree %s: main worktree "
+                            "not usable (%s); falling back to topology heuristic.",
+                            parent_branch,
+                            current_wt.path,
+                            err,
+                        )
+            else:
+                # Invariant 4: branch was deleted
                 log.debug(
-                    "Recorded parent branch %r for worktree %s has no checked-out "
-                    "worktree; falling back to topology heuristic.",
+                    "Recorded parent branch %r for worktree %s no longer exists; "
+                    "falling back to topology heuristic.",
                     parent_branch,
                     current_wt.path,
                 )
-                parent_branch = None
-        if parent_branch is None:
-            parent_branch = get_parent_branch(current_wt.branch, cwd=cwd)
-            if parent_branch is not None:
+
+        # Invariant 5/6: no record or record was invalidated above
+        if not resolved:
+            fallback = get_parent_branch(current_wt.branch, cwd=cwd)
+            if fallback is not None:
                 log.debug(
-                    "No recorded parent for worktree %s; topology heuristic "
+                    "No usable recorded parent for worktree %s; topology heuristic "
                     "selected %r (may be ambiguous if siblings share a tip).",
                     current_wt.path,
-                    parent_branch,
+                    fallback,
                 )
-        if parent_branch is None:
-            parent_branch = main_wt_info.branch
-        base_branch = parent_branch
+            else:
+                fallback = main_wt_info.branch
+            base_branch = fallback
 
-        # Find the directory for the parent branch
-        parent_wt = next((wt for wt in worktrees if wt.branch == base_branch), None)
-        parent_dir = parent_wt.path if parent_wt else main_wt_path
+            # Find the directory for the parent branch
+            parent_wt = next(
+                (wt for wt in worktrees if wt.branch == base_branch), None
+            )
+            parent_dir = parent_wt.path if parent_wt else main_wt_path
 
     return (
         True,

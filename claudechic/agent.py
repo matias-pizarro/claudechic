@@ -39,7 +39,11 @@ from claude_agent_sdk.types import (
 from claudechic.enums import AgentStatus, PermissionChoice, ToolName
 from claudechic.features.worktree.git import FinishState
 from claudechic.file_index import FileIndex
-from claudechic.formatting import DEFAULT_CONTEXT_WINDOW, TOKEN_REMINDER_PATTERN
+from claudechic.formatting import (
+    CONTEXT_USAGE_HEADING,
+    DEFAULT_CONTEXT_WINDOW,
+    TOKEN_REMINDER_PATTERN,
+)
 from claudechic.permissions import PermissionRequest
 from claudechic.sessions import get_plan_path_for_session
 from claudechic.tasks import create_safe_task
@@ -661,7 +665,7 @@ Key Rules:
                     if (
                         not self._current_text_buffer
                         and self._current_assistant is None
-                        and "## Context Usage" in block.text
+                        and CONTEXT_USAGE_HEADING in block.text
                         and self.observer
                     ):
                         self.observer.on_command_output(self, block.text)
