@@ -659,7 +659,7 @@ class ChatApp(App):
         """Create hooks for plan mode enforcement."""
         # Tools that should be blocked in plan mode (except plan file writes)
         blocked_tools = {"Edit", "Write", "Bash", "NotebookEdit"}
-        plans_dir = str(Path.home() / ".claude" / "plans")
+        plans_dir = Path.home() / ".claude" / "plans"
 
         async def block_mutating_tools(
             hook_input: dict,
@@ -677,8 +677,8 @@ class ChatApp(App):
                     file_path = tool_input.get("file_path", "")
                     if file_path:
                         # Expand ~ and resolve to absolute path
-                        resolved = str(Path(file_path).expanduser().resolve())
-                        if resolved.startswith(plans_dir):
+                        resolved = Path(file_path).expanduser().resolve()
+                        if resolved.is_relative_to(plans_dir):
                             return {}  # Allow it
                 return {
                     "decision": "block",

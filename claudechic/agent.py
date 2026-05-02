@@ -819,7 +819,7 @@ Key Rules:
                 if file_path:
                     plans_dir = Path.home() / ".claude" / "plans"
                     resolved = Path(file_path).expanduser().resolve()
-                    if str(resolved).startswith(str(plans_dir)):
+                    if resolved.is_relative_to(plans_dir):
                         self.plan_path = resolved  # Capture for ExitPlanMode display
                         log.info(f"Auto-approved {tool_name} to plan file (plan mode)")
                         return PermissionResultAllow()

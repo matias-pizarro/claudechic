@@ -237,3 +237,75 @@ class TestPlanSwarmEnforcement:
         )
 
         assert isinstance(result, PermissionResultAllow)
+
+    @pytest.mark.asyncio
+    async def test_planswarm_blocks_sibling_prefix_path(self):
+        """Sibling directories sharing a prefix must NOT pass the plan-file check."""
+        from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
+        from pathlib import Path
+
+        agent = _make_agent()
+        agent.permission_mode = "planSwarm"
+
+        # ~/.claude/plans-evil/ shares the prefix but is NOT inside ~/.claude/plans/
+        evil_path = str(Path.home() / ".claude" / "plans-evil" / "payload.md")
+
+        context = ToolPermissionContext()
+        result = await agent._handle_permission(
+            "Write", {"file_path": evil_path, "content": "malicious"}, context
+        )
+
+        assert isinstance(result, PermissionResultDeny)
+
+
+class TestPlanModeHooks:
+    """Verify the PreToolUse hook path (app.py _plan_mode_hooks) blocks correctly."""
+
+    @pytest.mark.asyncio
+    async def test_hook_blocks_bash_in_plan_mode(self):
+        """PreToolUse hook blocks Bash when SDK reports permission_mode='plan'."""
+        from claudechic.app import ChatApp
+
+        app = ChatApp()
+        hooks = app._plan_mode_hooks()
+        hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+        result = await hook_fn(
+            {"permission_mode": "plan", "tool_name": "Bash", "tool_input": {"command": "echo"}},
+            None, None,
+        )
+        assert result.get("decision") == "block"
+
+    @pytest.mark.asyncio
+    async def test_hook_allows_write_to_plan_file(self):
+        """PreToolUse hook allows Write to ~/.claude/plans/ in plan mode."""
+        from claudechic.app import ChatApp
+        from pathlib import Path
+
+        app = ChatApp()
+        hooks = app._plan_mode_hooks()
+        hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+        plan_file = str(Path.home() / ".claude" / "plans" / "test.md")
+        result = await hook_fn(
+            {"permission_mode": "plan", "tool_name": "Write", "tool_input": {"file_path": plan_file}},
+            None, None,
+        )
+        assert result == {}  # Empty dict = allow
+
+    @pytest.mark.asyncio
+    async def test_hook_blocks_sibling_prefix_path(self):
+        """PreToolUse hook blocks Write to sibling directories sharing plans prefix."""
+        from claudechic.app import ChatApp
+        from pathlib import Path
+
+        app = ChatApp()
+        hooks = app._plan_mode_hooks()
+        hook_fn = hooks["PreToolUse"][0].hooks[0]
+
+        evil_path = str(Path.home() / ".claude" / "plans-evil" / "payload.md")
+        result = await hook_fn(
+            {"permission_mode": "plan", "tool_name": "Write", "tool_input": {"file_path": evil_path}},
+            None, None,
+        )
+        assert result.get("decision") == "block"
