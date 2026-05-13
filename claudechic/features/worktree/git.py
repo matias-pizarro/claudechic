@@ -396,11 +396,14 @@ def start_worktree(
     Returns (success, message, worktree_path).
     """
     if base is not None:
-        base_stripped = base.strip()
-        if not base_stripped:
+        base = base.strip()
+        if not base:
             return False, "Invalid base branch: must not be empty", None
-        if base_stripped.startswith("-"):
+        if base.startswith("-"):
             return False, "Invalid base branch: must not start with '-'", None
+
+    if feature_name.startswith("-"):
+        return False, "Invalid feature name: must not start with '-'", None
 
     try:
         main_wt = get_main_worktree()

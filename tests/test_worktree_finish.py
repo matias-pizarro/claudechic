@@ -274,9 +274,23 @@ class TestBranchExists:
         assert branch_exists("main^", cwd=repo) is False
 
 
+class TestGetLocalBranches:
+    def test_returns_main_branch(self, repo):
+        branches = get_local_branches(cwd=repo)
+        assert "main" in branches
+
+    def test_excludes_specified_branch(self, repo):
+        branches = get_local_branches(cwd=repo, exclude="main")
+        assert "main" not in branches
+
+
 @pytest.mark.usefixtures("patched_main")
 class TestStartWorktreeInjectionGuard:
     def test_dash_prefix_returns_error(self, repo):
         ok, msg, _ = start_worktree("test-feat", base="--evil", parent_cwd=repo)
         assert not ok
         assert "must not start with" in msg.lower() or "invalid" in msg.lower()
+
+    def test_empty_base_returns_error(self, repo):
+        ok, msg, _ = start_worktree("test-feat", base="  ", parent_cwd=repo)
+        assert not ok

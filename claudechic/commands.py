@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from claudechic.app import ChatApp
 
+VALID_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
+
 # Commands that should always run in interactive mode (TUI editors, pagers, etc.)
 INTERACTIVE_COMMANDS = frozenset(
     {
@@ -96,7 +98,7 @@ COMMANDS: list[tuple[str, str, list[str]]] = [
     ("/compactish", "Compact session to reduce context", []),
     ("/usage", "Show API rate limit usage", []),
     ("/model", "Change model", []),
-    ("/effort", "Change effort level (low/medium/high/xhigh/max)", []),
+    ("/effort", "Change effort level (default/low/medium/high/xhigh/max)", []),
     ("/vim", "Toggle vi mode for input", []),
     ("/processes", "Show background processes", []),
     ("/reviews", "Show roborev reviews", []),
@@ -141,7 +143,7 @@ def get_help_commands() -> list[tuple[str, str]]:
         elif name == "/compactish":
             display_name = "/compactish [-n]"
         elif name == "/worktree":
-            display_name = "/worktree <name>"
+            display_name = "/worktree <name> | finish [branch]"
         elif name == "/reviews":
             display_name = "/reviews [job_id]"
         elif name == "/reviewer":
@@ -223,8 +225,7 @@ def handle_command(app: "ChatApp", prompt: str) -> bool:
         else:
             # Direct model selection: /model sonnet
             model = parts[1].lower()
-            valid_models = {"opus", "sonnet", "haiku"}
-            if model not in valid_models:
+            if model not in VALID_MODELS:
                 app.notify(
                     f"Invalid model '{model}'. Use: opus, sonnet, haiku",
                     severity="error",
@@ -504,7 +505,6 @@ def _handle_agent(app: "ChatApp", command: str) -> bool:
     # Create new agent - parse optional --model flag (supports --model=x or --model x)
     cwd: Path | None = None
     model = None
-    valid_models = {"opus", "sonnet", "haiku"}
     args = parts[2:]
     i = 0
     while i < len(args):
@@ -517,7 +517,7 @@ def _handle_agent(app: "ChatApp", command: str) -> bool:
         elif not part.startswith("-") and cwd is None:
             cwd = Path(part)
         i += 1
-    if model and model not in valid_models:
+    if model and model not in VALID_MODELS:
         app.notify(
             f"Invalid model '{model}'. Use: opus, sonnet, haiku", severity="error"
         )
