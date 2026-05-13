@@ -1623,7 +1623,9 @@ class ChatApp(App):
                     proc.stdin.write(text.encode())  # type: ignore[union-attr]
                     proc.stdin.close()  # type: ignore[union-attr]
                     proc.wait(timeout=2)
-                    return True
+                    if proc.returncode == 0:
+                        return True
+                    continue  # non-zero exit (e.g., no DISPLAY), try next tool
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
@@ -1636,6 +1638,7 @@ class ChatApp(App):
         selected = self._safe_get_selected_text()
         if selected:
             if self._try_copy(selected):
+                self._copy_failed_notified = False  # reset on success
                 self.notify("Copied to clipboard")
             elif not self._copy_failed_notified:
                 self._copy_failed_notified = True
